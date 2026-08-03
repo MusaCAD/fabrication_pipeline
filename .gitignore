@@ -1,0 +1,12 @@
+# generated pipeline artifacts
+reports/
+manifests/
+output/
+# harness build tree + binary
+tools/build/
+tools/bin/
+# python
+__pycache__/
+*.pyc
+# per-project reference material (may contain proprietary RES drawings)
+reference/
