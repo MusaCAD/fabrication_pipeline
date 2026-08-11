@@ -17,6 +17,16 @@ co-author line to git commits.
 - SOFTWARE-UPDATE sessions (this chat's lineage): modify the software,
   keep CLAUDE.md + README.md in sync, commit + push to
   git@github.com:MusaCAD/fabrication_pipeline.git (branch main).
+- Per-project DELIVERY: every project states its folder (ask if not given);
+  manifest "deliver_to" copies the final sheet PDFs + print_set there on
+  /export (e.g. /home/pranay/projects/lisocl2/fabrication/). output/ stays
+  a per-run working area only.
+- MusaCAD gaps found while drafting are FILED UPSTREAM (gh issue on
+  MusaCAD/MusaCAD) — see memory musacad-gap-issues; workarounds live in the
+  harness (e.g. --min-lw 0.30 floors hairline text strokes, issue #19).
+- tools/musacad-libs/ holds MusaCAD static libs built OUT-OF-TREE by
+  tools/build.sh (musa_cad tree never modified/rebuilt in place); rebuild
+  after every musa_cad pull so headers and libs never diverge.
 
 ## Fixed paths (do not guess others)
 | What | Path | Access |
@@ -97,7 +107,9 @@ co-author line to git commits.
   default). General notes/tolerance block (IS 2102) stays as in the
   template.
 - SHEET numbering: each DRG NO. is an independent document → "SHEET 1 OF
-  1". "i OF n" ONLY when one part splits across sheets under a single DRG
+  1". Revisions are PER SHEET: part-level "rev" + "revisions" (up to 3
+  rows) override the manifest-level defaults; dia of round features uses a
+  circumference LEADER with %%c (vendor style), not a linear width dim. "i OF n" ONLY when one part splits across sheets under a single DRG
   NO. (manifest "sheet_of": [i, n]). NEVER numbered across the print set.
 - Front-view choice, section positions, DRG NO. numbering, GD&T callouts,
   and fabrication notes are per-part USER DECISIONS at /finalise, elicited

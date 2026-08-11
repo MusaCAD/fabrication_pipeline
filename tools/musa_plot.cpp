@@ -74,6 +74,8 @@ struct Options {
     bool center = true;
     double off_x = 0.0, off_y = 0.0;
     bool lineweights = true;
+    double min_lw_mm = 0.0;   // floor for hairline strokes (stroke-font
+                              // text plots at 0 width upstream)
 };
 
 // Local copy of ui::paint_plot (musa_cad/src/ui/plot.cpp, LGPL-3.0) with one
@@ -82,7 +84,7 @@ struct Options {
 // geometry path; only the stamp block at the end is new.
 void paint_plot_stamped(QPaintDevice& device, const musacad::core::RenderSnapshot& snap,
                         const ui::PlotSpec& spec, core::Vec2 amin, core::Vec2 amax,
-                        const std::vector<Stamp>& stamps) {
+                        const std::vector<Stamp>& stamps, double min_lw_mm = 0.0) {
     constexpr double kMmPerInch = 25.4;
     const double dev_w = device.width();
     const double dev_h = device.height();
@@ -146,6 +148,11 @@ void paint_plot_stamped(QPaintDevice& device, const musacad::core::RenderSnapsho
         double width_px = 0.0;
         if (spec.plot_lineweights && snap.lineweight_display && b.lineweight > 0) {
             width_px = (static_cast<double>(b.lineweight) / 100.0) * dpx / kMmPerInch;
+        }
+        // upstream renders stroke-font text at width 0 regardless of the
+        // entity lineweight; floor hairlines so printed text stays legible
+        if (min_lw_mm > 0.0 && width_px <= 0.0) {
+            width_px = min_lw_mm * dpx / kMmPerInch;
         }
         QPen pen(QColor(c.r, c.g, c.b));
         pen.setWidthF(width_px);
@@ -279,6 +286,10 @@ bool parse_args(int argc, char** argv, Options& o) {
             if (std::sscanf(v, "%lf,%lf", &o.off_x, &o.off_y) != 2) return false;
         } else if (a == "--no-lineweights") {
             o.lineweights = false;
+        } else if (a == "--min-lw") {
+            const char* v = next("--min-lw");
+            if (!v) return false;
+            o.min_lw_mm = std::atof(v);
         } else if (a == "--stamp") {
             const char* v = next("--stamp");
             if (!v) return false;
@@ -399,10 +410,10 @@ int main(int argc, char** argv) {
         spec.fit ? std::min(paintable_w_mm / aw, paintable_h_mm / ah)
                  : spec.scale_num / spec.scale_den;
 
-    if (o.stamps.empty()) {
+    if (o.stamps.empty() && o.min_lw_mm <= 0.0) {
         ui::paint_plot(w, snap, spec, mn, mx);
     } else {
-        paint_plot_stamped(w, snap, spec, mn, mx, o.stamps);
+        paint_plot_stamped(w, snap, spec, mn, mx, o.stamps, o.min_lw_mm);
     }
 
     char scale_str[64];

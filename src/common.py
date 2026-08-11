@@ -93,6 +93,9 @@ def run_musa_plot(musa_file: Path, pdf_out: Path, *, scale: tuple[float, float],
     if stamp is not None:
         cmd += ["--stamp", stamp[0] + "," +
                 ",".join(f"{v:.6f}" for v in stamp[1:])]
+    # floor hairline strokes (stroke-font text plots at width 0 upstream —
+    # vendor print legibility; see musacad-gap-issues)
+    cmd += ["--min-lw", "0.30"]
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     line = next((l for l in proc.stdout.splitlines()
                  if l.startswith("[musa_plot] ok")), None)

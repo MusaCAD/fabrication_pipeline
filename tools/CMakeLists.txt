@@ -9,7 +9,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Read-only references into the MusaCAD dev tree: public headers + prebuilt
 # release static libraries. Nothing in musa_cad is modified or rebuilt here.
 set(MUSACAD_ROOT "/home/pranay/projects/musa_cad" CACHE PATH "MusaCAD source tree")
-set(MUSACAD_BUILD "${MUSACAD_ROOT}/build/release" CACHE PATH "MusaCAD release build")
+set(MUSACAD_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/musacad-libs" CACHE PATH
+    "MusaCAD libs built out-of-tree by tools/build.sh (musa_cad stays untouched)")
 
 find_package(Qt6 REQUIRED COMPONENTS Gui Widgets)
 

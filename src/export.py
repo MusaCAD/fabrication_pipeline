@@ -63,6 +63,15 @@ def main() -> None:
     if r.returncode != 0:
         die(f"pdfunite failed: {r.stderr}")
     print(f"print set: {merged}  ({len(exported)} sheets)")
+    dest = read_json(OUTPUT_MUSA_DIR / "sheets.json").get("deliver_to")
+    if dest:
+        import shutil
+        d = Path(dest)
+        d.mkdir(parents=True, exist_ok=True)
+        for sheet in exported:
+            shutil.copy2(sheet["pdf"], d)
+        shutil.copy2(merged, d)
+        print(f"delivered {len(exported)} sheets + print_set -> {d}")
     write_json(OUTPUT_PDF_DIR / "export.json",
                {"sheets": exported, "print_set": str(merged)})
 

@@ -10,3 +10,4 @@ __pycache__/
 *.pyc
 # per-project reference material (may contain proprietary RES drawings)
 reference/
+tools/musacad-libs/

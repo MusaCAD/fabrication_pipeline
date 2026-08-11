@@ -1937,7 +1937,7 @@ def titleblock_replacements(m, sheet):
     return {
         "SCALE : 1:1": f"SCALE : {label}",
         "SHEET 9": f"SHEET {si} OF {sn}",
-        "00": m.get("rev", "00"),
+        "00": sheet.get("rev", m.get("rev", "00")),
         "DESCRIPTION: \nCONNECTING CHAMBER":
             f"DESCRIPTION: \n{sheet['description']}",
         "DRG. NO.     \nRES-GB-350T-CC-01":
@@ -1964,11 +1964,12 @@ REV_COLS = (80.72697303959285, 281.445892556294, 557.502500627168,
 REV_ROW_YS = (1587.9783693373156, 1559.5849982286345, 1531.1916271199552)
 
 
-def rev_row_positional(m=None):
-    """Fill revision-table rows from manifest "revisions" (chronological,
-    row 1 first); default: a single INITIAL RELEASE row dated today."""
+def rev_row_positional(m=None, sheet=None):
+    """Fill revision-table rows from the sheet's "revisions" (falling back
+    to the manifest-level list); default: one INITIAL RELEASE row."""
     from common import today
-    revs = (m or {}).get("revisions") or [
+    revs = ((sheet or {}).get("revisions")
+            or (m or {}).get("revisions")) or [
         {"rev": "00", "desc": "INITIAL RELEASE", "by": "Er. P. PRANAY",
          "date": None}]
     out = []
@@ -2005,10 +2006,17 @@ def _view_label(ctx, layout, job, off, textstr):
     cx = (mn[0] + mx[0]) / 2 + off[0]
     cands = [(cx - tw / 2, mn[1] + off[1] - ctx.mm(d) - h)
              for d in (8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0)]
+    # fallback: beside the view (tight sheets where the below-band is full)
+    cands += [(mx[0] + off[0] + ctx.mm(d),
+               (mn[1] + mx[1]) / 2 + off[1] - h / 2)
+              for d in (8.0, 14.0)]
+    cands += [(mn[0] + off[0] - tw - ctx.mm(d),
+               (mn[1] + mx[1]) / 2 + off[1] - h / 2)
+              for d in (8.0, 14.0)]
     r = layout.place(cands, tw, h, f"label-{textstr}")
     if r is None:
         return []
-    return [mw.mtext((cx, r[3]), textstr, h, attach=1)]
+    return [mw.mtext((r[0] + tw / 2, r[3]), textstr, h, attach=1)]
 
 
 
@@ -2214,7 +2222,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
                     f"{second_name}-view")
 
     replaced = ctx.add_template(titleblock_replacements(m, part),
-                                positional=rev_row_positional(m))
+                                positional=rev_row_positional(m, part))
     wkg = part_weight_kg(read_json(Path(m["_analysis_path"])), part["file"])
     ctx.entities += mw.parts_row_records(ctx, 0, {
         "pno": disp_no(part["part_id"]), "description": part["description"],
@@ -2283,9 +2291,10 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
                            suppress=suppress.get("front", ()))
     ctx.entities += recs
     dim_rects.update({("front", k): v for k, v in rr.items()})
-    if section:
+    if section and part.get("section_extent_dims", True):
         # shared-axis views don't repeat the shared extent dim: below shares
         # width with the front view, right/left share height
+        # (opt-out: a circular section fully covered by its dia leader)
         sec_h_side = "left" if projection != "right" else "right"
         ctx.entities += dim_extents(ctx, layout, section, offs["section"],
                                     width_side="bottom",
@@ -2385,7 +2394,7 @@ def build_assembly_sheet(m, proj):
     layout.claim((ax0, ay0, ax1, ay0 + rows_h), "parts-rows", "reserved")
     _claim_view(layout, job, offs["front"], "assembly-view")
     replaced = ctx.add_template(titleblock_replacements(m, asm),
-                                positional=rev_row_positional(m))
+                                positional=rev_row_positional(m, asm))
     analysis = read_json(Path(m["_analysis_path"]))
     for row, part in enumerate(m["parts"]):
         wkg = part_weight_kg(analysis, part["file"])
@@ -2475,7 +2484,8 @@ def main() -> None:
         print(f"sheet {total}/{total}: {asm_out.name}  scale "
               f"{m['assembly_sheet']['scale']}")
     write_json(OUTPUT_MUSA_DIR / "sheets.json",
-               {"manifest": str(man_path), "sheets": sheets})
+               {"manifest": str(man_path), "sheets": sheets,
+                "deliver_to": m.get("deliver_to")})
     print(f"wrote {len(sheets)} sheets + output/musa/sheets.json")
     if problems:
         die("layout unresolved (never ship an overlapping sheet):\n  "
