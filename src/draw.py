@@ -1928,22 +1928,27 @@ def disp_no(pid) -> str:
 
 
 
-REV_ROW_Y = 1587.9783693373156
-REV_ROW = [  # (x, new) for the "-" placeholders of revision-table row 1
-    (80.72697303959285, "00"),
-    (281.445892556294, "INITIAL RELEASE"),
-    (557.502500627168, "Er. P. PRANAY"),
-    (646.231785341799, "-"),
-    (734.961070056459, None),   # DATE cell - filled at build time
-]
+# revision-table cell columns (REV, DESCRIPTION, REVISED BY, APPROVED BY,
+# DATE) and the three row baselines of the template's "-" placeholders
+REV_COLS = (80.72697303959285, 281.445892556294, 557.502500627168,
+            646.231785341799, 734.961070056459)
+REV_ROW_YS = (1587.9783693373156, 1559.5849982286345, 1531.1916271199552)
 
 
-def rev_row_positional():
+def rev_row_positional(m=None):
+    """Fill revision-table rows from manifest "revisions" (chronological,
+    row 1 first); default: a single INITIAL RELEASE row dated today."""
     from common import today
+    revs = (m or {}).get("revisions") or [
+        {"rev": "00", "desc": "INITIAL RELEASE", "by": "Er. P. PRANAY",
+         "date": None}]
     out = []
-    for x, val in REV_ROW:
-        out.append({"content": "-", "x": x, "y": REV_ROW_Y,
-                    "new": val if val is not None else today()})
+    for row_y, rv in zip(REV_ROW_YS, revs[:len(REV_ROW_YS)]):
+        vals = (rv.get("rev", "-"), rv.get("desc", "-"),
+                rv.get("by", "Er. P. PRANAY"), rv.get("approved", "-"),
+                rv.get("date") or today())
+        for x, val in zip(REV_COLS, vals):
+            out.append({"content": "-", "x": x, "y": row_y, "new": val})
     return out
 
 
@@ -2180,7 +2185,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
                     f"{second_name}-view")
 
     replaced = ctx.add_template(titleblock_replacements(m, part),
-                                positional=rev_row_positional())
+                                positional=rev_row_positional(m))
     wkg = part_weight_kg(read_json(Path(m["_analysis_path"])), part["file"])
     ctx.entities += mw.parts_row_records(ctx, 0, {
         "pno": disp_no(part["part_id"]), "description": part["description"],
@@ -2351,7 +2356,7 @@ def build_assembly_sheet(m, proj):
     layout.claim((ax0, ay0, ax1, ay0 + rows_h), "parts-rows", "reserved")
     _claim_view(layout, job, offs["front"], "assembly-view")
     replaced = ctx.add_template(titleblock_replacements(m, asm),
-                                positional=rev_row_positional())
+                                positional=rev_row_positional(m))
     analysis = read_json(Path(m["_analysis_path"]))
     for row, part in enumerate(m["parts"]):
         wkg = part_weight_kg(analysis, part["file"])
