@@ -136,8 +136,12 @@ Subagents: model-analyst (FreeCAD interrogation), draftsman (.musa
 composition/rework), qa-checker (verify PDFs after every /export).
 
 ## Ground rules
-- NEVER modify /home/pranay/projects/lisocl2/ or /home/pranay/projects/
-  musa_cad/ — read-only inputs. Never doc.save() a model document.
+- READ-ONLY scope (precise): existing MODEL documents under
+  /home/pranay/projects/lisocl2/extrusion_jig_x3/ and the musa_cad source
+  tree — never modify them; never doc.save() an existing model. SANCTIONED
+  writes inside lisocl2/ (user-directed): NEW part files we create (e.g.
+  spacer_5mm/spacer_10mm/press_tool, ours to regenerate) and the
+  per-project delivery folder (e.g. lisocl2/fabrication/).
 - /judge reports model issues; the user fixes models in FreeCAD themself.
 - Out of scope (Round 0): 3D-print workflows, CAM/G-code, BOM costing,
   other model folders. GD&T IS in scope (amended at /finalise, Round 0):
