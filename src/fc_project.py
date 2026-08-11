@@ -168,16 +168,22 @@ def project_shape(shape, view_dir, up):
 
 
 def section_cut(shape, plane_point, plane_normal):
-    """Remove material on the +normal side (toward viewer) with a huge box."""
+    """Remove material on the +normal side (toward viewer) with a half-space
+    slab: local (-size/2..size/2)^2 laterally x (0..size) along the normal,
+    so it spans the FULL part extent with margin in both lateral axes.
+    NB: assigning Shape.Placement REPLACES the shape's location (it does not
+    compose with a prior translate()), so the lateral centering must be
+    baked into the placement base — a corner-anchored box would cut only a
+    quadrant, leaving phantom tool-wall edges through the part center."""
     n = FreeCAD.Vector(*plane_normal)
     n.normalize()
     pt = FreeCAD.Vector(*plane_point)
     bb = shape.BoundBox
     size = 4.0 * max(bb.XLength, bb.YLength, bb.ZLength, 1.0)
     box = Part.makeBox(size, size, size)
-    box.translate(FreeCAD.Vector(-size / 2, -size / 2, 0.0))
     rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), n)
-    box.Placement = FreeCAD.Placement(pt, rot)
+    base = pt + rot.multVec(FreeCAD.Vector(-size / 2, -size / 2, 0.0))
+    box.Placement = FreeCAD.Placement(base, rot)
     return shape.cut(box)
 
 
@@ -304,11 +310,16 @@ def run_job(job):
         anchors = []
         for name, label, sh in instances:
             bb = sh.transformGeometry(m).BoundBox
+            # the instance projected ALONE: lets the sheet decide which of
+            # the assembly's visible edges belong to this part only, so a
+            # balloon can land on an edge that is unambiguously its own
+            ivis, _ = project_shape(sh, view_dir, up)
             anchors.append({"name": name, "label": label,
                             "center": [round((bb.XMin + bb.XMax) / 2, 6),
                                        round((bb.YMin + bb.YMax) / 2, 6)],
                             "bbox": [round(bb.XMin, 6), round(bb.YMin, 6),
-                                     round(bb.XMax, 6), round(bb.YMax, 6)]})
+                                     round(bb.XMax, 6), round(bb.YMax, 6)],
+                            "edges": ivis})
         out["instances"] = anchors
     return out
 

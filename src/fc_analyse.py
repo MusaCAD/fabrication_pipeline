@@ -145,12 +145,14 @@ def analyse_assembly(path):
 
 def main():
     args = json.loads(os.environ["FABPIPE_ARGS"])
-    model_dir, assembly_name, out_path = args
+    model_dir, assembly_name, out_path = args[:3]
+    extra_parts = args[3:]          # standalone parts (not in the assembly)
     asm_path = os.path.join(model_dir, assembly_name)
     result = {"model_dir": model_dir, "assembly": analyse_assembly(asm_path)}
     part_files = sorted({i["target_file"] for i in
                          result["assembly"]["instances"]
                          if i.get("target_file")})
+    part_files += [f for f in extra_parts if f not in part_files]
     result["parts"] = [analyse_part(f) for f in part_files]
     fcv = FreeCAD.Version()
     result["freecad_version"] = ".".join(fcv[:3])

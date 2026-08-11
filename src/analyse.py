@@ -66,17 +66,24 @@ def to_markdown(a: dict) -> str:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        die("usage: analyse.py <model_dir> [assembly.FCStd]")
-    model_dir = Path(sys.argv[1]).resolve()
+    argv = list(sys.argv[1:])
+    extra = []
+    if "--parts" in argv:
+        i = argv.index("--parts")
+        extra = [str(Path(f).resolve()) for f in argv[i + 1:]]
+        argv = argv[:i]
+    if not argv:
+        die("usage: analyse.py <model_dir> [assembly.FCStd] "
+            "[--parts f.FCStd ...]")
+    model_dir = Path(argv[0]).resolve()
     if not model_dir.is_dir():
         die(f"not a directory: {model_dir}")
-    asm = (model_dir / sys.argv[2]) if len(sys.argv) > 2 \
+    asm = (model_dir / argv[1]) if len(argv) > 1 \
         else find_assembly(model_dir)
 
     REPORTS_DIR.mkdir(exist_ok=True)
     out_json = REPORTS_DIR / "analysis.json"
-    run_freecad(FC_SCRIPT, str(model_dir), asm.name, str(out_json),
+    run_freecad(FC_SCRIPT, str(model_dir), asm.name, str(out_json), *extra,
                 timeout=600)
     data = read_json(out_json)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

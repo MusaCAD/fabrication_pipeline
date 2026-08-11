@@ -139,8 +139,9 @@ def lock(draft_path: Path) -> None:
         if len(num_den) != 2 or not all(s.strip().isdigit() for s in num_den):
             problems.append(f"{part.get('file')}: bad scale "
                             f"{part.get('scale')!r} (want N:D)")
-    asm = m.get("assembly_sheet", {})
-    if str(asm.get("drg_no", "TBD")).startswith("TBD"):
+    asm = m.get("assembly_sheet") or {}
+    if asm and asm.get("enabled", True) and \
+            str(asm.get("drg_no", "TBD")).startswith("TBD"):
         problems.append("assembly_sheet.drg_no undecided")
     if problems:
         die("cannot lock:\n  - " + "\n  - ".join(problems))

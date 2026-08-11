@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import subprocess
 import sys
 from datetime import date
@@ -112,6 +113,20 @@ def write_json(path: Path, data) -> None:
 
 def read_json(path: Path):
     return json.loads(path.read_text())
+
+
+def png_size(path: Path) -> tuple[int, int] | None:
+    """(width, height) straight out of a PNG's IHDR — stdlib only. The stamp
+    rect must letterbox the REAL image; never assume it is square."""
+    try:
+        head = path.read_bytes()[:24]
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" \
+            or head[12:16] != b"IHDR":
+        return None
+    w, h = struct.unpack(">II", head[16:24])
+    return (w, h) if w and h else None
 
 
 def latest(path_glob: str, base: Path) -> Path | None:
