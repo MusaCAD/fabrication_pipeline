@@ -147,7 +147,36 @@ def run_projections(m: dict, analysis: dict) -> dict:
 
 # ------------------------------------------------------------- placement
 
+def _prim_key(pr, ox, oy):
+    r3 = lambda v: round(v, 3)
+    if pr["t"] == "seg":
+        pts = sorted(((r3(pr["a"][0]), r3(pr["a"][1])),
+                      (r3(pr["b"][0]), r3(pr["b"][1]))))
+        return ("seg", tuple(pts))
+    if pr["t"] == "circle":
+        return ("circle", r3(pr["c"][0]), r3(pr["c"][1]), r3(pr["r"]))
+    if pr["t"] == "arc":
+        return ("arc", r3(pr["c"][0]), r3(pr["c"][1]), r3(pr["r"]),
+                r3(pr["a0"]), r3(pr["a1"]))
+    pts = [(r3(x), r3(y)) for x, y in pr["pts"]]
+    rev = list(reversed(pts))
+    return ("poly", tuple(min(pts, rev)))
+
+
 def emit_prims(ctx: mw.SheetContext, prims, offset, props=mw.P):
+    """Emit projected primitives, deduping coincident duplicates (HLR often
+    projects a feature's top and bottom edges onto the SAME segment in
+    opposite directions — overlapping dashed strokes phase-fill each
+    other's gaps and print as solid lines)."""
+    seen = set()
+    deduped = []
+    for pr in prims:
+        k = _prim_key(pr, *offset)
+        if k in seen:
+            continue
+        seen.add(k)
+        deduped.append(pr)
+    prims = deduped
     ox, oy = offset
     for pr in prims:
         if pr["t"] == "seg":

@@ -291,7 +291,12 @@ class SheetContext:
         return used
 
     def render(self, units: str = "mm") -> str:
-        head = ["MUSACAD 14", f"UNITS {units}", "CURRENT 0", "LTSCALE 1",
+        # LTSCALE scaled so dash patterns print at CONSTANT paper size on
+        # every sheet scale (Hidden 2.5-unit dash -> 2 mm printed): without
+        # this, short hidden edges (< one dash) render as solid lines
+        lts = 0.8 * self.den / self.num
+        head = ["MUSACAD 14", f"UNITS {units}", "CURRENT 0",
+                f"LTSCALE {lts}",
                 "LAYER 255 255 255 0 25 1 0 0 0"]
         styles = self.dimstyles or [dimstyle(self.mm(3.0), self.mm(2.5))]
         return "\n".join(head + styles + self.entities + ["END"]) + "\n"
