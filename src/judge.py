@@ -33,7 +33,7 @@ def best_scale(w: float, h: float) -> tuple[int, int] | None:
     return None
 
 
-def judge_part(part: dict) -> dict:
+def judge_part(part: dict, generated: str = "") -> dict:
     findings, level = [], "PASS"
 
     def flag(sev: str, msg: str):
@@ -57,10 +57,20 @@ def judge_part(part: dict) -> dict:
                      "MATERIAL will need a value at /finalise")
     dims_total = sum(len(s["dimensional"]) for s in part["sketches"])
     if dims_total == 0:
-        flag("FAIL", "no dimensional sketch constraints — the model carries "
-                     "no design dimensions at all")
+        if generated:
+            # A script-built model holds its design intent in the generator,
+            # not in Sketcher: every coordinate comes from a named parameter,
+            # and editing a sketch by hand is not how the part changes. The
+            # check still runs and still reports, because a drawing taken
+            # from a generated model is only as good as that generator.
+            flag("WARN", "no dimensional sketch constraints — declared "
+                         f"script-generated ({generated}), so the design "
+                         "dimensions live in the generator, not the sketches")
+        else:
+            flag("FAIL", "no dimensional sketch constraints — the model "
+                         "carries no design dimensions at all")
     for s in part["sketches"]:
-        if not s["fully_constrained"]:
+        if not s["fully_constrained"] and not generated:
             flag("WARN", f"sketch {s['label']} not fully constrained "
                          "(geometry may drift on edit)")
         if not s["solver_ok"]:
@@ -85,27 +95,37 @@ def judge_part(part: dict) -> dict:
 
 
 def main() -> None:
+    # --generated <source>: these models are built by a script, named here so
+    # the report says which one. It changes the sketch-constraint findings
+    # and nothing else; every other finding keeps its severity.
+    generated = ""
+    if "--generated" in sys.argv:
+        i = sys.argv.index("--generated")
+        generated = sys.argv[i + 1] if len(sys.argv) > i + 1 else "generator"
     src = REPORTS_DIR / "analysis.json"
     if not src.exists():
         die("no reports/analysis.json — run /analyse first")
     a = read_json(src)
     asm = a["assembly"]
-    parts = [judge_part(p) for p in a["parts"]]
+    parts = [judge_part(p, generated) for p in a["parts"]]
     asm_findings = []
-    for i in asm["instances"]:
+    # a standalone part pack has no assembly document, so none of the
+    # assembly checks below have anything to say about it
+    for i in (asm["instances"] if asm.get("file") else []):
         if i.get("broken"):
             asm_findings.append({"severity": "FAIL",
                                  "message": f"broken link {i['label']}"})
     for issue in asm["issues"]:
         asm_findings.append({"severity": "FAIL", "message": issue})
-    ungrounded = not any(j.get("grounded") for j in asm["joints"])
+    ungrounded = bool(asm.get("file")) and \
+        not any(j.get("grounded") for j in asm["joints"])
     if ungrounded:
         asm_findings.append({"severity": "WARN",
                              "message": "no grounded joint — assembly may "
                                         "be under-constrained"})
     linked = {i["name"] for j in asm["joints"] for i_name in j["connects"]
               for i in asm["instances"] if i["name"] == i_name}
-    loose = [i["label"] for i in asm["instances"]
+    loose = [i["label"] for i in (asm["instances"] if asm.get("file") else [])
              if not i.get("broken") and i["name"] not in
              {n for j in asm["joints"] for n in j["connects"]}]
     if loose:
@@ -122,10 +142,14 @@ def main() -> None:
             overall = "WARN"
 
     verdict = {"overall": overall, "assembly_findings": asm_findings,
-               "parts": parts}
+               "parts": parts, "generated": generated}
     write_json(REPORTS_DIR / "judgement.json", verdict)
 
     lines = [f"# Judgement — overall: **{overall}**", ""]
+    if generated:
+        lines += [f"> Models declared script-generated: `{generated}`. "
+                  "Sketch-constraint findings are reported as WARN because "
+                  "the design dimensions live in that generator.", ""]
     if asm_findings:
         lines.append("## Assembly")
         lines += [f"- [{f['severity']}] {f['message']}" for f in asm_findings]

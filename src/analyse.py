@@ -31,6 +31,12 @@ def find_assembly(model_dir: Path) -> Path:
 
 def to_markdown(a: dict) -> str:
     asm = a["assembly"]
+    if not asm.get("file"):
+        lines = [f"# Analysis — {len(a['parts'])} standalone parts",
+                 f"- model dir: `{a['model_dir']}`",
+                 f"- FreeCAD: {a['freecad_version']}  |  no assembly document",
+                 ""]
+        return "\n".join(lines + part_markdown(a)) + "\n"
     lines = [f"# Analysis — {Path(asm['file']).name}",
              f"- model dir: `{a['model_dir']}`",
              f"- FreeCAD: {a['freecad_version']}  |  workbench: {asm['workbench']}",
@@ -43,7 +49,15 @@ def to_markdown(a: dict) -> str:
     lines += ["", "## Joints"]
     for j in asm["joints"]:
         lines.append(f"- {j['label']}: {j['type']} on {', '.join(j['connects'])}")
-    lines += ["", "## Parts"]
+    lines += part_markdown(a)
+    if asm["issues"]:
+        lines += ["", "## Assembly issues"]
+        lines += [f"- {i}" for i in asm["issues"]]
+    return "\n".join(lines) + "\n"
+
+
+def part_markdown(a: dict) -> list:
+    lines = ["", "## Parts"]
     for part in a["parts"]:
         lines.append(f"### {Path(part['file']).name}")
         for b in part["bodies"]:
@@ -57,17 +71,22 @@ def to_markdown(a: dict) -> str:
             lines.append(f"  - sketch {sk['label']}: {sk['constraints']} "
                          f"constraints, {len(sk['dimensional'])} dimensional"
                          + flag)
+        flat = part.get("flat")
+        if flat:
+            lines.append(f"  - sheet metal: blank {flat['blank_mm'][0]:g} x "
+                         f"{flat['blank_mm'][1]:g} x {flat['thickness_mm']:g} "
+                         f"mm, {len(part.get('bends', []))} bend(s)")
         for issue in part["issues"]:
             lines.append(f"  - ISSUE: {issue}")
-    if asm["issues"]:
-        lines += ["", "## Assembly issues"]
-        lines += [f"- {i}" for i in asm["issues"]]
-    return "\n".join(lines) + "\n"
+    return lines
 
 
 def main() -> None:
     argv = list(sys.argv[1:])
     extra = []
+    standalone = "--no-assembly" in argv
+    if standalone:
+        argv.remove("--no-assembly")
     if "--parts" in argv:
         i = argv.index("--parts")
         extra = [str(Path(f).resolve()) for f in argv[i + 1:]]
@@ -78,13 +97,20 @@ def main() -> None:
     model_dir = Path(argv[0]).resolve()
     if not model_dir.is_dir():
         die(f"not a directory: {model_dir}")
-    asm = (model_dir / argv[1]) if len(argv) > 1 \
-        else find_assembly(model_dir)
+    if standalone:
+        # a parts-only pack: there is no assembly sheet, and opening a large
+        # assembly would drag in every part it links, not just the ones asked
+        if not extra:
+            die("--no-assembly needs --parts <file> ...")
+        asm = Path("")
+    else:
+        asm = (model_dir / argv[1]) if len(argv) > 1 \
+            else find_assembly(model_dir)
 
     REPORTS_DIR.mkdir(exist_ok=True)
     out_json = REPORTS_DIR / "analysis.json"
     run_freecad(FC_SCRIPT, str(model_dir), asm.name, str(out_json), *extra,
-                timeout=600)
+                timeout=1800)
     data = read_json(out_json)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     write_json(REPORTS_DIR / f"analysis_{stamp}.json", data)

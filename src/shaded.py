@@ -75,7 +75,7 @@ def main() -> None:
     SHADED_DIR.mkdir(parents=True, exist_ok=True)
     jobs = [{"file": part["file"], "assembly": False,
              "out": str(SHADED_DIR / f"{part['part_id']}.stl")}
-            for part in m["parts"]]
+            for part in m["parts"] if part.get("sheet", True)]
     if m.get("assembly_sheet") and m["assembly_sheet"].get("enabled", True):
         jobs.append({"file": m["assembly_file"], "assembly": True,
                      "out": str(SHADED_DIR / "assembly.stl")})

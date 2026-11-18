@@ -17,6 +17,9 @@ import Mesh
 import MeshPart
 import Part
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fc_shapes  # noqa: E402  (needs the path above)
+
 
 def p(*a):
     print(*a, flush=True)
@@ -29,8 +32,10 @@ def shape_of(job):
                   if o.TypeId == "App::Link" and o.LinkedObject is not None
                   and not o.Shape.isNull()]
         return Part.makeCompound(shapes)
-    return next(o.Shape for o in doc.Objects
-                if o.TypeId == "PartDesign::Body" and not o.Shape.isNull())
+    tip, _flat = fc_shapes.tips(doc)
+    if tip is None:
+        raise ValueError("no solid body in " + path)
+    return tip.Shape
 
 
 def main():

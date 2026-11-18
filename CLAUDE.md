@@ -98,9 +98,43 @@ co-author line to git commits.
   draw.py section_job + cutting_plane together if first-angle is requested.
   No extra views — features invisible in both views are flagged to the
   user, never silently added.
+- ANGULAR REFERENCES (for less technical vendors): manifest part "angle_refs"
+  {"rays": [{angle, r0, r1, text}], "zero": {at, text}, "ccw": {r, a0, a1, at,
+  lines}} draws a labelled centre line through each angularly placed feature,
+  a "0%%d REF" datum label and a CCW direction arc (draw.py place_angle_refs,
+  collision-checked against view ink + claims like every annotation).
 - Per assembly: ONE sheet — front view (section only if needed), P.NO.
   balloon leaders per instance, parts table filled (P.NO., DESCRIPTION,
   QTY, DRG NO., MATERIAL, SIZE, WEIGHT, REMARKS; "-" if unknown).
+- THREADS: model the REAL helix in the .FCStd (PartDesign::SubtractiveHelix,
+  ISO 60%%d V truncated to d3 = d - 1.2269*P) so the model and the shaded
+  pictorial are a true twin — but NEVER project it: a 20+ turn helix
+  scribbles the view. Orthographic views project the thread BLANK via
+  manifest part `"project_feature": "<feature name>"` (fc_project walks back
+  to that feature; assembly links follow the same map), and the thread is
+  drawn by ISO 6410 convention from manifest `"threads"` — a root line at
+  the minor dia over the threaded span, `end_line` only where no diameter
+  step already draws that edge. Section hatch runs out to the crest, so the
+  root lines simply overlay it. At M2.5/1:1 the 0.24 mm crest-root gap is
+  under the 0.30 mm stroke floor and prints as one heavier band: normal for
+  small threads — the DESIGNATION carries the spec, not the line-work.
+- BOUGHT-OUT items (standard fasteners etc.): manifest part `"sheet": false`
+  — the part keeps its P.NO. row and assembly balloon but gets no sheet of
+  its own, and its DRG NO. carries the standard (e.g. "IS 1364-3"). Nobody
+  fabricates it, so nothing is drawn for it. WEIGHT falls back to grams
+  below 0.01 kg (small hardware would otherwise print "0.00 kg").
+- SHEET METAL and non-PartDesign parts: a part document's part is its TIP
+  solid (fc_shapes.tips — PartDesign bodies, SheetMetal feature chains and
+  plain Part::Feature solids all qualify; containers and origins never do).
+  A `*_Flat` twin marks sheet metal: the vendor cuts a blank and bends it,
+  so the part gets a flat-pattern view (developed blank + bend table,
+  draw.py bend_rows) from manifest `"flat_pattern"` {object, view,
+  thickness_mm, blank_mm, bends}. A flat pattern with no bend features is
+  rejected at /finalise — a blank with no bend table is just a flat part,
+  which takes a plain two-view sheet.
+- STANDALONE PARTS: `/analyse <dir> --no-assembly` (and `--parts <files>`)
+  analyses a part pack with no assembly document; the analysis carries an
+  empty assembly stub and /judge skips every assembly-level check.
 - Round 0 output: 4 part sheets + 1 assembly sheet + merged print set.
 - Title block per sheet: DESCRIPTION, DRG NO., SCALE, REV (00), SHEET
   field, dates DD-MM-YY, DESIGNED/DRAWN = "Er. P. PRANAY" (template

@@ -33,6 +33,9 @@ import FreeCAD
 import Part
 import TechDraw
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fc_shapes  # noqa: E402  (needs the path above)
+
 EPS = 1e-6
 
 
@@ -140,8 +143,17 @@ def _fit_closed_circle(pl):
     r = math.sqrt(rr)
     if r < 0.05:
         return None
+    # A real full circle spans its own diameter. A shallow chain of arcs --
+    # a cast corner radius, a rounded slot end -- fits some enormous circle
+    # whose centre is off the part, and a tolerance that scaled with r used
+    # to wave those through: at r = 350 the gate was 3.5 mm, so a 290 mm
+    # housing outline passed and drew a circle twice the size of the sheet.
+    w = max(x for x, _ in pts) - min(x for x, _ in pts)
+    h = max(y for _, y in pts) - min(y for _, y in pts)
+    if max(w, h) < 1.6 * r:
+        return None
     if max(abs(math.hypot(x - cx, y - cy) - r) for x, y in pts) > \
-            0.01 * r + 0.01:
+            min(0.01 * r + 0.01, 0.05):
         return None
     return {"t": "circle", "c": [cx, cy], "r": r}
 
@@ -275,19 +287,53 @@ def bounds_of(prims):
 def load_shape(job):
     doc = FreeCAD.openDocument(job["file"])
     if job.get("assembly"):
+        # per-target thread-blank overrides, keyed by the part file
+        blanks = job.get("link_features") or {}
         shapes, inst = [], []
         for obj in doc.Objects:
             if obj.TypeId == "App::Link" and obj.LinkedObject is not None:
                 sh = obj.Shape  # placed shape
+                lo = obj.LinkedObject
+                feat = blanks.get(getattr(lo.Document, "FileName", None))
+                if feat:
+                    src = next((o for o in lo.Document.Objects
+                                if o.Name == feat or o.Label == feat), None)
+                    if src is None or src.Shape.isNull():
+                        raise ValueError(f"no feature {feat!r} in "
+                                         f"{lo.Document.FileName}")
+                    sh = src.Shape.copy()
+                    sh.Placement = obj.Placement.multiply(sh.Placement)
                 if not sh.isNull():
                     shapes.append(sh)
                     inst.append((obj.Name, obj.Label, sh))
         comp = Part.makeCompound([s for s in shapes])
         return comp, inst
-    for obj in doc.Objects:
-        if obj.TypeId == "PartDesign::Body" and not obj.Shape.isNull():
-            return obj.Shape, None
-    raise ValueError("no solid body in " + job["file"])
+    feat = job.get("project_feature")
+    if feat:
+        # Draw an EARLIER feature than the body tip. Modelled threads are the
+        # reason this exists: the solid must carry the real helix, but a
+        # projected 60-turn helix is a scribble — drawings show the thread
+        # blank plus the ISO 6410 convention lines instead.
+        for obj in doc.Objects:
+            if obj.Name == feat or obj.Label == feat:
+                if obj.Shape.isNull():
+                    raise ValueError(f"project_feature {feat} has no shape")
+                return obj.Shape, None
+        raise ValueError(f"no feature {feat!r} in " + job["file"])
+    want = job.get("project_object")
+    if want:
+        # the flat pattern is a separate solid in the same document, so the
+        # developed view is an ordinary projection of a named object
+        for obj in doc.Objects:
+            if obj.Name == want or obj.Label == want:
+                if obj.Shape.isNull():
+                    raise ValueError(f"project_object {want} has no shape")
+                return obj.Shape, None
+        raise ValueError(f"no object {want!r} in " + job["file"])
+    tip, _flat = fc_shapes.tips(doc)
+    if tip is None:
+        raise ValueError("no solid body in " + job["file"])
+    return tip.Shape, None
 
 
 def run_job(job):

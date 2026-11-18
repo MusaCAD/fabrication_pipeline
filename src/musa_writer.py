@@ -160,8 +160,23 @@ class TemplateRecord:
     extra: dict = field(default_factory=dict)
 
 
-def parse_template(path: Path = TEMPLATE) -> list[TemplateRecord]:
+ACTIVE_TEMPLATE = TEMPLATE      # swapped per project by use_template()
+
+
+def use_template(path: Path) -> None:
+    """Choose the title-block sheet for this run. Every template must share
+    the geometry and extents of templates/template.musa — the scale model
+    depends on those constants — so a variant may differ only in its text."""
+    global ACTIVE_TEMPLATE
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"template not found: {path}")
+    ACTIVE_TEMPLATE = path
+
+
+def parse_template(path: Path | None = None) -> list[TemplateRecord]:
     """Minimal .musa reader for the records our template actually contains."""
+    path = Path(path) if path is not None else ACTIVE_TEMPLATE
     lines = path.read_text().splitlines()
     recs: list[TemplateRecord] = []
     i = 0
@@ -334,9 +349,75 @@ TB_DATE_X = 725.0
 TB_TEXT_H = 9.365868942101082
 
 
+PARTS_CELL_PAD = 3.0        # template units of clear space each side
+PARTS_TEXT_FLOOR = 0.85     # never shrink title-block text below this ratio
+
+
+def _wrap_cell(v: str, lines: int) -> list[str]:
+    """Split v into at most `lines` lines, balancing length. Breaks on commas
+    first (material specs are comma-delimited), then on spaces."""
+    if lines <= 1:
+        return [v]
+    parts = [p.strip() for p in v.split(",")] if "," in v else v.split(" ")
+    if len(parts) < 2:
+        return [v]
+    sep = ", " if "," in v else " "
+    best, best_cost = None, None
+    # every way of cutting the token list into `lines` runs; pick the one whose
+    # longest line is shortest (a balanced block, not a ragged one)
+    import itertools
+    for cuts in itertools.combinations(range(1, len(parts)), lines - 1):
+        bounds = (0,) + cuts + (len(parts),)
+        runs = [sep.join(parts[a:b]).rstrip(",")
+                for a, b in zip(bounds, bounds[1:])]
+        if any(not r for r in runs):
+            continue
+        cost = max(len(r) for r in runs)
+        if best_cost is None or cost < best_cost:
+            best, best_cost = runs, cost
+    return best or [v]
+
+
+def fit_cell_text(v: str, col_w: float, row_h: float) -> tuple[list[str], float]:
+    """Lay a parts-table cell value out inside its own column.
+
+    Title-block columns are narrow -- MATERIAL is ~16 mm on paper -- so a long
+    value is wrapped before it is shrunk, and shrunk only to PARTS_TEXT_FLOOR.
+    Returns (lines, height). A height below the floor means it does NOT fit and
+    the caller must fail the sheet rather than ship text over the column rule.
+    """
+    avail = max(col_w - 2.0 * PARTS_CELL_PAD, 1.0)
+    best = ([v], 0.0)
+    for nl in (1, 2, 3):
+        lines = _wrap_cell(v, nl)
+        if len(lines) != nl and nl > 1:
+            continue
+        # glyph_w is linear in h, so invert it directly
+        widest = max(glyph_w(s, 1.0) for s in lines) or 1.0
+        h_w = avail / widest
+        # MTEXT stacks lines on a 5/3 h pitch; the last line has no descender
+        # below its baseline to clear, so 0.95 of the row is usable. At 0.88 a
+        # two-line cell missed the shrink floor by 0.6% and every wrapped
+        # material spec was rejected.
+        h_v = row_h * 0.95 / (nl * MTEXT_LINE_SPACING)
+        h = min(TB_TEXT_H, h_w, h_v)
+        if h > best[1]:
+            best = (lines, h)
+        if h >= TB_TEXT_H - 1e-9:
+            return lines, TB_TEXT_H
+    return best
+
+
 def parts_row_records(ctx: SheetContext, row_idx: int,
-                      values: dict[str, str]) -> list[str]:
-    """Grid + text for one parts-list entry row above the title block."""
+                      values: dict[str, str],
+                      overflow: list[str] | None = None) -> list[str]:
+    """Grid + text for one parts-list entry row above the title block.
+
+    Cell text is wrapped and shrunk to stay inside its own column. A value
+    that still will not fit is appended to `overflow` so the caller can fail
+    the sheet -- text running through the column rule into DRG NO. or SIZE is
+    a hard layout defect, not a cosmetic one.
+    """
     y0 = PARTS_ROW_BASE_Y + row_idx * PARTS_ROW_H
     y1 = y0 + PARTS_ROW_H
     out = [line(ctx.tpt((PARTS_COLS[0][1], y1)),
@@ -346,8 +427,13 @@ def parts_row_records(ctx: SheetContext, row_idx: int,
         out.append(line(ctx.tpt((x, y0)), ctx.tpt((x, y1))))
     for key, xl, xr in PARTS_COLS:
         v = values.get(key, "-")
-        out.append(mtext(ctx.tpt(((xl + xr) / 2, (y0 + y1) / 2)), v,
-                         TB_TEXT_H * ctx.t, attach=4))
+        lines, h = fit_cell_text(v, xr - xl, PARTS_ROW_H)
+        if h < TB_TEXT_H * PARTS_TEXT_FLOOR:
+            if overflow is not None:
+                overflow.append(f"parts-table-{key}-overflows-column:{v!r}")
+            h = TB_TEXT_H * PARTS_TEXT_FLOOR
+        out.append(mtext(ctx.tpt(((xl + xr) / 2, (y0 + y1) / 2)),
+                         "\n".join(lines), h * ctx.t, attach=4))
     return out
 
 

@@ -33,12 +33,15 @@ composition), `qa-checker` (21-point output verification, render-and-inspect).
   true-value dimensions (geometry authored full-size; the template is scaled
   uniformly — paper size and aspect ratio are never touched), feature
   location dims (pitch / edge references / TYP), depth-annotated fit
-  callouts (e.g. `3 X Ø4 H7 (REAM) THRU`), GD&T datum flags + feature
+  callouts (e.g. `3 X Ø4 H7 (REAM) THRU`), ISO 6410 thread convention
+  (models carry the real helix; views project the thread blank via
+  `project_feature` and draw the root line), GD&T datum flags + feature
   control frames, ANSI31 section hatch, fabrication notes, a shaded
   isometric pictorial, and a fully populated RES title block (scale, rev,
   weight computed from the model, parts row).
 - Per assembly: NTS isometric HLR wireframe with circled balloons, parts
-  table and build notes.
+  table and build notes. Bought-out items (`"sheet": false` in the manifest)
+  take a P.NO. row and a balloon but no sheet of their own.
 - A collision-driven layout engine places every annotation (dimension text
   modelled to MusaCAD's exact rendering geometry, line bands, extension
   corridors, leaders, frames, notes) with auto-nudge and a hard

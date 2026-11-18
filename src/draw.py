@@ -42,12 +42,52 @@ def parse_scale(s: str) -> tuple[int, int]:
 
 # ------------------------------------------------------------ projection
 
+def sheet_parts(m: dict) -> list[dict]:
+    """Parts that get their own sheet. A bought-out item ("sheet": false —
+    a standard fastener, say) still occupies a P.NO. row and a balloon on the
+    assembly, but nobody fabricates it, so it is not drawn."""
+    return [p for p in m["parts"] if p.get("sheet", True)]
+
+
+def _cross(a, b):
+    return [a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]]
+
+
+def _parallel(a, b):
+    return all(abs(x) < 1e-9 for x in _cross(a, b))
+
+
+def aligned_up(front_dir, front_up, aux_dir, aux_up):
+    """`up` for an aux view that keeps it feature-aligned under the front view.
+
+    An aux view is placed BELOW the front view, so the two must share the
+    front's HORIZONTAL axis. The canonical `up` from VIEW_DIRS is about the
+    world, not about the view it sits under: for front "+X" (horizontal = world
+    Y) with aux "+Z", the canonical up put world X horizontal and world Y
+    vertical, so the end view of a 0.2 mm pad rendered as a 20 mm tall hairline
+    instead of a 20 mm wide edge. Rotate the aux 90 degrees when that happens,
+    and leave it alone when the canonical up already shares the axis -- the
+    views that were already aligned keep the exact orientation they had.
+    """
+    right_f = _cross(front_up, front_dir)
+    if _parallel(_cross(aux_up, aux_dir), right_f):
+        return aux_up                      # already shares the axis
+    fixed = _cross(aux_dir, right_f)
+    if all(abs(x) < 1e-9 for x in fixed):   # aux looks along the shared axis
+        return aux_up                       # nothing to align to; leave it
+    return [int(x) if abs(x - round(x)) < 1e-9 else x for x in fixed]
+
+
 def collect_jobs(m: dict) -> list[dict]:
     jobs = []
-    for part in m["parts"]:
+    for part in sheet_parts(m):
         d, u = VIEW_DIRS[part["front_view"]]
+        pf = part.get("project_feature")
         jobs.append({"id": f"{part['part_id']}:front", "file": part["file"],
-                     "view_dir": d, "up": u, "section": None})
+                     "view_dir": d, "up": u, "section": None,
+                     "project_feature": pf})
         if part["section"]["enabled"]:
             jobs.append({"id": f"{part['part_id']}:section",
                          "file": part["file"],
@@ -56,8 +96,19 @@ def collect_jobs(m: dict) -> list[dict]:
             # agreed two-view deviation (e.g. end view for a plain rod):
             # a second plain projection instead of a meaningless section
             ad, au = VIEW_DIRS[part["aux_view"]]
+            au = aligned_up(d, u, ad, au)
             jobs.append({"id": f"{part['part_id']}:aux", "file": part["file"],
-                         "view_dir": ad, "up": au, "section": None})
+                         "view_dir": ad, "up": au, "section": None,
+                         "project_feature": pf})
+        elif (part.get("flat_pattern") or {}).get("enabled"):
+            # sheet metal: the second view is the developed blank, which is
+            # a separate solid in the same document. A section through 2 mm
+            # plate would show a hatched sliver and tell the shop nothing.
+            fp = part["flat_pattern"]
+            fd, fu = VIEW_DIRS[fp["view"]]
+            jobs.append({"id": f"{part['part_id']}:flat", "file": part["file"],
+                         "view_dir": fd, "up": fu, "section": None,
+                         "project_object": fp["object"]})
     asm = m.get("assembly_sheet")
     if asm and asm.get("enabled", True):
         if asm.get("view") == "iso":
@@ -67,7 +118,10 @@ def collect_jobs(m: dict) -> list[dict]:
             d, u = VIEW_DIRS[asm["front_view"]]
         jobs.append({"id": "assembly:front", "file": m["assembly_file"],
                      "assembly": True, "view_dir": d, "up": u,
-                     "section": None})
+                     "section": None,
+                     "link_features": {p["file"]: p["project_feature"]
+                                       for p in m["parts"]
+                                       if p.get("project_feature")}})
     return jobs
 
 
@@ -99,6 +153,7 @@ def section_job(part: dict) -> dict:
     else:
         die(f"{part['part_id']}: bad section.projection {proj!r}")
     return {"id": f"{part['part_id']}:section", "file": part["file"],
+            "project_feature": part.get("project_feature"),
             "view_dir": s, "up": uv,
             "section": {"plane_point": None,   # filled after bbox known
                         "plane_normal": [-x for x in s]}}
@@ -127,7 +182,7 @@ def run_projections(m: dict, analysis: dict) -> dict:
 
     bbox_by_file = {p["file"]: p["bodies"][0] for p in analysis["parts"]}
     sec_jobs = []
-    for part in m["parts"]:
+    for part in sheet_parts(m):
         if not part["section"]["enabled"]:
             continue
         job = section_job(part)
@@ -163,6 +218,72 @@ def _prim_key(pr, ox, oy):
     return ("poly", tuple(min(pts, rev)))
 
 
+def thread_lines(ctx, threads, view_jobs, offs):
+    """ISO 6410 simplified thread convention.
+
+    The solid carries only the CREST (major dia) — a thread blank looks like
+    a plain cylinder, so a threaded length has to be drawn: a continuous ROOT
+    line at the minor diameter running the full thread length, plus the
+    thread-end line across the major dia where the thread stops in open
+    material (omitted where a diameter step already draws that edge).
+
+    Specs are in the view's own coordinates, like location_dims:
+      views  - which views to draw it in ("front", "section", "aux")
+      orient - "v" if the thread axis runs up the view, "h" across it
+      axis   - the axis coordinate across the thread (view x when "v")
+      span   - [start, end] along the axis: the threaded length
+      major / minor - crest and root diameters (M2.5 x 0.45: 2.5 / 2.013)
+      end_line - draw the thread-end line at span[0] (default false: a
+                 diameter step already puts an edge there)
+    External threads in section keep their hatch out to the crest, so the
+    root lines simply overlay it (ISO 6410 6.2) — no hatch clipping needed.
+    """
+    recs = []
+    for t in threads:
+        rmin, rmaj = t["minor"] / 2.0, t["major"] / 2.0
+        a, b = sorted(t["span"])
+        vert = t.get("orient", "v") == "v"
+        for view in t.get("views", ["front"]):
+            job = view_jobs.get(view)
+            if job is None:
+                continue
+            ox, oy = offs["section" if view in ("section", "aux") else view]
+            for s in (-1, 1):
+                if vert:
+                    x = t["axis"] + s * rmin + ox
+                    recs.append(mw.line((x, a + oy), (x, b + oy)))
+                else:
+                    y = t["axis"] + s * rmin + oy
+                    recs.append(mw.line((a + ox, y), (b + ox, y)))
+            if t.get("end_line"):
+                if vert:
+                    recs.append(mw.line((t["axis"] - rmaj + ox, a + oy),
+                                        (t["axis"] + rmaj + ox, a + oy),
+                                        P_THICK))
+                else:
+                    recs.append(mw.line((a + ox, t["axis"] - rmaj + oy),
+                                        (a + ox, t["axis"] + rmaj + oy),
+                                        P_THICK))
+    return recs
+
+
+def emit_center_circles(ctx: mw.SheetContext, specs, view_jobs, offs,
+                        view="front"):
+    """Centre-linetype construction circles from the manifest, e.g. the PCD
+    a hole pattern sits on:  "center_circles": [{"view": "front", "dia": 130}]
+    Drawn in the same Center linetype as the cutting plane, per ISO 128."""
+    recs = []
+    for spec in specs or []:
+        v = spec.get("view", view)
+        if v not in view_jobs:
+            continue
+        ox, oy = offs[v]
+        cx, cy = spec.get("at", [0.0, 0.0])
+        recs.append(mw.circle((cx + ox, cy + oy),
+                              spec["dia"] / 2.0, P_CUTLINE))
+    return recs
+
+
 def emit_prims(ctx: mw.SheetContext, prims, offset, props=mw.P):
     """Emit projected primitives, deduping coincident duplicates (HLR often
     projects a feature's top and bottom edges onto the SAME segment in
@@ -191,6 +312,25 @@ def emit_prims(ctx: mw.SheetContext, prims, offset, props=mw.P):
         elif pr["t"] == "poly":
             ctx.add(mw.polyline([(x + ox, y + oy) for x, y in pr["pts"]],
                                 props=props))
+
+
+def round_outline(job) -> bool:
+    """True if this view's outline IS a circle, so its width and height are
+    the same diameter the %%c leader already states.
+
+    CLAUDE.md: a round feature takes a circumference leader, never a linear
+    width dim. Without this, a toroid pad got "45" horizontally, "45"
+    vertically and a leader reading %%c45 -- the same dimension three times.
+    Geometry decides it, not the manifest: a 45 x 45 SQUARE pad has the same
+    bounding box and does need both linear dims.
+    """
+    w, h, _, _ = view_size(job)
+    if w <= 0 or h <= 0 or abs(w - h) > 0.01 * max(w, h):
+        return False
+    for pr in job.get("visible", []):
+        if pr.get("t") == "circle" and abs(2.0 * pr["r"] - w) <= 0.01 * w:
+            return True
+    return False
 
 
 def view_size(job) -> tuple[float, float, list, list]:
@@ -245,6 +385,10 @@ def dim_gutter(ctx, part, view, side):
             n += 1
         elif proj in ("right", "left") and side == "bottom":
             n += 1
+    if view == "flat" and side in ("bottom", "left"):
+        # the blank carries its own width and height: it shares neither with
+        # the folded view above it
+        n += 1
     return ctx.mm(10.0 + 6.6 * (n - 1) + 4.2 + 1.0) if n else 0.0
 
 
@@ -821,6 +965,18 @@ def fmt_val(v: float) -> str:
     return str(round(v)) if abs(v - round(v)) < 0.005 else f"{v:.2f}"
 
 
+def prec_for(v: float) -> int:
+    """Decimal places a linear DIM needs to print its TRUE measured value.
+
+    The DIMSTYLE default is 0 places, which silently rounded every non-integer
+    dimension: three graded clamp shims (4.5, 5.5, 6.5) all printed as one
+    integer and a 332.80 blank printed 333. A drawing that states a value it
+    does not mean is worse than no drawing, so match fmt_val exactly -- the
+    layout already reserves space for that string.
+    """
+    return 0 if abs(v - round(v)) < 0.005 else 2
+
+
 def _outboard(steps, floor_mm):
     """Keep only stand-offs clear of an inner (feature) dim line: an overall
     dim always sits OUTSIDE the feature dims on the same side of the view."""
@@ -874,7 +1030,7 @@ def dim_extents(ctx, layout, job, off, *, width_side="top",
         lp, _, _ = _place_dim(ctx, layout, build(a, b, "h", lps, label),
                               f"dim-w-{label}")
         if lp is not None:
-            recs.append(mw.dim(0, a, b, lp))
+            recs.append(mw.dim(0, a, b, lp, precision=prec_for(x1 - x0)))
             _claim_dim_ink(ctx, layout, a, b, lp, "h", label)
     if "h" in which:
         label = fmt_val(y1 - y0)
@@ -886,7 +1042,7 @@ def dim_extents(ctx, layout, job, off, *, width_side="top",
         lp, _, _ = _place_dim(ctx, layout, build(a, b, "v", lps, label),
                               f"dim-h-{label}")
         if lp is not None:
-            recs.append(mw.dim(0, a, b, lp))
+            recs.append(mw.dim(0, a, b, lp, precision=prec_for(y1 - y0)))
             _claim_dim_ink(ctx, layout, a, b, lp, "v", label)
     return recs
 
@@ -909,6 +1065,12 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4):
         if any(abs(c["r"] - s) < 0.05 for s in suppress):
             continue
         seen.add(key)
+        # every failed attempt below records itself as unresolved; the ones
+        # that were only a rejected FIRST CHOICE get rolled back once this
+        # radius lands somewhere, so the sheet is not failed for a dim it
+        # actually carries (a ring too narrow for its own label fell into
+        # the leader fallback, succeeded, and still failed the sheet)
+        mark = len(layout.unresolved)
         cx, cy = c["c"][0] + ox, c["c"][1] + oy
         dia = 2.0 * c["r"]
         label = "%%c" + fmt_val(dia)
@@ -947,7 +1109,10 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4):
                              ignore=("view",))
             if r is not None:
                 prec = None if abs(dia - round(dia)) < 0.005 else 2
-                recs.append(mw.dim(3, (cx, cy), (ex, ey), (0, 0),
+                # line_pt ON the circle = MusaCAD's edge-label layout (the
+                # rect modelled above); a line_pt off the circle is taken as
+                # the label position itself (dimension.cpp), so never (0, 0)
+                recs.append(mw.dim(3, (cx, cy), (ex, ey), (ex, ey),
                                    precision=prec))
                 rects[key] = r
                 placed = r
@@ -976,8 +1141,10 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4):
                     rects[key] = r
                     placed = r
                     break
-                layout.unresolved.pop()
-        if placed is None:
+        if placed is not None:
+            del layout.unresolved[mark:]
+        else:
+            del layout.unresolved[mark:]
             layout.unresolved.append(f"dim-{label}")
     return recs, rects
 
@@ -1689,6 +1856,231 @@ def place_notes(ctx, layout, notes, rows_h):
             for k, t in enumerate(rows)]
 
 
+BEND_HEADERS = ("NO.", "ANGLE", "IN. R", "DIR", "FLANGE")
+# a bend table may drop a step smaller than the notes before it gives up:
+# it is a handful of numbers, and losing it loses the bend spec entirely
+BEND_TABLE_HEIGHTS = (3.0, 2.5, 2.0, 1.8)
+
+
+def bend_rows(part):
+    """One row per modelled bend, in the order the part is formed."""
+    fp = part.get("flat_pattern") or {}
+    rows = []
+    for i, b in enumerate(fp.get("bends", []), start=1):
+        rows.append((str(i),
+                     f"{b['angle_deg']:g}%%d",
+                     f"R{b['radius_mm']:g}",
+                     "DOWN" if b.get("invert") else "UP",
+                     f"{b['length_mm']:g}"))
+    return rows
+
+
+def place_bend_table(ctx, layout, part, rows_h):
+    """BEND TABLE for a sheet-metal sheet, as a real ruled grid.
+
+    The numbers are the model's own bend inputs, not measurements off the
+    folded solid, so the table states what was designed. Placed by the same
+    lowest-free-band search the notes block uses, because the two blocks
+    compete for the same leftover sheet.
+    """
+    rows = bend_rows(part)
+    if not rows:
+        return []
+    ax0, ay0, ax1, ay1 = ctx.draw_area
+    y_floor = ay0 + rows_h + ctx.mm(2.0)
+    # the blank size is dimensioned on the view and the thickness is in the
+    # title block, so the caption stays short and the table stays narrow
+    title = "BEND TABLE"
+    for hmm in BEND_TABLE_HEIGHTS:
+        h = ctx.mm(hmm)
+        pad = 0.5 * h
+        body = [BEND_HEADERS] + rows
+        cols = [max(mw.glyph_ink_w(r[c], h) for r in body) + 2 * pad
+                for c in range(len(BEND_HEADERS))]
+        width = max(sum(cols), mw.glyph_ink_w(title, h) + 2 * pad)
+        rh = h + 2 * pad
+        cols[-1] += width - sum(cols)
+        height = rh * (len(rows) + 1) + 1.7 * h      # grid + title line
+        if width > ax1 - ax0 - ctx.mm(6.0) or height > ay1 - y_floor:
+            continue
+        spot = _lowest_free(ctx, layout, width, height, y_floor)
+        if spot is None:
+            continue
+        layout.claim(spot, "bend-table")
+        x0, y0 = spot[0], spot[1]
+        out = [mw.mtext((x0, y0 + height - 1.7 * h), title, h, attach=6)]
+        top = y0 + rh * (len(rows) + 1)
+        for k in range(len(rows) + 2):               # horizontal rules
+            yy = top - k * rh
+            out.append(mw.line((x0, yy), (x0 + width, yy)))
+        xx = x0
+        for c, w in enumerate(cols):                 # vertical rules
+            out.append(mw.line((xx, y0), (xx, top)))
+            xx += w
+        out.append(mw.line((xx, y0), (xx, top)))
+        for r, row in enumerate(body):
+            cy = top - (r + 0.5) * rh
+            xx = x0
+            for c, w in enumerate(cols):
+                out.append(mw.cell_text((xx + w / 2, cy), row[c], h))
+                xx += w
+        return out
+    layout.unresolved.append("bend-table")
+    return []
+
+
+def _lowest_free(ctx, layout, width, height, y_floor):
+    """Lowest, then leftmost, free rectangle of this size in the drawing
+    area — the same search rule the notes block uses."""
+    ax0, ay0, ax1, ay1 = ctx.draw_area
+    step = ctx.mm(4.0)
+    ny = int((ay1 - ctx.mm(3.0) - height - y_floor) / step)
+    nx = int((ax1 - ctx.mm(3.0) - width - ax0 - ctx.mm(3.0)) / step)
+    for j in range(max(0, ny) + 1):
+        yy = y_floor + j * step
+        xs = [ax0 + ctx.mm(3.0), ax1 - width - ctx.mm(3.0)]
+        xs += [ax0 + ctx.mm(3.0) + k * step for k in range(1, max(0, nx) + 1)]
+        for xx in xs:
+            r = (xx, yy, xx + width, yy + height)
+            if layout.inside(r) and not layout.collides(r):
+                return r
+    return None
+
+
+def _poly_seg_clear(poly, a, b, clr):
+    """True if segment a-b stays at least `clr` away from convex polygon."""
+    def inside(p):
+        sgn = 0
+        for i in range(len(poly)):
+            q0, q1 = poly[i], poly[(i + 1) % len(poly)]
+            c = (q1[0] - q0[0]) * (p[1] - q0[1]) - (q1[1] - q0[1]) * (p[0] - q0[0])
+            s = 1 if c > 0 else -1 if c < 0 else 0
+            if s and sgn and s != sgn:
+                return False
+            sgn = sgn or s
+        return True
+    if inside(a) or inside(b):
+        return False
+    edges = list(zip(poly, poly[1:] + poly[:1]))
+    for q0, q1 in edges:
+        if min(_seg_pt_dist(a, b, q0), _seg_pt_dist(q0, q1, a),
+               _seg_pt_dist(q0, q1, b)) < clr:
+            return False
+        # proper crossing
+        d1 = (b[0] - a[0]) * (q0[1] - a[1]) - (b[1] - a[1]) * (q0[0] - a[0])
+        d2 = (b[0] - a[0]) * (q1[1] - a[1]) - (b[1] - a[1]) * (q1[0] - a[0])
+        d3 = (q1[0] - q0[0]) * (a[1] - q0[1]) - (q1[1] - q0[1]) * (a[0] - q0[0])
+        d4 = (q1[0] - q0[0]) * (b[1] - q0[1]) - (q1[1] - q0[1]) * (b[0] - q0[0])
+        if d1 * d2 < 0 and d3 * d4 < 0:
+            return False
+    return True
+
+
+def place_angle_refs(ctx, layout, spec, view_jobs, offs, geom):
+    """Angular reference for a less technical vendor (manifest "angle_refs"):
+      "rays":  [{"angle": deg, "r0": .., "r1": .., "text": "30%%d"}] -- a
+               centre line from r0 to r1 through each feature, labelled at
+               its outer end ALONG the ray; the label walks outward until it
+               clears the drawn geometry and every claimed annotation;
+      "zero":  {"at": [x, y], "text": "0%%d REF"} -- the datum direction;
+      "ccw":   {"r": .., "a0": deg, "a1": deg, "at": [x, y],
+                "lines": ["ANGLES CCW", ...]} -- direction arc + arrowhead.
+    All coordinates are the view's model coordinates (mm, full size)."""
+    if not spec:
+        return []
+    view = spec.get("view", "front")
+    if view not in view_jobs:
+        layout.unresolved.append(f"angle-refs-noview-{view}")
+        return []
+    ox, oy = offs[view]
+    h = ctx.mm(2.5)
+    clr = ctx.mm(INK_CLEAR + 0.4)
+    gap = ctx.mm(1.2)
+    recs = []
+
+    def free(poly, ignore=("view",)):
+        xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
+        bb = (min(xs), min(ys), max(xs), max(ys))
+        if not layout.inside(bb) or layout.collides(bb, ignore=ignore):
+            return None
+        if all(_poly_seg_clear(poly, a, b, clr) for a, b in geom):
+            return bb
+        return None
+
+    for ray in spec.get("rays", []):
+        th = math.radians(ray["angle"])
+        u = (math.cos(th), math.sin(th))
+        flip = math.cos(th) < -1e-9 or (abs(math.cos(th)) <= 1e-9 and u[1] < 0)
+        d = (-u[0], -u[1]) if flip else u          # reading direction
+        n = (-d[1], d[0])                           # reading "up"
+        s = ray["text"]
+        w = mw.text_w(s, h)
+        placed = None
+        r_t = ray["r1"]
+        while r_t <= ray["r1"] + 60.0:
+            p_in = (ox + u[0] * r_t, oy + u[1] * r_t)
+            p_out = (p_in[0] + u[0] * (gap + w), p_in[1] + u[1] * (gap + w))
+            a = (p_in[0] + u[0] * gap, p_in[1] + u[1] * gap)
+            start = p_out if flip else a
+            base = (start[0] - n[0] * h * 0.5, start[1] - n[1] * h * 0.5)
+            poly = [base, (base[0] + d[0] * w, base[1] + d[1] * w),
+                    (base[0] + d[0] * w + n[0] * h, base[1] + d[1] * w + n[1] * h),
+                    (base[0] + n[0] * h, base[1] + n[1] * h)]
+            bb = free(poly)
+            if bb is not None:
+                placed = (r_t, base)
+                layout.claim(bb, f"angle-{s}")
+                break
+            r_t += 2.0
+        if placed is None:
+            layout.unresolved.append(f"angle-ray-{s}")
+            continue
+        r_t, base = placed
+        recs.append(mw.line((ox + u[0] * ray["r0"], oy + u[1] * ray["r0"]),
+                            (ox + u[0] * r_t, oy + u[1] * r_t), P_CUTLINE))
+        recs.append(mw.text(base, s, h,
+                            rotation=math.atan2(d[1], d[0]), props=mw.P_ANNO))
+
+    z = spec.get("zero")
+    if z:
+        s = z["text"]
+        w = mw.text_w(s, h)
+        base = (ox + z["at"][0], oy + z["at"][1])
+        poly = [base, (base[0] + w, base[1]), (base[0] + w, base[1] + h),
+                (base[0], base[1] + h)]
+        # the datum label rides beside the cutting-plane line on purpose:
+        # its coarse claim box is skipped, the exact ink clearance still holds
+        bb = free(poly, ignore=("view", "line"))
+        if bb is None:
+            layout.unresolved.append("angle-zero-ref")
+        else:
+            layout.claim(bb, "angle-zero-ref")
+            recs.append(mw.text(base, s, h, props=mw.P_ANNO))
+
+    c = spec.get("ccw")
+    if c:
+        a0, a1 = math.radians(c["a0"]), math.radians(c["a1"])
+        recs.append(mw.arc((ox, oy), c["r"], a0, a1, mw.P_ANNO))
+        tip = (ox + c["r"] * math.cos(a1), oy + c["r"] * math.sin(a1))
+        hatch = arrowhead(tip, (-math.sin(a1), math.cos(a1)), ctx.mm(2.5))
+        recs.append(hatch.replace(mw.P, mw.P_ANNO) if mw.P in hatch else hatch)
+        lines = c.get("lines", [])
+        lh = 1.55 * h
+        x0, y0 = ox + c["at"][0], oy + c["at"][1]
+        ws = max(mw.text_w(t, h) for t in lines) if lines else 0
+        poly = [(x0 - ws / 2, y0 - lh * (len(lines) - 1)), (x0 + ws / 2, y0 - lh * (len(lines) - 1)),
+                (x0 + ws / 2, y0 + h), (x0 - ws / 2, y0 + h)]
+        bb = free(poly)
+        if bb is None:
+            layout.unresolved.append("angle-ccw-note")
+        else:
+            layout.claim(bb, "angle-ccw-note")
+            for i, t in enumerate(lines):
+                recs.append(mw.text((x0, y0 - i * lh), t, h, justify=1,
+                                    props=mw.P_ANNO))
+    return recs
+
+
 def arrowhead(tip, direction, size):
     """Filled triangle as a SOLID hatch (plot arrows for the cutting plane)."""
     dx, dy = direction
@@ -1982,12 +2374,59 @@ def rev_row_positional(m=None, sheet=None):
     return out
 
 
-def part_weight_kg(analysis, file):
-    for part in analysis["parts"]:
-        if part["file"] == file:
-            v = part["bodies"][0]["volume_mm3"]
-            return v * 7.85e-6   # mild steel 7.85 g/cm3
+# Densities in g/cm3, matched WORD-WISE against the manifest MATERIAL string
+# (longest key wins, so "MILD STEEL" beats "STEEL" and "STAINLESS" beats "SS").
+# A part may override outright with "density_g_cm3".
+DENSITY_G_CM3 = {
+    "ACRYLIC": 1.19, "PMMA": 1.19, "PERSPEX": 1.19,
+    "MILD STEEL": 7.85, "STEEL": 7.85, "MS": 7.85, "EN8": 7.85, "EN24": 7.85,
+    "STAINLESS": 7.90, "SS": 7.90, "SS304": 7.90, "SS316": 8.00,
+    "CAST IRON": 7.20,
+    "ALUMINIUM": 2.70, "ALUMINUM": 2.70, "AL": 2.70,
+    "BRASS": 8.50, "BRONZE": 8.80, "COPPER": 8.96,
+    "NYLON": 1.14, "PA6": 1.14, "PTFE": 2.20, "TEFLON": 2.20,
+    "POLYPROPYLENE": 0.90, "PP": 0.90, "HDPE": 0.95, "UHMWPE": 0.93,
+    "POLYCARBONATE": 1.20, "PC": 1.20, "DELRIN": 1.41, "POM": 1.41,
+    "PVC": 1.40, "PVDF": 1.78, "EPOXY": 1.20, "RUBBER": 1.20,
+}
+DEFAULT_DENSITY_G_CM3 = 7.85    # mild steel — the pipeline's original default
+
+
+def material_density(material: str | None) -> float:
+    """g/cm3 for a title-block MATERIAL string; mild steel if unrecognised."""
+    s = (material or "").upper()
+    best = None
+    for key, rho in DENSITY_G_CM3.items():
+        if re.search(r"\b" + re.escape(key) + r"\b", s):
+            if best is None or len(key) > len(best[0]):
+                best = (key, rho)
+    return best[1] if best else DEFAULT_DENSITY_G_CM3
+
+
+def part_weight_kg(analysis, part):
+    """Solid volume x the density implied by the part's MATERIAL. Steel was
+    hardcoded until acrylic showed up and a 0.80 kg lid printed as 5.26 kg."""
+    if part.get("density_g_cm3") == 0:
+        # explicit "unknown": a bought-out item whose real mass we do not
+        # know. Printing a figure derived from a schematic model would be
+        # fabricated data — the WEIGHT cell shows "-" instead.
+        return None
+    for a in analysis["parts"]:
+        if a["file"] == part["file"]:
+            rho = part.get("density_g_cm3") or \
+                material_density(part.get("material"))
+            return a["bodies"][0]["volume_mm3"] * rho * 1e-6
     return None
+
+
+def weight_label(wkg) -> str:
+    """WEIGHT cell text. Small hardware rounds to 0.00 kg, which reads as
+    "not weighed" — drop to grams rather than print a zero."""
+    if not wkg:
+        return "-"
+    if wkg < 0.01:
+        return f"{wkg * 1000.0:.2f} g".replace(".00 g", " g")
+    return f"{wkg:.2f} kg"
 
 
 def _claim_view(layout, job, off, name):
@@ -2162,14 +2601,15 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
     section = proj.get(f"{part['part_id']}:section") \
         if part["section"]["enabled"] else None
     aux = proj.get(f"{part['part_id']}:aux") if not section else None
+    flat = proj.get(f"{part['part_id']}:flat") if not (section or aux) else None
     projection = part["section"].get("projection", "below")
-    if aux:
+    if aux or flat:
         projection = "below"
     gdt = part.get("gdt", {"datums": [], "frames": []})
     callouts = part.get("callouts", [])
     right_band = bool(callouts) or bool(gdt.get("frames"))
     rows_h_pre = mw.PARTS_ROW_H * ctx.t
-    second = "section" if section else "aux"
+    second = "section" if section else ("aux" if aux else "flat")
     # stacked views share the sheet's left/right gutters, so each side has to
     # hold the wider of the two views' dimension columns
     lg = dim_gutter(ctx, part, "front", "left")
@@ -2184,7 +2624,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
     outer = second if projection == "right" else "front"
     inboard = projection in ("right", "left") and any(
         co.get("view", "front") != outer for co in callouts)
-    offs = place_views(ctx, front, section or aux, projection,
+    offs = place_views(ctx, front, section or aux or flat, projection,
                        right_band=right_band,
                        bottom_reserve=rows_h_pre + ctx.mm(16.0),
                        top_reserve=dim_gutter(ctx, part, "front", "top"),
@@ -2192,7 +2632,8 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
                        band_inboard=inboard, gutters=(lg, rg))
     if dx:
         offs = {k: (v[0] + dx, v[1]) for k, v in offs.items()}
-    second_name = "section" if section else ("aux" if aux else None)
+    second_name = ("section" if section else
+                   "aux" if aux else "flat" if flat else None)
     second_label = None
     cut_segs: list = []
     cut_arrows: list = []
@@ -2202,6 +2643,9 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
     if aux:
         view_jobs["aux"] = aux
         offs["aux"] = offs["section"]
+    if flat:
+        view_jobs["flat"] = flat
+        offs["flat"] = offs["section"]
 
     ctx.dimstyles = sheet_dimstyles(ctx)
     layout = Layout(ctx)
@@ -2223,17 +2667,20 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
 
     replaced = ctx.add_template(titleblock_replacements(m, part),
                                 positional=rev_row_positional(m, part))
-    wkg = part_weight_kg(read_json(Path(m["_analysis_path"])), part["file"])
+    wkg = part_weight_kg(read_json(Path(m["_analysis_path"])), part)
     ctx.entities += mw.parts_row_records(ctx, 0, {
         "pno": disp_no(part["part_id"]), "description": part["description"],
         "qty": str(part["qty"]), "drg_no": part["drg_no"],
         "material": part["material"], "size": "-",
-        "weight": f"{wkg:.2f} kg" if wkg else "-",
-        "remarks": "-"})
+        "weight": weight_label(wkg),
+        "remarks": "-"}, overflow=layout.unresolved)
     ctx.entities += mw.date_records(ctx, today())
 
     emit_prims(ctx, front["visible"], offs["front"])
     emit_prims(ctx, front["hidden"], offs["front"], P_HIDDEN)
+    view_jobs_cc = {"front": front} | ({"section": section} if section else {})
+    ctx.entities += emit_center_circles(ctx, part.get("center_circles"),
+                                        view_jobs_cc, offs)
 
     if section:
         label = part["section"].get("label", "A")
@@ -2254,6 +2701,14 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
         emit_prims(ctx, aux["visible"], offs["section"])
         emit_prims(ctx, aux["hidden"], offs["section"], P_HIDDEN)
         second_label = "END VIEW"
+    if flat:
+        # the blank as cut, before bending: outline and holes only. Hidden
+        # lines are suppressed because in a flat slab they are the opposite
+        # face of every edge, which doubles every line for no information.
+        emit_prims(ctx, flat["visible"], offs["section"])
+        second_label = "FLAT PATTERN"
+
+    ctx.entities += thread_lines(ctx, part.get("threads", []), view_jobs, offs)
 
     # every black line the views draw, as segments: dimension ink is tested
     # against THIS, not just against other annotations' bounding boxes
@@ -2267,6 +2722,10 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
         ctx, layout, part.get("location_dims", []), view_jobs, offs, geom,
         cut_arrows)
     ctx.entities += loc_recs
+    # angular references sit INSIDE the view, so they claim their labels
+    # before the leader callouts route around them
+    ctx.entities += place_angle_refs(ctx, layout, part.get("angle_refs"),
+                                     view_jobs, offs, geom)
     co_recs, co_rects, suppress = place_callouts(ctx, layout, callouts,
                                                  view_jobs, offs)
     ctx.entities += co_recs
@@ -2276,7 +2735,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
         return {"width": loc_floors.get((view, wside), 0.0),
                 "height": loc_floors.get((view, hside), 0.0)}
 
-    if part.get("front_extent_dims", True):
+    if part.get("front_extent_dims", True) and not round_outline(front):
         # manifest opt-out: a round part's extents are fully covered by its
         # diameter callouts — the front w/h dims would be redundant
         ext_sides = part.get("extents_sides", {})
@@ -2291,7 +2750,8 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
                            suppress=suppress.get("front", ()))
     ctx.entities += recs
     dim_rects.update({("front", k): v for k, v in rr.items()})
-    if section and part.get("section_extent_dims", True):
+    if section and part.get("section_extent_dims", True) \
+            and not round_outline(section):
         # shared-axis views don't repeat the shared extent dim: below shares
         # width with the front view, right/left share height
         # (opt-out: a circular section fully covered by its dia leader)
@@ -2313,6 +2773,17 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
                                suppress=suppress.get("aux", ()))
         ctx.entities += recs
         dim_rects.update({("aux", k): v for k, v in rr.items()})
+    if flat:
+        # the blank's own width and height are the shop's cutting size, and
+        # the folded part above shares neither of them, so both are drawn
+        ctx.entities += dim_extents(ctx, layout, flat, offs["section"],
+                                    width_side="bottom", height_side="left",
+                                    floors=floors_for("flat", "bottom",
+                                                      "left"), geom=geom)
+        recs, rr = dim_circles(ctx, layout, flat, offs["section"],
+                               suppress=suppress.get("flat", ()))
+        ctx.entities += recs
+        dim_rects.update({("flat", k): v for k, v in rr.items()})
     if second_label:
         # caption last of the view's own annotations: it belongs BELOW the
         # dimension band, not between the view and its dims
@@ -2334,6 +2805,8 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
     ctx.entities += dat_recs
     ctx.entities += place_fcfs(ctx, layout, {"frames": on_datum}, view_jobs,
                                offs, co_rects, datum_pos, dim_rects)
+    if flat:
+        ctx.entities += place_bend_table(ctx, layout, part, rows_h)
     notes = part.get("fab_notes", []) + part.get("extra_notes", [])
     ctx.entities += place_notes(ctx, layout, notes, rows_h)
     return ctx, replaced, layout
@@ -2397,20 +2870,22 @@ def build_assembly_sheet(m, proj):
                                 positional=rev_row_positional(m, asm))
     analysis = read_json(Path(m["_analysis_path"]))
     for row, part in enumerate(m["parts"]):
-        wkg = part_weight_kg(analysis, part["file"])
+        wkg = part_weight_kg(analysis, part)
         ctx.entities += mw.parts_row_records(ctx, row, {
             "pno": disp_no(part["part_id"]), "description": part["description"],
             "qty": str(part["qty"]), "drg_no": part["drg_no"],
             "material": part["material"], "size": "-",
-            "weight": f"{wkg:.2f} kg" if wkg else "-",
+            "weight": weight_label(wkg),
             "remarks": "-"})
     ctx.entities += mw.date_records(ctx, today())
     emit_prims(ctx, job["visible"], offs["front"])
     emit_prims(ctx, job["hidden"], offs["front"], P_HIDDEN)
+    ctx.entities += thread_lines(ctx, asm.get("threads", []),
+                                 {"front": job}, offs)
     if asm.get("view") == "iso":
         ctx.entities += _view_label(ctx, layout, job, offs["front"],
                                     "ISOMETRIC VIEW")
-    else:
+    elif asm.get("front_extent_dims", True):
         ctx.entities += dim_extents(ctx, layout, job, offs["front"])
     if asm.get("balloons", True):
         id_by_file = {p["file"]: p["part_id"] for p in m["parts"]}
@@ -2430,6 +2905,11 @@ def main() -> None:
     m = read_json(man_path)
     if not m.get("locked"):
         die("manifest is not locked — /finalise must lock it")
+    if m.get("template"):
+        # per-project title block: same sheet geometry, different company
+        mw.use_template(Path(__file__).resolve().parent.parent /
+                        "templates" / m["template"])
+        print(f"template: {m['template']}")
     analysis_path = Path(__file__).resolve().parent.parent / "reports" / \
         "analysis.json"
     m["_analysis_path"] = str(analysis_path)
@@ -2439,11 +2919,16 @@ def main() -> None:
     OUTPUT_MUSA_DIR.mkdir(parents=True, exist_ok=True)
 
     has_asm = bool(m.get("assembly_sheet") and m["assembly_sheet"].get("enabled", True))
-    total = len(m["parts"]) + (1 if has_asm else 0)
+    drawn = sheet_parts(m)
+    total = len(drawn) + (1 if has_asm else 0)
     sheets = []
     problems = []
     stamp_rects = {}
-    for idx, part in enumerate(m["parts"], start=1):
+    for part in m["parts"]:
+        if not part.get("sheet", True):
+            print(f"bought-out: {part['description']} "
+                  f"({part['drg_no']}) — parts-table row only, no sheet")
+    for idx, part in enumerate(drawn, start=1):
         ctx, replaced, lay = build_part_sheet(m, part, proj)
         stamp_rects[part["drg_no"]] = ctx._stamp_rect
         out = OUTPUT_MUSA_DIR / f"{part['drg_no']}.musa"

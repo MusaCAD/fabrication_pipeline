@@ -60,7 +60,7 @@ def propose() -> None:
         b = part["bodies"][0]
         stem = Path(part["file"]).stem
         v = verdicts.get(part["file"], {})
-        parts.append({
+        entry = {
             "part_id": f"{idx:02d}",
             "file": part["file"],
             "description": stem.replace("_", " ").upper(),
@@ -68,6 +68,7 @@ def propose() -> None:
             "material": b["material"] if b["material"] not in
                         (None, "Default", "None") else "TBD",
             "qty": qty.get(part["file"], 1),
+            "sheet": True,           # false = bought-out: parts table only
             "front_view": default_front(b["bbox_size"]),
             "section": {"enabled": True, "projection": "below",
                         "offset_frac": 0.5, "label": "A"},
@@ -75,7 +76,22 @@ def propose() -> None:
             "extra_notes": [],
             "waivers": [f["message"] for f in v.get("findings", [])
                         if f["severity"] == "WARN"],
-        })
+        }
+        flat = part.get("flat")
+        if flat:
+            # sheet metal: the shop cuts a blank and bends it, so the second
+            # view is the developed blank. A section through 2 mm plate shows
+            # nothing, so it is off by default.
+            entry["section"] = {"enabled": False}
+            entry["flat_pattern"] = {
+                "enabled": True,
+                "object": flat["object"],
+                "view": default_front(flat["bbox_size"]),
+                "thickness_mm": flat["thickness_mm"],
+                "blank_mm": flat["blank_mm"],
+                "bends": part.get("bends", []),
+            }
+        parts.append(entry)
 
     manifest = {
         "locked": False,
@@ -122,6 +138,10 @@ def lock(draft_path: Path) -> None:
         for key in ("drg_no", "material"):
             if str(part.get(key, "")).startswith("TBD"):
                 problems.append(f"{part.get('file')}: {key} undecided")
+        if not part.get("sheet", True):
+            # bought-out: a parts-table row and a balloon, never a sheet, so
+            # the view/section/scale decisions simply do not apply.
+            continue
         if part.get("front_view") not in ("+X", "-X", "+Y", "-Y", "+Z", "-Z"):
             problems.append(f"{part.get('file')}: bad front_view")
         sec = part.get("section", {})
@@ -135,6 +155,20 @@ def lock(draft_path: Path) -> None:
                                 "are mutually exclusive")
             if part["aux_view"] not in ("+X", "-X", "+Y", "-Y", "+Z", "-Z"):
                 problems.append(f"{part.get('file')}: bad aux_view")
+        fp = part.get("flat_pattern") or {}
+        if fp.get("enabled"):
+            if sec.get("enabled") or part.get("aux_view"):
+                problems.append(f"{part.get('file')}: flat_pattern excludes "
+                                "section and aux_view (two views per sheet)")
+            if not fp.get("object"):
+                problems.append(f"{part.get('file')}: flat_pattern.object "
+                                "undecided")
+            if fp.get("view") not in ("+X", "-X", "+Y", "-Y", "+Z", "-Z"):
+                problems.append(f"{part.get('file')}: bad flat_pattern.view")
+            if not fp.get("bends"):
+                problems.append(f"{part.get('file')}: flat_pattern has no "
+                                "bends — a blank with no bend table is just "
+                                "a flat part; use a plain two-view sheet")
         num_den = str(part.get("scale", "")).split(":")
         if len(num_den) != 2 or not all(s.strip().isdigit() for s in num_den):
             problems.append(f"{part.get('file')}: bad scale "
@@ -149,8 +183,10 @@ def lock(draft_path: Path) -> None:
     m["locked_at"] = datetime.now().isoformat(timespec="seconds")
     out = MANIFESTS_DIR / "manifest.json"
     write_json(out, m)
-    print(f"LOCKED -> {out}  ({len(m['parts'])} part sheets + 1 assembly "
-          "sheet)")
+    drawn = [p for p in m["parts"] if p.get("sheet", True)]
+    bought = len(m["parts"]) - len(drawn)
+    print(f"LOCKED -> {out}  ({len(drawn)} part sheets + 1 assembly sheet"
+          + (f"; {bought} bought-out, parts-table only)" if bought else ")"))
 
 
 def main() -> None:
