@@ -48,7 +48,9 @@ def to_markdown(a: dict) -> str:
                      + (" **BROKEN LINK**" if i.get("broken") else ""))
     lines += ["", "## Joints"]
     for j in asm["joints"]:
-        lines.append(f"- {j['label']}: {j['type']} on {', '.join(j['connects'])}")
+        on = ", ".join(j["connects"]) or "no instance resolved"
+        lines.append(f"- {j['label']}: {j['type']} on {on}"
+                     + (" *(suppressed)*" if j.get("suppressed") else ""))
     lines += part_markdown(a)
     if asm["issues"]:
         lines += ["", "## Assembly issues"]

@@ -94,6 +94,38 @@ def judge_part(part: dict, generated: str = "") -> dict:
             "suggested_scale": sc and f"{sc[0]}:{sc[1]}"}
 
 
+def assembly_findings(asm: dict) -> list:
+    """Model-level findings for the assembly document.
+
+    A standalone part pack has no assembly document, so none of these
+    checks have anything to say about it.
+    """
+    out = []
+    if not asm.get("file"):
+        return out
+    for i in asm["instances"]:
+        if i.get("broken"):
+            out.append({"severity": "FAIL",
+                        "message": f"broken link {i['label']}"})
+    for issue in asm["issues"]:
+        out.append({"severity": "FAIL", "message": issue})
+    # a suppressed joint is in the tree but constrains nothing
+    live = [j for j in asm["joints"] if not j.get("suppressed")]
+    if not any(j.get("grounded") for j in live):
+        out.append({"severity": "WARN",
+                    "message": "no grounded joint — assembly may "
+                               "be under-constrained"})
+    # an instance is joined if any live joint, grounded included, names it
+    joined = {n for j in live for n in j.get("connects", [])}
+    loose = [i["label"] for i in asm["instances"]
+             if not i.get("broken") and i["name"] not in joined]
+    if loose:
+        out.append({"severity": "WARN",
+                    "message": f"instances with no joint: "
+                               f"{', '.join(loose)}"})
+    return out
+
+
 def main() -> None:
     # --generated <source>: these models are built by a script, named here so
     # the report says which one. It changes the sketch-constraint findings
@@ -108,30 +140,7 @@ def main() -> None:
     a = read_json(src)
     asm = a["assembly"]
     parts = [judge_part(p, generated) for p in a["parts"]]
-    asm_findings = []
-    # a standalone part pack has no assembly document, so none of the
-    # assembly checks below have anything to say about it
-    for i in (asm["instances"] if asm.get("file") else []):
-        if i.get("broken"):
-            asm_findings.append({"severity": "FAIL",
-                                 "message": f"broken link {i['label']}"})
-    for issue in asm["issues"]:
-        asm_findings.append({"severity": "FAIL", "message": issue})
-    ungrounded = bool(asm.get("file")) and \
-        not any(j.get("grounded") for j in asm["joints"])
-    if ungrounded:
-        asm_findings.append({"severity": "WARN",
-                             "message": "no grounded joint — assembly may "
-                                        "be under-constrained"})
-    linked = {i["name"] for j in asm["joints"] for i_name in j["connects"]
-              for i in asm["instances"] if i["name"] == i_name}
-    loose = [i["label"] for i in (asm["instances"] if asm.get("file") else [])
-             if not i.get("broken") and i["name"] not in
-             {n for j in asm["joints"] for n in j["connects"]}]
-    if loose:
-        asm_findings.append({"severity": "WARN",
-                             "message": f"instances with no joint: "
-                                        f"{', '.join(loose)}"})
+    asm_findings = assembly_findings(asm)
     overall = "PASS"
     for v in [p["verdict"] for p in parts] + \
              [f["severity"] for f in asm_findings]:

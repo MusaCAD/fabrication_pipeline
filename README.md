@@ -63,6 +63,8 @@ Build the plot harness once: `tools/build.sh` → `tools/bin/musa_plot`.
 
 ```
 src/          pipeline modules (one per stage + FreeCAD-side scripts)
+tests/        unittest suite (stdlib only; builds throwaway FreeCAD
+              fixtures for the assembly checks)
 tools/        musa_plot: headless .musa -> PDF harness (paper, scale,
               window, raster stamps) derived from MusaCAD's plot_check
 templates/    RES title-block template (.musa v14)
@@ -81,6 +83,19 @@ style contract.
   is not part of this repository.
 - **Developing** (changing the software): everything under `src/`,
   `tools/`, `.claude/`, `templates/` — keep `CLAUDE.md` in sync.
+
+### Tests
+
+```
+python3 -m unittest discover -s tests -v
+```
+
+Standard library only, no venv. The assembly-joint tests build throwaway
+FreeCAD 1.1 assemblies in a temporary directory with the real Assembly
+workbench and run the FreeCAD-side scripts against them; they skip
+themselves if the FreeCAD AppImage is not installed. Nothing under
+`reports/`, `manifests/` or `output/` is touched, so the suite is safe to
+run in the middle of a drawing project.
 
 ## License
 

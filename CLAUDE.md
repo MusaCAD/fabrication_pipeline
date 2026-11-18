@@ -44,11 +44,24 @@ co-author line to git commits.
 ### FreeCAD 1.1.1 headless
 - `<AppImage> -c <script.py> </dev/null`; script must end
   `sys.stdout.flush(); os._exit(0)` (else hang / lost output).
+- `-c` runs the file as a module named AFTER THE FILE, never as
+  `__main__` — a `__main__` guard would never fire. fc_analyse.py therefore
+  guards its entry on `"FABPIPE_ARGS" in os.environ`, so the tests can
+  import it without running it.
 - Args go via env var `FABPIPE_ARGS` (JSON list) — see src/common.run_freecad.
 - `TechDraw.project(shape, dir)` works headlessly → 4 groups (visible
   hard/smooth, hidden hard/smooth); edges discretize to polylines.
 - Assembly is FreeCAD 1.x builtin workbench (Assembly::AssemblyObject,
   App::Link instances, App::FeaturePython joints).
+- JOINT REFERENCES come in two layouts and both must be read (issue #1):
+  1.1's Assembly workbench writes `Reference1 = (AssemblyObject,
+  ["LinkName.Vertex1", ...])` — the instance is the HEAD of the subname
+  path and the joint's `OutList` holds only the Assembly, so an OutList
+  scan finds nothing; 1.0 and older write `(link, ["Vertex1", ...])`,
+  where the referenced object IS the instance. GroundedJoint carries
+  `ObjectToGround`. fc_analyse.ref_targets/joint_connects handle all
+  three, and joints also report `suppressed` (a suppressed joint is in the
+  tree but constrains nothing, so /judge does not count it as joining).
 - Origin planes/axes have 1e100 bboxes — filter to PartDesign::Body.
 
 ### MusaCAD 0.1.0
@@ -185,5 +198,11 @@ composition/rework), qa-checker (verify PDFs after every /export).
   (deburr/chamfer, N-grade finish, treatments, process notes). No
   decorative GD&T; reference-drawing conventions are the defaults.
 - reports/, manifests/, output/ are generated artifacts (gitignored).
+- TESTS: `python3 -m unittest discover -s tests -v` (stdlib unittest, no
+  venv). tests/make_fixtures.py builds throwaway FreeCAD assemblies in a
+  temp dir with the real Assembly workbench; FreeCAD-dependent tests skip
+  themselves when the AppImage is absent. The suite never writes to
+  reports/, manifests/ or output/, so it is safe mid-project. Add tests
+  with every fix.
 - Python 3.12 stdlib only (no venv); pdfunite/pdfinfo/pdftoppm (poppler)
   for PDF ops; Qt 6.4.2 system-wide for the harness build.

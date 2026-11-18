@@ -101,9 +101,99 @@ def analyse_part(path):
     return out
 
 
+JOINT_REF_PROPS = ("Reference1", "Reference2")
+
+
+def instance_index(doc):
+    """Maps for resolving a joint reference to a link instance.
+
+    Returns (by_name, by_label); a label is only a fallback, as FreeCAD
+    subname paths normally carry internal Names.
+    """
+    by_name, by_label = {}, {}
+    for obj in doc.Objects:
+        if obj.TypeId == "App::Link":
+            by_name[obj.Name] = obj.Name
+            by_label.setdefault(obj.Label, obj.Name)
+    return by_name, by_label
+
+
+def ref_targets(ref, by_name, by_label):
+    """Instance names one joint Reference property points at.
+
+    Two layouts exist in the wild (issue #1):
+      * FreeCAD 1.0 / older: ``(link, ["Vertex1", "Vertex1"])`` -- the
+        referenced object IS the instance, and it shows up in the joint's
+        OutList, so the old OutList scan found it.
+      * FreeCAD 1.1 Assembly workbench: ``(AssemblyObject,
+        ["LinkName.Vertex1", "LinkName.Vertex1"])`` -- the instance is the
+        head of the subname path and the OutList holds only the Assembly
+        object, so the OutList scan found nothing at all.
+    A reference into a sub-assembly container behaves like the second case.
+    """
+    if not ref:
+        return []
+    obj = ref[0]
+    if obj is None:
+        return []
+    if getattr(obj, "TypeId", "") == "App::Link":
+        return [obj.Name]
+    out = []
+    for sub in (ref[1] or []):
+        # FreeCAD marks an element it could not resolve as "?Vertex15"
+        head = str(sub).lstrip("?").split(".")[0]
+        name = by_name.get(head) or by_label.get(head)
+        if name:
+            out.append(name)
+    return out
+
+
+def joint_connects(obj, by_name, by_label):
+    """Link instances a joint connects, newest layout first, in order."""
+    names = []
+
+    def add(n):
+        if n and n not in names:
+            names.append(n)
+
+    ground = getattr(obj, "ObjectToGround", None)
+    add(getattr(ground, "Name", None))
+    for prop in JOINT_REF_PROPS:
+        for n in ref_targets(getattr(obj, prop, None), by_name, by_label):
+            add(n)
+    for o in obj.OutList:       # pre-1.1 layouts and other workbenches
+        if o.TypeId == "App::Link":
+            add(o.Name)
+    return names
+
+
+def is_joint(obj):
+    return obj.TypeId == "App::FeaturePython" and (
+        hasattr(obj, "JointType") or hasattr(obj, "ObjectToGround")
+        or "Grounded" in obj.Name)
+
+
+def joint_info(obj, by_name, by_label):
+    grounded = (hasattr(obj, "ObjectToGround")
+                or "Grounded" in obj.Label
+                or obj.Name.startswith("GroundedJoint"))
+    jtype = getattr(obj, "JointType", None)
+    return {
+        "name": obj.Name, "label": obj.Label,
+        "type": str(jtype) if jtype else ("Grounded" if grounded else "?"),
+        "grounded": grounded,
+        # a suppressed joint is present but constrains nothing
+        "suppressed": bool(getattr(obj, "Suppressed", False)),
+        "connects": joint_connects(obj, by_name, by_label),
+    }
+
+
 def analyse_assembly(path):
     doc = FreeCAD.openDocument(path)
     instances, joints, issues = [], [], []
+    # links are indexed up front: joints and instances are interleaved in
+    # doc.Objects, so a joint can be met before the links it references
+    by_name, by_label = instance_index(doc)
     for obj in doc.Objects:
         if obj.TypeId == "App::Link":
             lo = obj.LinkedObject
@@ -129,20 +219,8 @@ def analyse_assembly(path):
             except Exception:
                 pass
             instances.append(inst)
-        elif obj.TypeId == "App::FeaturePython" and hasattr(obj, "JointType"):
-            joints.append({
-                "name": obj.Name, "label": obj.Label,
-                "type": str(getattr(obj, "JointType", "?")),
-                "grounded": "Grounded" in obj.Label
-                            or obj.Name.startswith("GroundedJoint"),
-                "connects": [o.Name for o in obj.OutList
-                             if o.TypeId == "App::Link"],
-            })
-        elif obj.TypeId == "App::FeaturePython" and "Grounded" in obj.Name:
-            joints.append({"name": obj.Name, "label": obj.Label,
-                           "type": "Grounded", "grounded": True,
-                           "connects": [o.Name for o in obj.OutList
-                                        if o.TypeId == "App::Link"]})
+        elif is_joint(obj):
+            joints.append(joint_info(obj, by_name, by_label))
     wb = ("builtin-assembly"
           if any(o.TypeId == "Assembly::AssemblyObject" for o in doc.Objects)
           else "unknown")
@@ -181,6 +259,10 @@ def main():
     p("ANALYSIS_WRITTEN", out_path)
 
 
-main()
-sys.stdout.flush()
-os._exit(0)
+# FreeCAD's `-c` executes this file as a module named after the file, not as
+# __main__, so a __main__ guard would never fire. The harness always sets
+# FABPIPE_ARGS; its absence means we are being imported (by the tests).
+if "FABPIPE_ARGS" in os.environ:
+    main()
+    sys.stdout.flush()
+    os._exit(0)
