@@ -44,9 +44,15 @@ def main() -> None:
             else:
                 die(f"{sheet['drg_no']}: shaded pictorial missing: {png} "
                     "(run: python3 src/shaded.py)")
+        extra = []
+        lg = sheet.get("logo")
+        if lg:
+            if not Path(lg["png"]).exists():
+                die(f"{sheet['drg_no']}: title block logo missing: {lg['png']}")
+            extra.append((lg["png"], *lg["rect"]))
         info = run_musa_plot(Path(sheet["file"]), pdf,
                              scale=(num, den), window=tuple(sheet["window"]),
-                             stamp=stamp)
+                             stamp=stamp, stamps=extra)
         eff = float(info["mm_per_unit"])
         want = num / den
         if abs(eff - want) > 1e-6:

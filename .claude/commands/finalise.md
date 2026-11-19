@@ -52,7 +52,12 @@ but the user decides.
      IS 2102 general tolerance block always stays.
 3. Also settle the assembly sheet: description, drg_no, front_view, whether
    a section is needed (e.g. to show the internal rods), scale.
-4. Set top-level fields: project, drg_no_prefix, rev (default 00).
+4. Set top-level fields: project, drg_no_prefix, rev (default 00), and
+   template (absolute path to the PROJECT's own title block, e.g.
+   <project>/fabrication/template/template_<company>.musa, with an
+   optional <stem>.logo.json sidecar + PNG beside it; omitted = the
+   pipeline default). Company templates and logos are project files —
+   never add them to the pipeline's templates/.
 5. Edit manifests/manifest_draft.json to the agreed values, show the user a
    summary table, and on their confirmation run:
    `python3 src/manifest.py lock manifests/manifest_draft.json`

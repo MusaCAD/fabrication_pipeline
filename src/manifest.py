@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import MANIFESTS_DIR, REPORTS_DIR, die, read_json, write_json
+import musa_writer as mw
 
 VIEW_DIRS = {   # named front-view choices: (view_dir, up) in world coords
     "+X": ([1, 0, 0], [0, 0, 1]), "-X": ([-1, 0, 0], [0, 0, 1]),
@@ -173,6 +174,8 @@ def lock(draft_path: Path) -> None:
         if len(num_den) != 2 or not all(s.strip().isdigit() for s in num_den):
             problems.append(f"{part.get('file')}: bad scale "
                             f"{part.get('scale')!r} (want N:D)")
+    if m.get("template"):
+        problems += mw.template_problems(m["template"])
     asm = m.get("assembly_sheet") or {}
     if asm and asm.get("enabled", True) and \
             str(asm.get("drg_no", "TBD")).startswith("TBD"):

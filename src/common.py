@@ -78,24 +78,37 @@ def run_freecad(script: Path, *args: str, timeout: int = 300) -> str:
     return out
 
 
-def run_musa_plot(musa_file: Path, pdf_out: Path, *, scale: tuple[float, float],
+def musa_plot_cmd(musa_file: Path, pdf_out: Path, *, scale: tuple[float, float],
                   window: tuple[float, float, float, float],
-                  stamp: tuple | None = None) -> dict:
-    """Plot a sheet .musa to A4 portrait PDF at a fixed scale; parse the
-    summary line into a dict (paper, mm_per_unit, scale, ...) for QA.
-    stamp = (png_path, x, y, w, h) in sheet units (shaded pictorial)."""
-    env = dict(os.environ)
-    env["QT_QPA_PLATFORM"] = "offscreen"
+                  stamps: list | None = None) -> list[str]:
+    """The harness command line. stamps: (png_path, x, y, w, h) tuples in
+    sheet units — the shaded pictorial and the title block's logo."""
     cmd = [str(MUSA_PLOT), "--file", str(musa_file), str(pdf_out),
            "--paper", "A4", "--portrait",
            "--scale", f"{scale[0]}:{scale[1]}",
            "--window", ",".join(f"{v:.6f}" for v in window)]
-    if stamp is not None:
-        cmd += ["--stamp", stamp[0] + "," +
-                ",".join(f"{v:.6f}" for v in stamp[1:])]
+    for st in stamps or []:
+        cmd += ["--stamp", str(st[0]) + "," +
+                ",".join(f"{v:.6f}" for v in st[1:])]
     # floor hairline strokes (stroke-font text plots at width 0 upstream —
     # vendor print legibility; see musacad-gap-issues)
     cmd += ["--min-lw", "0.30"]
+    return cmd
+
+
+def run_musa_plot(musa_file: Path, pdf_out: Path, *, scale: tuple[float, float],
+                  window: tuple[float, float, float, float],
+                  stamp: tuple | None = None,
+                  stamps: list | None = None) -> dict:
+    """Plot a sheet .musa to A4 portrait PDF at a fixed scale; parse the
+    summary line into a dict (paper, mm_per_unit, scale, ...) for QA.
+    stamp = (png_path, x, y, w, h) in sheet units (shaded pictorial);
+    stamps = several of them (the pictorial and the title block's logo)."""
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    all_stamps = ([stamp] if stamp is not None else []) + list(stamps or [])
+    cmd = musa_plot_cmd(musa_file, pdf_out, scale=scale, window=window,
+                        stamps=all_stamps)
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     line = next((l for l in proc.stdout.splitlines()
                  if l.startswith("[musa_plot] ok")), None)

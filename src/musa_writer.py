@@ -166,12 +166,67 @@ ACTIVE_TEMPLATE = TEMPLATE      # swapped per project by use_template()
 def use_template(path: Path) -> None:
     """Choose the title-block sheet for this run. Every template must share
     the geometry and extents of templates/template.musa — the scale model
-    depends on those constants — so a variant may differ only in its text."""
+    depends on those constants — so a variant may differ only in its text,
+    in the company mark drawn inside the logo box, and in an optional logo
+    image (template_logo)."""
     global ACTIVE_TEMPLATE
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"template not found: {path}")
     ACTIVE_TEMPLATE = path
+
+
+def resolve_template(spec: str | Path) -> Path:
+    """The title block a manifest's "template" names. Company title blocks
+    belong to the PROJECT, not the pipeline: give an absolute path to the
+    project's own .musa (its logo sidecar sits next to it). A bare name is
+    looked up in the pipeline's templates/, which ships only the default."""
+    p = Path(spec).expanduser()
+    return p if p.is_absolute() else TEMPLATE.parent / p
+
+
+def template_problems(spec: str | Path) -> list[str]:
+    """Why a manifest's template cannot be drawn on (empty = fine): it must
+    exist, parse with the default template's record kinds, and any logo
+    sidecar must resolve."""
+    path = resolve_template(spec)
+    if not path.exists():
+        return [f"template not found: {path}"]
+    try:
+        parse_template(path)
+        template_logo(path)
+    except Exception as e:   # noqa: BLE001 — report, never crash the lock
+        return [f"template {path}: {e}"]
+    return []
+
+
+def png_size(path: Path) -> tuple[int, int]:
+    """(width, height) in pixels from a PNG's IHDR chunk (stdlib only)."""
+    head = Path(path).read_bytes()[:24]
+    if head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        raise ValueError(f"not a PNG: {path}")
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def template_logo(path: Path | None = None) -> dict | None:
+    """Optional company logo of a per-project title block: a sidecar
+    `<template stem>.logo.json` next to the template, {"png": file relative
+    to the template's folder, "box": [x0, y0, x1, y1] in template units}.
+    The harness stamps the PNG into that box (export.py, musa_plot --stamp),
+    letterboxed to the image's own aspect. None when the template has none."""
+    path = Path(path) if path is not None else ACTIVE_TEMPLATE
+    side = path.with_name(path.stem + ".logo.json")
+    if not side.exists():
+        return None
+    import json
+    d = json.loads(side.read_text())
+    png = (path.parent / d["png"]).resolve()
+    if not png.exists():
+        raise FileNotFoundError(f"template logo not found: {png}")
+    x0, y0, x1, y1 = (float(v) for v in d["box"])
+    if not (x1 > x0 and y1 > y0):
+        raise ValueError(f"template logo box is empty: {d['box']}")
+    return {"png": png, "box": (x0, y0, x1, y1), "px": png_size(png)}
 
 
 def parse_template(path: Path | None = None) -> list[TemplateRecord]:
@@ -256,6 +311,22 @@ class SheetContext:
 
     def add(self, *records: str) -> None:
         self.entities.extend(records)
+
+    def logo_stamp(self) -> dict | None:
+        """The active template's logo as a harness stamp: {"png": absolute
+        path, "rect": [x, y, w, h]} in sheet units, the largest rect of the
+        image's aspect centred in the template's logo box. None if the
+        template has no logo."""
+        lg = template_logo()
+        if lg is None:
+            return None
+        x0, y0, x1, y1 = lg["box"]
+        bw, bh = (x1 - x0) * self.t, (y1 - y0) * self.t
+        pw, ph = lg["px"]
+        k = min(bw / pw, bh / ph)
+        w, h = pw * k, ph * k
+        cx, cy = self.tx(0.5 * (x0 + x1)), self.ty(0.5 * (y0 + y1))
+        return {"png": str(lg["png"]), "rect": [cx - w / 2, cy - h / 2, w, h]}
 
     def add_template(self, replacements: dict[str, str],
                      additions: list[str] | None = None,

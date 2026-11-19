@@ -4,7 +4,7 @@
 
 A repeatable, headless pipeline that takes **FreeCAD** assembly/part models,
 analyses and validates them, and produces print-ready, vendor-complete
-**A4 fabrication drawings (PDF)** on the RES title-block template using the
+**A4 fabrication drawings (PDF)** on the project's own title-block template using the
 [MusaCAD](https://github.com/MusaCAD/MusaCAD) native `.musa` format and its
 real plot pipeline.
 
@@ -67,7 +67,8 @@ tests/        unittest suite (stdlib only; builds throwaway FreeCAD
               fixtures for the assembly checks)
 tools/        musa_plot: headless .musa -> PDF harness (paper, scale,
               window, raster stamps) derived from MusaCAD's plot_check
-templates/    RES title-block template (.musa v14)
+templates/    default title-block template (.musa v14); company
+              title blocks and logos live in each project's folder
 .claude/      slash commands + subagents (the operator interface)
 reports/ manifests/ output/    generated per-project artifacts (gitignored)
 ```

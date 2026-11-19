@@ -2907,8 +2907,7 @@ def main() -> None:
         die("manifest is not locked — /finalise must lock it")
     if m.get("template"):
         # per-project title block: same sheet geometry, different company
-        mw.use_template(Path(__file__).resolve().parent.parent /
-                        "templates" / m["template"])
+        mw.use_template(mw.resolve_template(m["template"]))
         print(f"template: {m['template']}")
     analysis_path = Path(__file__).resolve().parent.parent / "reports" / \
         "analysis.json"
@@ -2942,7 +2941,8 @@ def main() -> None:
                        "replaced_fields": replaced, "layout": lay,
                        "stamp": {"png": f"output/work/shaded/"
                                         f"{part['part_id']}.png",
-                                 "rect": list(stamp_rects[part['drg_no']])}})
+                                 "rect": list(stamp_rects[part['drg_no']])},
+                       "logo": ctx.logo_stamp()})
         if lay["unresolved"]:
             problems.append(f"{part['drg_no']}: {lay['unresolved']}")
         print(f"sheet {idx}/{total}: {out.name}  scale {part['scale']}  "
@@ -2962,7 +2962,8 @@ def main() -> None:
                        "layout": lay,
                        "stamp": {"png": "output/work/shaded/assembly.png",
                                  "rect": list(stamp_rects[
-                                     m["assembly_sheet"]["drg_no"]])}})
+                                     m["assembly_sheet"]["drg_no"]])},
+                       "logo": ctx.logo_stamp()})
         if lay["unresolved"]:
             problems.append(f"{m['assembly_sheet']['drg_no']}: "
                             f"{lay['unresolved']}")

@@ -5,6 +5,35 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.3.0 — 2026-11-19
+
+### Changed
+
+- **Company title blocks are project files.** The pipeline ships only its
+  default `templates/template.musa`; a project keeps its own title block
+  in its own folder and the manifest names it by absolute path
+  (`"template": "/path/to/project/fabrication/template/template_x.musa"`).
+  A bare name still resolves inside `templates/`. Company templates are
+  removed from `templates/`.
+  **Upgrade:** copy any company template you used from `templates/` into
+  its project and set the manifest's `"template"` to that absolute path.
+- `/finalise` (`manifest.py lock`) refuses a template that is missing,
+  does not parse, or whose logo does not resolve.
+
+### Added
+
+- **Company logos on the title block.** A template may carry a raster
+  logo: a sidecar `<template stem>.logo.json` next to it names a PNG
+  (relative to the template's folder) and a box in template units. `/draw`
+  records each sheet's logo rectangle in `sheets.json` (scaled with the
+  template and fitted to the image's aspect, so it prints at the same size
+  at every sheet scale) and `/export` stamps it into the PDF next to the
+  shaded pictorial. Templates without a sidecar plot exactly as before.
+- `common.musa_plot_cmd` builds the harness command line; `run_musa_plot`
+  takes any number of stamps.
+- Tests for the logo sidecar, the stamp rectangle at several scales, the
+  harness command, template resolution and the lock-time template check.
+
 ## v0.2.0 — 2026-11-18
 
 ### Fixed

@@ -149,6 +149,22 @@ co-author line to git commits.
   analyses a part pack with no assembly document; the analysis carries an
   empty assembly stub and /judge skips every assembly-level check.
 - Round 0 output: 4 part sheets + 1 assembly sheet + merged print set.
+- COMPANY TITLE BLOCKS ARE PROJECT FILES, never pipeline files: the
+  pipeline is a tool and holds no project or company information. A
+  project keeps its title block in its own folder (e.g.
+  <project>/fabrication/template/template_<company>.musa) and the manifest
+  names it by absolute path: top-level `"template": "/abs/path.musa"`
+  (omitted = the pipeline's default templates/template.musa; a bare name
+  resolves only inside templates/). A variant keeps template.musa's
+  geometry and extents exactly (the scale model rests on them) and changes
+  only its text, the vector mark in the logo box (x 800.9–1044.4,
+  y 335–430 template units) and an optional raster logo: sidecar
+  `<stem>.logo.json` next to it, {"png": path relative to the template's
+  folder, "box": [x0, y0, x1, y1] template units}. manifest.py lock checks
+  the template parses and its logo resolves; draw.py writes each sheet's
+  "logo" stamp (SheetContext.logo_stamp: box scaled by t, letterboxed to
+  the PNG's aspect, so it prints the same size at every sheet scale) and
+  export.py hands it to musa_plot as a second --stamp after the pictorial.
 - Title block per sheet: DESCRIPTION, DRG NO., SCALE, REV (00), SHEET
   field, dates DD-MM-YY, DESIGNED/DRAWN = "Er. P. PRANAY" (template
   default). General notes/tolerance block (IS 2102) stays as in the
