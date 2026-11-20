@@ -647,8 +647,27 @@ def _sym_perpendicularity(x, y, s, props):
             line((x + s / 2, y + k), (x + s / 2, y + s - k), props)]
 
 
+def _sym_coaxiality(x, y, s, props):
+    """Coaxiality / concentricity (ISO 1101): two concentric circles. Its
+    tolerance zone is a cylinder, so the tolerance carries the %%c sign."""
+    c = (x + s / 2, y + s / 2)
+    return [circle(c, s * 0.34, props), circle(c, s * 0.18, props)]
+
+
+def _sym_runout(x, y, s, props):
+    """Circular runout (ISO 1101): one oblique arrow, pointing up and to the
+    right at 45 degrees, with a filled-look open head (two strokes)."""
+    k = s * 0.2
+    a, b = (x + k, y + k), (x + s - k, y + s - k)
+    hd = s * 0.25
+    return [line(a, b, props),
+            line(b, (b[0] - hd, b[1]), props),
+            line(b, (b[0], b[1] - hd), props)]
+
+
 _FCF_SYMBOLS = {"flatness": _sym_flatness, "position": _sym_position,
-                "perpendicularity": _sym_perpendicularity}
+                "perpendicularity": _sym_perpendicularity,
+                "coaxiality": _sym_coaxiality, "runout": _sym_runout}
 
 
 def _sym_cbore(x, y, s, props):
