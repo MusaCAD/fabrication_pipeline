@@ -145,6 +145,20 @@ def dimstyle(text_height: float, arrow_size: float, *, precision: int = 0,
             f"{precision} 1 25 {cols}{name}")
 
 
+def dimunits(idx: int, lfac: float = 1.0) -> str:
+    """DIMUNITS for style `idx`, overriding only DIMLFAC (the linear factor
+    every measured length is multiplied by).
+
+    A DIM always displays the distance between its own def points
+    (dimension.cpp measures them; nothing can fake the value), so the only
+    honest way to dimension geometry drawn at k times size — an enlarged
+    DETAIL view — is a style with lfac = 1/k. All 15 fields are written,
+    the other 13 at properties.hpp's own defaults; "-" is an empty text."""
+    if lfac <= 0.0:
+        raise ValueError(f"lfac must be > 0, got {lfac}")
+    return (f"DIMUNITS {int(idx)} 2 0 0 {n(lfac)} 0 0 0 2 2 25.4 0 - -")
+
+
 # ------------------------------------------------------- template handling
 
 _NUM = r"[-+0-9.eE]+"
@@ -293,6 +307,10 @@ class SheetContext:
                           self.tx(da[2]), self.ty(da[3]))
         self.entities: list[str] = []
         self.dimstyles: list[str] = []
+        # DIMUNITS records (one per style that needs a non-default linear
+        # factor); they reference a style by INDEX, so they are kept apart
+        # from the DIMSTYLE list, whose length IS the next free index
+        self.dimunits: list[str] = []
 
     # template-units -> sheet mm
     def tx(self, x: float) -> float:
@@ -385,7 +403,10 @@ class SheetContext:
                 f"LTSCALE {lts}",
                 "LAYER 255 255 255 0 25 1 0 0 0"]
         styles = self.dimstyles or [dimstyle(self.mm(3.0), self.mm(2.5))]
-        return "\n".join(head + styles + self.entities + ["END"]) + "\n"
+        # DIMUNITS must follow the DIMSTYLE records: the parser rejects an
+        # index that no style has reached yet (native_format.cpp:3305)
+        return "\n".join(head + styles + self.dimunits + self.entities
+                          + ["END"]) + "\n"
 
 
 # --------------------------------------------- title-block field geometry

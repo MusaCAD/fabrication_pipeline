@@ -74,10 +74,20 @@ co-author line to git commits.
   --paper A4 --portrait --scale N:D --window x0,y0,x1,y1`
   → prints `[musa_plot] ok ... mm_per_unit=...` (parse this for QA);
   exit 1 + "parse FAILED" on bad .musa.
+- `--dump-dims` prints one line per DIM — def points, measured distance and
+  the LABEL MusaCAD composes for it (compute_dim_geometry, the plot's own
+  path) — then exits without plotting. The only way to check what a sheet
+  READS; common.dump_dims() parses it. Use it on every detail view.
 - Parser is STRICT: exact token counts; TEXT/MTEXT need content + font lines
   (font line mandatory in v14, empty = stroke font); file starts
   `MUSACAD 14`, ends `END`; unknown record key kills the whole file.
 - DIM entities always display the measured def-point distance (cannot fake).
+  The ONE honest lever is `DIMUNITS idx lunit frac rnd lfac aunit adec+1 alt
+  altu altd altf altrnd post apost` (15 tokens exactly, v40): its `lfac`
+  (DIMLFAC) multiplies every measured length before it is written. That is
+  how an enlarged DETAIL view reads true millimetres — geometry at k times
+  size, style at lfac = 1/k. musa_writer.dimunits() writes it; it must come
+  AFTER the DIMSTYLE records (SheetContext.dimunits renders it there).
 - Angles in radians. `%%p` ±, `%%c` ⌀, `%%d` °. ANSI31 = section hatch.
 - Always use src/musa_writer.py helpers, never hand-format records.
 
@@ -111,6 +121,21 @@ co-author line to git commits.
   draw.py section_job + cutting_plane together if first-angle is requested.
   No extra views — features invisible in both views are flagged to the
   user, never silently added.
+- DETAIL VIEWS (the one sanctioned third view): manifest part
+  `"detail_view": {label, scale, of: "front"|"section"|"aux"|"flat",
+  center: [x, y], radius}` — centre and radius are in the PARENT view's own
+  coordinates. The region is CLIPPED out of that view's projected
+  primitives (draw.clip_prims / clip_loop_to_circle for hatch), so the
+  detail is the parent's own ink enlarged and the two can never disagree.
+  It is drawn k = (detail scale)/(sheet scale) times full size, bounded by
+  a thin circle, captioned "DETAIL B (2:1)", with the matching circle +
+  letter on the parent view. Its dims are authored in the parent's true
+  millimetres (draw.detail_specs moves them) and read true through
+  DIMLFAC = 1/k. It is placed in free space clear of the views' dimension
+  gutters, with a DETAIL_PAD_MM ring for its own dims, and is
+  collision-checked like everything else. /finalise refuses a detail whose
+  parent view is not on the sheet, whose scale is not standard or does not
+  enlarge, or whose label collides with the section's.
 - ANGULAR REFERENCES (for less technical vendors): manifest part "angle_refs"
   {"rays": [{angle, r0, r1, text}], "zero": {at, text}, "ccw": {r, a0, a1, at,
   lines}} draws a labelled centre line through each angularly placed feature,
@@ -213,6 +238,18 @@ composition/rework), qa-checker (verify PDFs after every /export).
   during /finalise elicitation, plus per-sheet fabrication notes
   (deburr/chamfer, N-grade finish, treatments, process notes). No
   decorative GD&T; reference-drawing conventions are the defaults.
+  SYMBOLS: flatness, position, perpendicularity, coaxiality (concentric
+  circles; its zone is a cylinder, so the tolerance carries %%c) and
+  circular runout (oblique arrow) — musa_writer._FCF_SYMBOLS.
+  DATUMS: a target naming a view edge (bottom_face / short_edge /
+  long_edge) marks a SURFACE. A datum on a FEATURE OF SIZE — a bore or a
+  spigot, whose datum is its AXIS — uses `"target": "<kind>_r<radius>"`
+  (e.g. `bore_r12.5`, radius always in TRUE mm, in any view) and the
+  triangle goes on that feature's own size annotation: the shoulder of its
+  callout leader (ISO 1101 / ASME Y14.5), or in line with its diameter
+  dimension line when it is dimensioned that way. No size annotation for
+  that feature = the sheet fails; a datum triangle on an undimensioned
+  feature is not a datum.
 - reports/, manifests/, output/ are generated artifacts (gitignored).
 - TESTS: `python3 -m unittest discover -s tests -v` (stdlib unittest, no
   venv). tests/make_fixtures.py builds throwaway FreeCAD assemblies in a

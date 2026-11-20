@@ -11,3 +11,6 @@ __pycache__/
 # per-project reference material (may contain proprietary RES drawings)
 reference/
 tools/musacad-libs/
+# sample working files (the PDF is committed; the rest regenerates)
+samples/out/*.musa
+samples/out/sample_analysis.json

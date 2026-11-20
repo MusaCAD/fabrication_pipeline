@@ -501,6 +501,338 @@ def place_views(ctx: mw.SheetContext, front, section, projection="below",
     return offs
 
 
+# ------------------------------------------------------------ detail views
+# An enlarged DETAIL view (ISO 128-34 / ASME Y14.3): a circled region of the
+# front view or the section, redrawn larger beside it. The region is CLIPPED
+# out of the parent view's already-projected primitives — the detail is the
+# parent's own ink, enlarged, so the two can never disagree.
+#
+# A DIM always displays the distance between its own def points (MusaCAD
+# measures them; nothing can fake the value), so geometry drawn at k times
+# size would read k times the truth. The detail's dimensions therefore run
+# through a DIMSTYLE carrying DIMLFAC = 1/k (musa_writer.dimunits): the def
+# points stay on the enlarged geometry and the value reads true millimetres.
+
+# Clear ring reserved round a detail view for its OWN dimensions: the
+# nearest stand-off a location dim uses (LOCDIM_STANDOFFS[0]) plus its label
+# and a margin. Reserve less and the detail's dims have nowhere to go.
+DETAIL_PAD_MM = 15.0
+
+
+def detail_factor(part: dict, spec: dict) -> float:
+    """Sheet units per true mm inside the detail view.
+
+    The sheet prints at num:den and the detail must print at its own
+    dnum:dden, so its geometry is drawn k = (dnum/dden) * (den/num) times
+    full size: a 2:1 detail on a 1:5 sheet is 10x, with DIMLFAC 0.1."""
+    num, den = parse_scale(part["scale"])
+    dnum, dden = parse_scale(spec["scale"])
+    return (dnum / dden) * (den / num)
+
+
+def _span_in_circle(a, b, c, r):
+    """(t0, t1) of the segment a->b that lies inside circle (c, r), or None."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    fx, fy = a[0] - c[0], a[1] - c[1]
+    A = dx * dx + dy * dy
+    if A <= 1e-12:                       # degenerate: a point
+        return (0.0, 1.0) if math.hypot(fx, fy) <= r else None
+    B = 2.0 * (fx * dx + fy * dy)
+    C = fx * fx + fy * fy - r * r
+    disc = B * B - 4.0 * A * C
+    if disc <= 0.0:
+        return None
+    sq = math.sqrt(disc)
+    t0 = max(0.0, (-B - sq) / (2.0 * A))
+    t1 = min(1.0, (-B + sq) / (2.0 * A))
+    return (t0, t1) if t1 - t0 > 1e-9 else None
+
+
+def clip_seg(a, b, c, r):
+    """The part of segment a->b inside circle (c, r), or None."""
+    sp = _span_in_circle(a, b, c, r)
+    if sp is None:
+        return None
+    t0, t1 = sp
+    return ((a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0),
+            (a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1))
+
+
+def _circle_span_in_circle(cc, rr, c, r):
+    """Angle span of the circle (cc, rr) inside circle (c, r), or None.
+
+    Three degenerate cases come first: wholly inside, wholly outside, and
+    the clip circle swallowed by the feature circle (whose circumference
+    then never enters it)."""
+    d = math.hypot(c[0] - cc[0], c[1] - cc[1])
+    if d + rr <= r:
+        return "all"
+    if d >= r + rr or d + r <= rr:
+        return None
+    cosv = (d * d + rr * rr - r * r) / (2.0 * d * rr)
+    half = math.acos(max(-1.0, min(1.0, cosv)))
+    base = math.atan2(c[1] - cc[1], c[0] - cc[0])
+    return (base - half, base + half)
+
+
+def clip_arc(cc, rr, a0, a1, c, r):
+    """Pieces (a0, a1) of the CCW arc a0->a1 on circle (cc, rr) inside the
+    clip circle (c, r). A full circle is a0 == a1 (or a 2 pi sweep)."""
+    span = _circle_span_in_circle(cc, rr, c, r)
+    if span is None:
+        return []
+    w = (a1 - a0) % (2.0 * math.pi)
+    if w <= 1e-12:
+        w = 2.0 * math.pi
+    if span == "all":
+        return [(a0, a0 + w)]
+    lo_s, hi_s = span
+    out = []
+    for k in (-1, 0, 1, 2):              # the span, turned into the arc's range
+        lo = max(a0, lo_s + 2.0 * math.pi * k)
+        hi = min(a0 + w, hi_s + 2.0 * math.pi * k)
+        if hi - lo > 1e-9:
+            out.append((lo, hi))
+    return out
+
+
+def clip_prims(prims, c, r):
+    """Projected primitives clipped to the circle (c, r). Polylines come
+    back as their clipped legs: emit_prims draws a poly open, so its legs
+    carry exactly the same ink."""
+    out = []
+    for pr in prims:
+        t = pr["t"]
+        if t == "seg":
+            sg = clip_seg(pr["a"], pr["b"], c, r)
+            if sg:
+                out.append({"t": "seg", "a": list(sg[0]), "b": list(sg[1])})
+        elif t == "poly":
+            pts = pr["pts"]
+            for q0, q1 in zip(pts, pts[1:]):
+                sg = clip_seg(q0, q1, c, r)
+                if sg:
+                    out.append({"t": "seg", "a": list(sg[0]),
+                                "b": list(sg[1])})
+        elif t in ("circle", "arc"):
+            cc, rr = pr["c"], pr["r"]
+            a0 = pr.get("a0", 0.0)
+            a1 = pr.get("a1", 0.0) if t == "arc" else 0.0
+            pieces = clip_arc(cc, rr, a0, a1, c, r)
+            if t == "circle" and pieces == [(a0, a0 + 2.0 * math.pi)]:
+                out.append({"t": "circle", "c": list(cc), "r": rr})
+                continue
+            for lo, hi in pieces:
+                out.append({"t": "arc", "c": list(cc), "r": rr,
+                            "a0": lo, "a1": hi})
+    return out
+
+
+def _circle_polygon(c, r, n=72):
+    return [(c[0] + r * math.cos(2.0 * math.pi * i / n),
+             c[1] + r * math.sin(2.0 * math.pi * i / n)) for i in range(n)]
+
+
+def clip_loop_to_circle(loop, c, r, n=72):
+    """Sutherland-Hodgman clip of a hatch loop against the detail circle
+    (approximated by a regular n-gon, which is convex — the algorithm's one
+    requirement). Returns [] when nothing of the loop is inside."""
+    poly = list(loop)
+    for i in range(n):
+        if not poly:
+            return []
+        e0 = (c[0] + r * math.cos(2.0 * math.pi * i / n),
+              c[1] + r * math.sin(2.0 * math.pi * i / n))
+        e1 = (c[0] + r * math.cos(2.0 * math.pi * (i + 1) / n),
+              c[1] + r * math.sin(2.0 * math.pi * (i + 1) / n))
+        ex, ey = e1[0] - e0[0], e1[1] - e0[1]
+
+        def inside(p):
+            return (ex * (p[1] - e0[1]) - ey * (p[0] - e0[0])) >= -1e-12
+
+        def cut(p, q):
+            px, py = q[0] - p[0], q[1] - p[1]
+            den = ex * py - ey * px
+            if abs(den) < 1e-15:
+                return p
+            t = (ex * (p[1] - e0[1]) - ey * (p[0] - e0[0])) / den
+            return (p[0] - px * t, p[1] - py * t)
+
+        nxt = []
+        for k, cur in enumerate(poly):
+            prv = poly[k - 1]
+            if inside(cur):
+                if not inside(prv):
+                    nxt.append(cut(prv, cur))
+                nxt.append(cur)
+            elif inside(prv):
+                nxt.append(cut(prv, cur))
+        poly = nxt
+    return poly
+
+
+def detail_job(parent: dict, spec: dict, k: float) -> dict:
+    """The detail view as a projected job: the parent's primitives clipped
+    to the detail circle, moved so the region centre is the origin, and
+    scaled by k. Its bounds ARE the circle (radius r*k) — the boundary is
+    drawn, so the view occupies that square whatever ink falls inside."""
+    cen = [float(spec["center"][0]), float(spec["center"][1])]
+    r = float(spec["radius"])
+
+    def xf(prims):
+        out = []
+        for pr in clip_prims(prims, cen, r):
+            q = dict(pr)
+            if pr["t"] == "seg":
+                q["a"] = [(pr["a"][0] - cen[0]) * k, (pr["a"][1] - cen[1]) * k]
+                q["b"] = [(pr["b"][0] - cen[0]) * k, (pr["b"][1] - cen[1]) * k]
+            else:
+                q["c"] = [(pr["c"][0] - cen[0]) * k, (pr["c"][1] - cen[1]) * k]
+                q["r"] = pr["r"] * k
+            out.append(q)
+        return out
+
+    groups = []
+    for g in parent.get("hatch_groups", []):
+        outer = clip_loop_to_circle(g["outer"], cen, r)
+        if len(outer) < 3:
+            continue
+        sc = lambda lp: [[(x - cen[0]) * k, (y - cen[1]) * k] for x, y in lp]
+        holes = [clip_loop_to_circle(h, cen, r) for h in g.get("holes", [])]
+        groups.append({"outer": sc(outer),
+                       "holes": [sc(h) for h in holes if len(h) >= 3]})
+    rk = r * k
+    return {"visible": xf(parent.get("visible", [])),
+            "hidden": xf(parent.get("hidden", [])),
+            "hatch_groups": groups,
+            "bounds": [[-rk, -rk], [rk, rk]], "detail": True}
+
+
+def _free_spot(ctx, layout, w, h, zones=(), prefer_top=True):
+    """Free rectangle of w x h in the drawing area, clear of every claim AND
+    of the views' dimension gutters (`zones`, as pictorial_box uses them —
+    the gutters are still empty at this point and a block parked in one
+    takes a dimension's only spot). Scans the upper sheet first and from the
+    right, where the reference drawings put a detail; the bottom band is the
+    last resort."""
+    ax0, ay0, ax1, ay1 = ctx.draw_area
+    pad, step = ctx.mm(3.0), ctx.mm(4.0)
+    ny = max(0, int((ay1 - pad - h - (ay0 + pad)) / step))
+    nx = max(0, int((ax1 - pad - w - (ax0 + pad)) / step))
+    rows = range(ny, -1, -1) if prefer_top else range(ny + 1)
+    for j in rows:
+        yy = ay0 + pad + j * step
+        for i in range(nx, -1, -1):
+            xx = ax0 + pad + i * step
+            r = (xx, yy, xx + w, yy + h)
+            if not layout.inside(r) or layout.collides(r):
+                continue
+            if any(Layout._overlap(r, z, 0.0) for z in zones):
+                continue
+            return r
+    return None
+
+
+def place_detail_view(ctx, layout, part, spec, parent_job, parent_off,
+                      zones=()):
+    """Reserve and draw an enlarged detail view.
+
+    Returns (records, job, offset) or (records, None, None) when the sheet
+    has no room for it — which fails the sheet, like any other annotation
+    that cannot be placed."""
+    k = detail_factor(part, spec)
+    job = detail_job(parent_job, spec, k)
+    rk = float(spec["radius"]) * k
+    label = str(spec.get("label", "B"))
+    if not job["visible"]:
+        # the region caught no geometry: the centre is off the view, or the
+        # radius is too small. An empty circle on the sheet tells the vendor
+        # nothing, so fail loudly rather than ship it.
+        layout.unresolved.append(f"detail-{label}-no-geometry")
+        return [], None, None
+    pad = ctx.mm(DETAIL_PAD_MM)
+    cap_h = ctx.mm(4.0) + ctx.mm(8.0)      # caption height + its stand-off
+    side = 2.0 * rk
+    spot = _free_spot(ctx, layout, side + 2 * pad, side + 2 * pad + cap_h,
+                      zones)
+    if spot is None:
+        layout.unresolved.append(f"detail-{label}-noroom")
+        return [], None, None
+    # the island: geometry square centred in it, caption band underneath
+    cx = (spot[0] + spot[2]) / 2.0
+    cy = spot[1] + cap_h + pad + rk
+    off = (cx, cy)                 # the detail's own origin is its centre
+    layout.claim((cx - rk, cy - rk, cx + rk, cy + rk),
+                 f"detail-{label}-view", "view")
+    recs = []
+    # boundary: the detail is bounded by the same circle that marks it on
+    # the parent view (ISO 128-34 continuous thin line)
+    recs.append(mw.circle((cx, cy), rk))
+    return recs, job, off
+
+
+def detail_marker(ctx, layout, spec, parent_job, parent_off):
+    """The circle round the region on the PARENT view, with its letter.
+
+    The circle is ink laid over the view BY DESIGN (it encloses features),
+    so it is not collision-tested; the letter is, like every other label."""
+    cen = spec["center"]
+    r = float(spec["radius"])
+    label = str(spec.get("label", "B"))
+    cx = cen[0] + parent_off[0]
+    cy = cen[1] + parent_off[1]
+    recs = [mw.circle((cx, cy), r)]
+    h = ctx.mm(4.0)
+    tw = mw.text_w(label, h)
+    gap = ctx.mm(1.6)
+    # upper right of the circle first, then round it: the letter sits
+    # OUTSIDE the boundary so it never lands on the detailed features
+    cands = []
+    for d in (0.0, 2.0, 5.0):
+        rr = r + gap + ctx.mm(d)
+        for ang in (45, 135, 225, 315, 90, 0, 180, 270):
+            a = math.radians(ang)
+            px = cx + rr * math.cos(a)
+            py = cy + rr * math.sin(a)
+            cands.append((px - tw / 2 if abs(math.cos(a)) < 0.3 else
+                          (px if math.cos(a) > 0 else px - tw),
+                          py - h / 2 if abs(math.sin(a)) < 0.3 else
+                          (py if math.sin(a) > 0 else py - h)))
+    rect = layout.place(cands, tw, h, f"detail-letter-{label}")
+    if rect is None:
+        return recs                       # already recorded as unresolved
+    recs.append(mw.mtext((rect[0], rect[1]), label, h, attach=3,
+                         props=mw.P_ANNO))
+    return recs
+
+
+def detail_specs(specs, dspec, k):
+    """Location dims for a detail view, moved into its enlarged frame.
+
+    A detail's dims are AUTHORED in the parent view's coordinates — true
+    millimetres, the same frame as detail_view.center and .radius — so the
+    manifest never has to do the k arithmetic. Here they are moved onto the
+    enlarged geometry they actually dimension; the value stays true because
+    the style carries DIMLFAC = 1/k."""
+    cen = dspec["center"]
+    out = []
+    for sp in specs:
+        if sp.get("view") != "detail":
+            out.append(sp)
+            continue
+        q = dict(sp)
+        for key in ("a", "b"):
+            q[key] = [(sp[key][0] - cen[0]) * k, (sp[key][1] - cen[1]) * k]
+        out.append(q)
+    return out
+
+
+def detail_caption(scale: str, label: str) -> str:
+    """"DETAIL B (2:1)" — the caption every detail view carries, naming its
+    own scale because it differs from the sheet's."""
+    return f"DETAIL {label} ({scale})"
+
+
 # ---------------------------------------------------- layout / annotation
 
 class Layout:
@@ -552,6 +884,20 @@ class Layout:
                 return r
         self.unresolved.append(label)
         return None
+
+    def anno_clearance(self, r) -> float:
+        """Distance from `r` to the nearest TEXT claim. A symbol that must
+        read as belonging to one annotation (a datum box on its callout's
+        shoulder) has to stand clear of every other one, or the reader
+        pairs it with the wrong label — "%%c60 [A]" when A is the bore's."""
+        best = float("inf")
+        for c in self.claims:
+            if c[5] != "anno":
+                continue
+            dx = max(c[0] - r[2], 0.0, r[0] - c[2])
+            dy = max(c[1] - r[3], 0.0, r[1] - c[3])
+            best = min(best, math.hypot(dx, dy))
+        return best
 
     def report(self):
         return {"nudges": self.nudges, "unresolved": self.unresolved,
@@ -615,21 +961,26 @@ def sheet_dimstyles(ctx):
     back to a hairline, for values too wide to sit between their own
     extension lines. dim_style_index() appends more on demand (extension
     lines that have to start further out)."""
-    ctx._dimstyle_index = {(EXT_OFFSET, EXT_EXTENSION): 0,
-                           (EXT_OFFSET, EXT_EXTENSION_CRAMPED): 1}
+    ctx.dimunits = []
+    ctx._dimstyle_index = {(EXT_OFFSET, EXT_EXTENSION, 1.0): 0,
+                           (EXT_OFFSET, EXT_EXTENSION_CRAMPED, 1.0): 1}
     return [mw.dimstyle(ctx.mm(3.0), ctx.mm(2.5), color=(255, 0, 255)),
             mw.dimstyle(ctx.mm(3.0), ctx.mm(2.5), color=(255, 0, 255),
                         name="Cramped",
                         ext_extension=ctx.mm(EXT_EXTENSION_CRAMPED))]
 
 
-def dim_style_index(ctx, ext_offset=EXT_OFFSET, ext_extension=EXT_EXTENSION):
-    """Index of a DIMSTYLE with this (ext_offset, ext_extension), in printed
-    mm; created on first use. ext_offset is how far from the def point the
-    extension line STARTS — the ISO 129-1 interrupted extension line, used
-    when a full-length one would run along drawn edges (a cutting-plane
-    line's overshoot, say) that the dim itself cannot move away from."""
-    key = (round(ext_offset, 3), round(ext_extension, 3))
+def dim_style_index(ctx, ext_offset=EXT_OFFSET, ext_extension=EXT_EXTENSION,
+                    lfac=1.0):
+    """Index of a DIMSTYLE with this (ext_offset, ext_extension, lfac), in
+    printed mm; created on first use. ext_offset is how far from the def
+    point the extension line STARTS — the ISO 129-1 interrupted extension
+    line, used when a full-length one would run along drawn edges (a
+    cutting-plane line's overshoot, say) that the dim itself cannot move
+    away from. `lfac` is DIMLFAC, the factor every measured length is
+    multiplied by before it is written: 1/k inside a detail view drawn at k
+    times size, so its dimensions read true millimetres."""
+    key = (round(ext_offset, 3), round(ext_extension, 3), round(lfac, 6))
     idx = ctx._dimstyle_index.get(key)
     if idx is None:
         idx = len(ctx.dimstyles)
@@ -637,6 +988,8 @@ def dim_style_index(ctx, ext_offset=EXT_OFFSET, ext_extension=EXT_EXTENSION):
             mw.dimstyle(ctx.mm(3.0), ctx.mm(2.5), color=(255, 0, 255),
                         name=f"Ext{idx}", ext_offset=ctx.mm(ext_offset),
                         ext_extension=ctx.mm(ext_extension)))
+        if abs(lfac - 1.0) > 1e-9:
+            ctx.dimunits.append(mw.dimunits(idx, lfac))
         ctx._dimstyle_index[key] = idx
     return idx
 
@@ -1047,9 +1400,11 @@ def dim_extents(ctx, layout, job, off, *, width_side="top",
     return recs
 
 
-def dim_circles(ctx, layout, job, off, suppress=(), limit=4):
+def dim_circles(ctx, layout, job, off, suppress=(), limit=4, lfac=1.0):
     """Diameter dims for distinct hole radii; angle candidates dodge
     collisions; radii in `suppress` are handled by callouts instead.
+    `lfac` is the view's DIMLFAC (1/k in a detail view), so the label reads
+    the true diameter of geometry drawn at k times size.
     Returns (records, {radius_key: text_rect}) — the rects anchor FCFs."""
     ox, oy = off
     h = ctx.mm(3.0)
@@ -1073,7 +1428,8 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4):
         mark = len(layout.unresolved)
         cx, cy = c["c"][0] + ox, c["c"][1] + oy
         dia = 2.0 * c["r"]
-        label = "%%c" + fmt_val(dia)
+        shown = dia * lfac            # what the reader sees (detail: dia/k)
+        label = "%%c" + fmt_val(shown)
         tw = mw.text_w(label, h)
         placed = None
         for deg in (45, 135, 315, 225):
@@ -1108,11 +1464,13 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4):
             r = layout.place([(tx, ty)], tw, 1.4 * h, f"dim-{label}",
                              ignore=("view",))
             if r is not None:
-                prec = None if abs(dia - round(dia)) < 0.005 else 2
+                prec = None if abs(shown - round(shown)) < 0.005 else 2
                 # line_pt ON the circle = MusaCAD's edge-label layout (the
                 # rect modelled above); a line_pt off the circle is taken as
                 # the label position itself (dimension.cpp), so never (0, 0)
                 recs.append(mw.dim(3, (cx, cy), (ex, ey), (ex, ey),
+                                   style=dim_style_index(
+                                       ctx, lfac=lfac) if lfac != 1.0 else 0,
                                    precision=prec))
                 rects[key] = r
                 placed = r
@@ -1211,9 +1569,11 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs):
     (ASME Y14.5 hole note: optional per-line "sym" prefix glyph, cbore /
     depth); the leader knee meets the FIRST line, the rest stack below,
     left-aligned. The claimed rect covers the whole stack incl. glyphs.
-    Returns (records, {(view, circle_r): full_rect}, suppress_radii)."""
+    Returns (records, {(view, circle_r): full_rect}, suppress_radii,
+    {(view, circle_r): (knee, text_left)}) — the last is the leader's
+    landing, where a datum on that feature of size attaches."""
     h = ctx.mm(3.2)
-    recs, rects, suppress = [], {}, {}
+    recs, rects, suppress, lands = [], {}, {}, {}
     for co in callouts:
         spec_lines = co.get("lines") or [{"text": co["text"]}]
         lines = spec_lines
@@ -1324,16 +1684,27 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs):
         if placed is not None:
             if "circle_r" in co:
                 rects[(view, round(co["circle_r"], 3))] = placed
+                lands[(view, round(co["circle_r"], 3))] = \
+                    ((knee_x, ky), (x1, ky))
             if "suppress_radii" in co:
                 suppress.setdefault(view, []).extend(co["suppress_radii"])
             elif co.get("suppress_dia_dim") and "circle_r" in co:
                 suppress.setdefault(view, []).append(co["circle_r"])
         else:
             layout.unresolved.append(label)
-    return recs, rects, suppress
+    return recs, rects, suppress, lands
 
 
 _TARGET_R = {"holes": None, "bores": None, "bosses": None}
+
+
+def _target_key(view, rad, lfacs=None):
+    """(view, radius) key for a radius target, which is authored in TRUE
+    millimetres whatever view it lands in. A detail view's geometry is k
+    times size (k = 1/DIMLFAC), so inside it the same feature has radius
+    rad * k — the key callouts and diameter dims filed it under."""
+    lf = (lfacs or {}).get(view, 1.0)
+    return (view, round(rad / lf, 3), lf)
 
 
 def _target_radius(target: str):
@@ -1345,8 +1716,127 @@ def _target_radius(target: str):
     return None
 
 
-def place_datums(ctx, layout, gdt, view_jobs, offs):
-    """Datum boxes (A/B/C) anchored to view edges. Returns (recs, pos)."""
+def _feature_circle(job, rad, off):
+    """The circle of radius `rad` a size annotation was hung on: topmost
+    row, rightmost within it — place_callouts' and dim_circles' own choice,
+    so a datum lands on the SAME feature its size dimension does."""
+    ox, oy = off
+    matches = [pr for pr in job.get("visible", [])
+               if pr["t"] == "circle" and abs(pr["r"] - rad) < 0.05]
+    if not matches:
+        return None
+    top = max(pr["c"][1] for pr in matches)
+    row = [pr for pr in matches if abs(pr["c"][1] - top) < 0.05]
+    c = max(row, key=lambda pr: pr["c"][0])
+    return (c["c"][0] + ox, c["c"][1] + oy, c["r"])
+
+
+def datum_on_landing(ctx, layout, letter, landing):
+    """Datum symbol on a leader-directed size callout.
+
+    When the feature of size is called out by a leader (`%%c25 H7 THRU`),
+    ISO 1101 and ASME Y14.5 put the datum triangle on that leader — at its
+    shoulder, where the text starts — not on a line of its own. The box
+    then hangs directly off the shoulder: a 1.2 mm stem, nothing dragged
+    across the sheet. Returns (records, box_rect) or ([], None)."""
+    (kx, ky), _ = landing
+    h = ctx.mm(3.2)
+    sq = 1.7 * h
+    gap = ctx.mm(1.2)
+    tip = (kx, ky)
+    cands = []
+    for dx in (0.0, 4.0, 8.0, -4.0, 12.0):
+        for below in (True, False):
+            x = kx + ctx.mm(dx) - sq / 2.0
+            y = ky - gap - sq if below else ky + gap
+            cands.append((x, y))
+    # a datum box 1 mm from a foreign label reads as that label's, so the
+    # first legal spot is not good enough: take the first one that stands
+    # CLEAR of other text, else the clearest one there is
+    clear_enough = ctx.mm(4.0)
+    legal = []
+    for bx, by in cands:
+        rect = (bx, by, bx + sq, by + sq)
+        if not layout.inside(rect) or layout.collides(rect):
+            continue
+        gap = layout.anno_clearance(rect)
+        if gap >= clear_enough:
+            legal = [(gap, rect)]
+            break
+        legal.append((gap, rect))
+    if not legal:
+        return [], None
+    rect = max(legal, key=lambda g: g[0])[1]
+    layout.claim(rect, f"datum-{letter}")
+    recs, _ = mw.datum_label((rect[0], rect[1]), letter, tip, h,
+                             props=mw.P_ANNO)
+    return recs, rect
+
+
+def datum_on_feature(ctx, layout, letter, circle, size_rect):
+    """Datum on a FEATURE OF SIZE — a bore or a spigot, whose datum is its
+    AXIS, not a face (ISO 1101 / ASME Y14.5).
+
+    The triangle therefore goes on that feature's own size annotation: in
+    line with its diameter dimension line, or on its callout's leader. Both
+    run radially from the feature to their text, so the rule is one rule —
+    the triangle sits on the feature where that annotation leaves it, and
+    the box stands further out along the same line. A triangle parked on a
+    view edge instead would call out a surface, which is a different datum.
+
+    `circle` is (cx, cy, r) of the feature in sheet coordinates and
+    `size_rect` the ink rect of its annotation (a callout stack or a %%c dim
+    label). Returns (records, box_rect) or ([], None)."""
+    cx, cy, r = circle
+    h = ctx.mm(3.2)
+    sq = 1.7 * h
+    mx = (size_rect[0] + size_rect[2]) / 2.0
+    my = (size_rect[1] + size_rect[3]) / 2.0
+    ang = math.atan2(my - cy, mx - cx)
+    ux, uy = math.cos(ang), math.sin(ang)
+    tip = (cx + r * ux, cy + r * uy)
+    # how far along the ray the annotation itself reaches
+    reach = max(math.hypot(px - cx, py - cy)
+                for px in (size_rect[0], size_rect[2])
+                for py in (size_rect[1], size_rect[3]))
+    cands = []
+    for d in (2.0, 5.0, 8.0, 12.0, 16.0, 20.0):
+        px = cx + (reach + ctx.mm(d)) * ux
+        py = cy + (reach + ctx.mm(d)) * uy
+        cands.append((px - sq / 2, py - sq / 2))
+    # then flanking the annotation, square to the ray (a crowded band)
+    for d in (3.0, 7.0, 11.0):
+        for sgn in (-1, 1):
+            px = mx - uy * sgn * (ctx.mm(d) + sq)
+            py = my + ux * sgn * (ctx.mm(d) + sq)
+            cands.append((px - sq / 2, py - sq / 2))
+    for bx, by in cands:
+        rect = (bx, by, bx + sq, by + sq)
+        if not layout.inside(rect) or layout.collides(rect):
+            continue
+        # the stem is ink: sample it short of the box, as the edge datums do
+        stem = ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0)
+        ln = math.hypot(stem[0] - tip[0], stem[1] - tip[1]) or 1.0
+        f = max(0.0, 1.0 - ctx.mm(1.5) / ln)
+        near = (tip[0] + (stem[0] - tip[0]) * f,
+                tip[1] + (stem[1] - tip[1]) * f)
+        if not _leader_path_clear(ctx, layout, tip, near, max_frac=1.0):
+            continue
+        layout.claim(rect, f"datum-{letter}")
+        _claim_leader_ink(ctx, layout, tip, stem, f"datum-{letter}")
+        recs, _ = mw.datum_label((rect[0], rect[1]), letter, tip, h,
+                                 props=mw.P_ANNO)
+        return recs, rect
+    return [], None
+
+
+def place_datums(ctx, layout, gdt, view_jobs, offs, callout_rects=None,
+                 dim_rects=None, lfacs=None, callout_lands=None):
+    """Datum boxes (A/B/C). A target naming a view edge (bottom_face,
+    short_edge, long_edge) anchors to that edge; one naming a radius
+    (`bore_r12.5`, `boss_r20`) is a feature of size and anchors to that
+    feature's size annotation instead — see datum_on_feature.
+    Returns (recs, pos)."""
     h = ctx.mm(3.2)
     recs, pos = [], {}
     for d in gdt.get("datums", []):
@@ -1361,6 +1851,34 @@ def place_datums(ctx, layout, gdt, view_jobs, offs):
         x1, y1 = mxb[0] + ox, mxb[1] + oy
         s = 1.7 * h
         tgt = d["target"]
+        rad = _target_radius(tgt)
+        if rad is not None:
+            # a feature of size: the datum is the bore's or spigot's axis
+            vkey = _target_key(view, rad, lfacs)
+            key, lf = vkey[:2], vkey[2]
+            land = (callout_lands or {}).get(key)
+            size_rect = (callout_rects or {}).get(key) \
+                or (dim_rects or {}).get(key)
+            circle = _feature_circle(job, rad / lf, (ox, oy))
+            if size_rect is None or circle is None:
+                # nothing to hang it on: a datum triangle floating on an
+                # undimensioned feature would not be a datum at all
+                layout.unresolved.append(
+                    f"datum-{d['label']}-no-size-dim-r{rad:g}")
+                continue
+            if land is not None:
+                # called out by a leader: the triangle goes on that leader
+                frecs, frect = datum_on_landing(ctx, layout, d["label"],
+                                                land)
+            else:
+                frecs, frect = datum_on_feature(ctx, layout, d["label"],
+                                                circle, size_rect)
+            if frect is None:
+                layout.unresolved.append(f"datum-{d['label']}")
+                continue
+            recs += frecs
+            pos[d["label"]] = frect
+            continue
         if tgt in ("bottom_face", "short_edge"):
             # outside the view corners first (clear of the centered SECTION
             # caption), then under the edge, then walking sideways along the
@@ -1418,7 +1936,7 @@ def place_datums(ctx, layout, gdt, view_jobs, offs):
 
 
 def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
-               dim_rects=None):
+               dim_rects=None, lfacs=None):
     """Feature control frames: stacked under the matching callout or the
     feature's own diameter-dim text when either exists, else leadered to
     the feature into the right band; flatness frames sit beside their
@@ -1478,7 +1996,7 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
         stack_w = max(sizes)
         stack_h = len(frames) * 1.8 * h + (len(frames) - 1) * gap
         rad = _target_radius(tgt)
-        key = (view, round(rad, 3)) if rad is not None else None
+        key = _target_key(view, rad, lfacs)[:2] if rad is not None else None
         anchor = (callout_rects.get(key) or dim_rects.get(key)) \
             if key else None
         rect = None
@@ -1550,18 +2068,21 @@ LOCDIM_STANDOFFS = (10.0, 13.0, 16.0, 19.0, 22.0, 26.0, 30.0, 34.0,
                     38.0, 42.0, 46.0)
 
 
-def _locdim_metrics(ctx, sp, view_jobs, offs):
+def _locdim_metrics(ctx, sp, view_jobs, offs, lfac=1.0):
     """(label ink span, extension-line coords) of one location dim, both on
-    the axis the dim measures along — the axis its value reads along too."""
+    the axis the dim measures along — the axis its value reads along too.
+    `lfac` is the view's DIMLFAC: the span is geometry, the label is what
+    the reader sees, and in a detail view the two differ by k."""
     ox, oy = offs[sp["view"]]
     a = (sp["a"][0] + ox, sp["a"][1] + oy)
     b = (sp["b"][0] + ox, sp["b"][1] + oy)
     j = 1 if sp["orient"] == "v" else 0
     val = abs(b[j] - a[j])
+    shown = val * lfac
     prec = sp.get("precision")
-    if prec is None and abs(val - round(val)) > 0.005:
+    if prec is None and abs(shown - round(shown)) > 0.005:
         prec = 2
-    label = f"{val:.{prec}f}" if prec else fmt_val(val)
+    label = f"{shown:.{prec}f}" if prec else fmt_val(shown)
     h, _ = cramped_dim_style(ctx, label, val, ctx.mm(3.0))
     w = mw.glyph_w(label, h)
     mid = (a[j] + b[j]) / 2.0
@@ -1569,7 +2090,7 @@ def _locdim_metrics(ctx, sp, view_jobs, offs):
     return (lo, lo + dim_label_ink(label, h)), (a[j], b[j])
 
 
-def order_location_dims(ctx, specs, view_jobs, offs):
+def order_location_dims(ctx, specs, view_jobs, offs, lfacs=None):
     """Order the dims of each (view, side) so that a dim whose EXTENSION
     line would run through another dim's value is drawn INSIDE it — its
     extension line then stops at its own dim line, short of that value.
@@ -1581,7 +2102,8 @@ def order_location_dims(ctx, specs, view_jobs, offs):
     n = len(specs)
     info = []
     for sp in specs:
-        info.append(_locdim_metrics(ctx, sp, view_jobs, offs)
+        info.append(_locdim_metrics(ctx, sp, view_jobs, offs,
+                                    (lfacs or {}).get(sp.get("view"), 1.0))
                     if sp.get("view") in view_jobs else None)
     clr = ctx.mm(0.5)
     before: dict[int, set] = {i: set() for i in range(n)}
@@ -1622,7 +2144,7 @@ def dim_precision(val, forced=None):
 
 
 def place_location_dims(ctx, layout, specs, view_jobs, offs, geom=(),
-                        soft=()):
+                        soft=(), lfacs=None):
     """Manifest-driven feature-location dims (pitch, edge references,
     depths): explicit def points in view coords + measuring orientation +
     placement side. Optional per-spec flags:
@@ -1639,6 +2161,11 @@ def place_location_dims(ctx, layout, specs, view_jobs, offs, geom=(),
     point (round-8 QA: 60-120 mm of extension line along outlines, through
     hatch and through other features).
 
+    `lfacs` maps a view name to its DIMLFAC (a detail view drawn at k
+    times size has 1/k): the def points and everything geometric stay in
+    the view's own units, while the VALUE — the label laid out here and the
+    one MusaCAD writes — is the measurement times that factor.
+
     Returns (records, floors): floors maps (view, side) -> the outermost
     stand-off (printed mm) used, so the overall extent dims stay outboard."""
     h0 = ctx.mm(3.0)
@@ -1646,11 +2173,12 @@ def place_location_dims(ctx, layout, specs, view_jobs, offs, geom=(),
     # keeps a full INK_CLEAR white gap off the digits (plus its own pen)
     box_pad = ctx.mm(0.55)
     recs, floors = [], {}
-    for sp in order_location_dims(ctx, specs, view_jobs, offs):
+    for sp in order_location_dims(ctx, specs, view_jobs, offs, lfacs):
         view = sp["view"]
         if view not in view_jobs:
             layout.unresolved.append(f"locdim-noview-{view}")
             continue
+        lfac = (lfacs or {}).get(view, 1.0)
         ox, oy = offs[view]
         a = (sp["a"][0] + ox, sp["a"][1] + oy)
         b = (sp["b"][0] + ox, sp["b"][1] + oy)
@@ -1659,8 +2187,11 @@ def place_location_dims(ctx, layout, specs, view_jobs, offs, geom=(),
         vx1, vy1 = vmx[0] + ox, vmx[1] + oy
         orient = sp["orient"]
         val = abs(b[1] - a[1]) if orient == "v" else abs(b[0] - a[0])
-        prec = dim_precision(val, sp.get("precision"))
-        label = f"{val:.{prec}f}" if prec else fmt_val(val)
+        # `val` is geometry (it sizes the layout); `shown` is what the
+        # reader sees, which in a detail view is val/k
+        shown = val * lfac
+        prec = dim_precision(shown, sp.get("precision"))
+        label = f"{shown:.{prec}f}" if prec else fmt_val(shown)
         basic = bool(sp.get("basic"))
         # a value that will not fit between its own extension lines drops to
         # the next text size and oblique arrows (ISO 129-1)
@@ -1699,7 +2230,7 @@ def place_location_dims(ctx, layout, specs, view_jobs, offs, geom=(),
         ext_off = max(EXT_OFFSET,
                       ext_clear_offset(ctx, geom, a, b, probe, orient))
         ext_ext = EXT_EXTENSION_CRAMPED if dim_kw else EXT_EXTENSION
-        dim_kw["style"] = dim_style_index(ctx, ext_off, ext_ext)
+        dim_kw["style"] = dim_style_index(ctx, ext_off, ext_ext, lfac)
         cands = []
         for d in LOCDIM_STANDOFFS:          # nearest legal placement wins
             off = base + sign * ctx.mm(d)
@@ -2665,6 +3196,27 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
         _claim_view(layout, view_jobs[second_name], offs["section"],
                     f"{second_name}-view")
 
+    # an enlarged DETAIL view, when the manifest asks for one: reserved
+    # before any dimension is placed (so dims route around it) and kept out
+    # of the views' own dimension gutters, exactly as the pictorial box is.
+    # Its dimensions read true millimetres through DIMLFAC — lfacs carries
+    # the factor to every placer that writes a value.
+    lfacs: dict = {}
+    dspec = part.get("detail_view") or {}
+    det_recs, det_job, det_off = [], None, None
+    if dspec and dspec.get("enabled", True):
+        of = dspec.get("of", "front")
+        if of not in view_jobs:
+            layout.unresolved.append(f"detail-of-{of}-missing")
+        else:
+            det_recs, det_job, det_off = place_detail_view(
+                ctx, layout, part, dspec, view_jobs[of],
+                offs[of if of in offs else "section"], zones=zones)
+            if det_job is not None:
+                view_jobs["detail"] = det_job
+                offs["detail"] = det_off
+                lfacs["detail"] = 1.0 / detail_factor(part, dspec)
+
     replaced = ctx.add_template(titleblock_replacements(m, part),
                                 positional=rev_row_positional(m, part))
     wkg = part_weight_kg(read_json(Path(m["_analysis_path"])), part)
@@ -2708,6 +3260,16 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
         emit_prims(ctx, flat["visible"], offs["section"])
         second_label = "FLAT PATTERN"
 
+    if det_job is not None:
+        of = dspec.get("of", "front")
+        ctx.entities += det_recs                  # the boundary circle
+        emit_prims(ctx, det_job["visible"], det_off)
+        emit_prims(ctx, det_job["hidden"], det_off, P_HIDDEN)
+        ctx.entities += section_hatches(ctx, det_job, det_off)
+        # and the circle + letter marking the region on the parent view
+        ctx.entities += detail_marker(ctx, layout, dspec, view_jobs[of],
+                                      offs[of if of in offs else "section"])
+
     ctx.entities += thread_lines(ctx, part.get("threads", []), view_jobs, offs)
 
     # every black line the views draw, as segments: dimension ink is tested
@@ -2718,16 +3280,20 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
     # Feature-location dims go FIRST of all: standard practice puts the
     # dimensions in the column nearest the view and pushes leader callouts
     # outboard of them, never the other way round.
+    loc_specs = part.get("location_dims", [])
+    if det_job is not None:
+        loc_specs = detail_specs(loc_specs, dspec,
+                                 detail_factor(part, dspec))
     loc_recs, loc_floors = place_location_dims(
-        ctx, layout, part.get("location_dims", []), view_jobs, offs, geom,
-        cut_arrows)
+        ctx, layout, loc_specs, view_jobs, offs, geom,
+        cut_arrows, lfacs=lfacs)
     ctx.entities += loc_recs
     # angular references sit INSIDE the view, so they claim their labels
     # before the leader callouts route around them
     ctx.entities += place_angle_refs(ctx, layout, part.get("angle_refs"),
                                      view_jobs, offs, geom)
-    co_recs, co_rects, suppress = place_callouts(ctx, layout, callouts,
-                                                 view_jobs, offs)
+    co_recs, co_rects, suppress, co_lands = place_callouts(
+        ctx, layout, callouts, view_jobs, offs)
     ctx.entities += co_recs
     dim_rects: dict = {}
 
@@ -2784,6 +3350,12 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
                                suppress=suppress.get("flat", ()))
         ctx.entities += recs
         dim_rects.update({("flat", k): v for k, v in rr.items()})
+    if det_job is not None:
+        recs, rr = dim_circles(ctx, layout, det_job, det_off,
+                               suppress=suppress.get("detail", ()),
+                               lfac=lfacs["detail"])
+        ctx.entities += recs
+        dim_rects.update({("detail", k): v for k, v in rr.items()})
     if second_label:
         # caption last of the view's own annotations: it belongs BELOW the
         # dimension band, not between the view and its dims
@@ -2796,15 +3368,20 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
     # FCF stacks that belong UNDER a callout go before the datum boxes: the
     # stack is a wide, rigidly-anchored block, a datum box is a small square
     # with a dozen candidate spots along its edge
+    if det_job is not None:
+        ctx.entities += _view_label(
+            ctx, layout, det_job, det_off,
+            detail_caption(dspec["scale"], str(dspec.get("label", "B"))))
     frames = gdt.get("frames", [])
     anchored = [f for f in frames if f["target"] != "datum_A_face"]
     on_datum = [f for f in frames if f["target"] == "datum_A_face"]
     ctx.entities += place_fcfs(ctx, layout, {"frames": anchored}, view_jobs,
-                               offs, co_rects, {}, dim_rects)
-    dat_recs, datum_pos = place_datums(ctx, layout, gdt, view_jobs, offs)
+                               offs, co_rects, {}, dim_rects, lfacs)
+    dat_recs, datum_pos = place_datums(ctx, layout, gdt, view_jobs, offs,
+                                       co_rects, dim_rects, lfacs, co_lands)
     ctx.entities += dat_recs
     ctx.entities += place_fcfs(ctx, layout, {"frames": on_datum}, view_jobs,
-                               offs, co_rects, datum_pos, dim_rects)
+                               offs, co_rects, datum_pos, dim_rects, lfacs)
     if flat:
         ctx.entities += place_bend_table(ctx, layout, part, rows_h)
     notes = part.get("fab_notes", []) + part.get("extra_notes", [])

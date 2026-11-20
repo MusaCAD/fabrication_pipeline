@@ -18,6 +18,13 @@
 //     --stamp <png>,<x>,<y>,<w>,<h>     draw a raster image (shaded pictorial)
 //                                       at the given rect in WORLD/sheet units
 //                                       (x,y = lower-left), repeatable
+//     --dump-dims                       print one line per dimension with the label
+//                                       MusaCAD itself composes for it, then exit
+//                                       without plotting (QA: a DIM always shows the
+//                                       measured def-point distance, so this is the
+//                                       only way to check what a sheet really reads
+//                                       -- e.g. an enlarged DETAIL view, whose style
+//                                       carries DIMLFAC)
 //
 // Prints one "[musa_plot] ..." summary line with the EFFECTIVE mm-per-unit and paper
 // geometry so the pipeline can record/verify the true plotted scale.
@@ -40,6 +47,7 @@
 #include <QSizeF>
 
 #include "musacad/core/block_resolve.hpp"
+#include "musacad/core/dimension.hpp"
 #include "musacad/core/io/document.hpp"
 #include "musacad/core/io/dxf.hpp"
 #include "musacad/core/io/native_format.hpp"
@@ -76,6 +84,7 @@ struct Options {
     bool lineweights = true;
     double min_lw_mm = 0.0;   // floor for hairline strokes (stroke-font
                               // text plots at 0 width upstream)
+    bool dump_dims = false;   // report dimension labels instead of plotting
 };
 
 // Local copy of ui::paint_plot (musa_cad/src/ui/plot.cpp, LGPL-3.0) with one
@@ -191,7 +200,8 @@ void usage() {
                  "usage: musa_plot --file <in.musa|in.dxf> <out.pdf>\n"
                  "  [--paper A4|A3|A2|A1|A0|<W>x<H>] [--portrait|--landscape]\n"
                  "  [--scale fit|<N>:<D>] [--window minx,miny,maxx,maxy] [--dpi <n>]\n"
-                 "  [--style none|mono|gray] [--no-center] [--offset x,y] [--no-lineweights]\n");
+                 "  [--style none|mono|gray] [--no-center] [--offset x,y] [--no-lineweights]\n"
+                 "  [--dump-dims]\n");
 }
 
 bool parse_paper(const std::string& s, Options& o) {
@@ -305,6 +315,8 @@ bool parse_args(int argc, char** argv, Options& o) {
             }
             st.path = s.substr(0, comma);
             o.stamps.push_back(st);
+        } else if (a == "--dump-dims") {
+            o.dump_dims = true;
         } else {
             std::fprintf(stderr, "[musa_plot] unknown argument '%s'\n", a.c_str());
             return false;
@@ -344,6 +356,33 @@ int main(int argc, char** argv) {
     }
     core::GeometryStore store;
     core::io::populate_store(store, doc);
+
+    if (o.dump_dims) {
+        // What each dimension READS, composed by MusaCAD's own layout code
+        // (compute_dim_geometry, as scene_snapshot.cpp calls it) -- so the
+        // style's DIMLFAC, precision, zero suppression and decoration are all
+        // applied exactly as they are when plotted. `measure` is the raw
+        // def-point distance for comparison.
+        const auto& arena = store.dimensions();
+        std::size_t n = 0;
+        for (std::uint32_t i = 0; i < arena.slot_count(); ++i) {
+            if (!arena.alive(i)) {
+                continue;
+            }
+            const core::DimData& d = arena.data()[i];
+            const core::DimStyle* st = store.dimstyle(d.style);
+            const core::DimGeometry g = core::compute_dim_geometry(
+                d, st != nullptr ? *st : core::DimStyle{}, core::Rgb{},
+                store.dim_text_parts(d));
+            std::printf("[musa_plot] dim %zu type=%d style=%u a=%.6f,%.6f b=%.6f,%.6f "
+                        "measure=%.6f label=%s\n",
+                        n, static_cast<int>(d.type), unsigned(d.style), d.a.x, d.a.y,
+                        d.b.x, d.b.y, core::dim_measure(d), g.label.c_str());
+            ++n;
+        }
+        std::printf("[musa_plot] dims %zu <- %s\n", n, o.in_path.c_str());
+        return 0;
+    }
 
     // Area: explicit window, else extents from a probe snapshot (same as plot_check).
     core::Vec2 mn{1e300, 1e300};

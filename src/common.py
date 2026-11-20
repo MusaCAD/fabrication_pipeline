@@ -122,6 +122,41 @@ def run_musa_plot(musa_file: Path, pdf_out: Path, *, scale: tuple[float, float],
     return info
 
 
+def dump_dims(musa_file: Path) -> list[dict]:
+    """Every dimension on a sheet as the RENDERER reads it: its def points,
+    the raw measured distance, and the label MusaCAD composes for it — the
+    style's DIMLFAC, precision, zero suppression and decoration all applied
+    (musa_plot --dump-dims, which calls compute_dim_geometry exactly as the
+    plot path does).
+
+    A DIM always displays the distance between its own def points, so this
+    is the only way to check what a sheet really reads: in an enlarged
+    DETAIL view the def points are k times the true size and the value is
+    true only because the style carries DIMLFAC = 1/k."""
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    proc = subprocess.run([str(MUSA_PLOT), "--file", str(musa_file),
+                           os.devnull, "--dump-dims"],
+                          capture_output=True, text=True, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(f"musa_plot --dump-dims failed:\n{proc.stdout}\n"
+                           f"{proc.stderr}")
+    dims = []
+    for line in proc.stdout.splitlines():
+        if not line.startswith("[musa_plot] dim "):
+            continue
+        body = line[len("[musa_plot] dim "):]
+        head, _, label = body.partition("label=")
+        toks = head.split()
+        d: dict = {"index": int(toks[0]), "label": label}
+        for tok in toks[1:]:
+            k, _, v = tok.partition("=")
+            d[k] = ([float(x) for x in v.split(",")] if "," in v
+                    else float(v) if k == "measure" else int(v))
+        dims.append(d)
+    return dims
+
+
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")

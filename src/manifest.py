@@ -18,7 +18,8 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import MANIFESTS_DIR, REPORTS_DIR, die, read_json, write_json
+from common import (MANIFESTS_DIR, REPORTS_DIR, STANDARD_SCALES, die,
+                    read_json, write_json)
 import musa_writer as mw
 
 VIEW_DIRS = {   # named front-view choices: (view_dir, up) in world coords
@@ -124,6 +125,86 @@ def propose() -> None:
 REQUIRED_PART_KEYS = {"part_id", "file", "description", "drg_no", "material",
                       "qty", "front_view", "section", "scale"}
 
+DATUM_EDGE_TARGETS = ("bottom_face", "short_edge", "long_edge")
+
+
+def parse_scale(spec) -> tuple[int, int] | None:
+    parts = str(spec).split(":")
+    if len(parts) != 2 or not all(x.strip().isdigit() for x in parts):
+        return None
+    num, den = (int(x) for x in parts)
+    return (num, den) if num and den else None
+
+
+def datum_target_problem(target) -> str | None:
+    """Datum targets: a view edge, or `<kind>_r<radius>` for a feature of
+    size (a bore or a spigot, whose datum is its axis)."""
+    t = str(target or "")
+    if t in DATUM_EDGE_TARGETS:
+        return None
+    if "_r" in t:
+        try:
+            if float(t.rsplit("_r", 1)[1]) > 0:
+                return None
+        except ValueError:
+            pass
+        return f"bad datum target {t!r} (want <kind>_r<radius>, e.g. bore_r12.5)"
+    return (f"bad datum target {t!r} (want one of "
+            f"{', '.join(DATUM_EDGE_TARGETS)} or <kind>_r<radius>)")
+
+
+def detail_problems(part: dict) -> list[str]:
+    """An enlarged detail view: `of` names a view this sheet actually
+    carries, and the detail's own scale is a standard one that really
+    enlarges (a detail at or below the sheet scale is not a detail)."""
+    spec = part.get("detail_view") or {}
+    if not spec or not spec.get("enabled", True):
+        return []
+    who = part.get("file")
+    out = []
+    of = spec.get("of", "front")
+    sec = part.get("section", {})
+    have = {"front"}
+    if sec.get("enabled"):
+        have.add("section")
+    if part.get("aux_view"):
+        have.add("aux")
+    if (part.get("flat_pattern") or {}).get("enabled"):
+        have.add("flat")
+    if of not in have:
+        out.append(f"{who}: detail_view.of {of!r} is not a view on this "
+                   f"sheet (has {', '.join(sorted(have))})")
+    sheet = parse_scale(part.get("scale"))
+    det = parse_scale(spec.get("scale"))
+    if det is None:
+        out.append(f"{who}: bad detail_view.scale {spec.get('scale')!r} "
+                   "(want N:D)")
+    elif det not in STANDARD_SCALES:
+        out.append(f"{who}: detail_view.scale {spec['scale']} is not a "
+                   "standard scale")
+    elif sheet and det[0] / det[1] <= sheet[0] / sheet[1]:
+        out.append(f"{who}: detail_view.scale {spec['scale']} does not "
+                   f"enlarge the sheet's {part['scale']} — a detail view "
+                   "exists to show a region BIGGER")
+    label = str(spec.get("label", "B"))
+    if len(label) != 1 or not label.isalpha():
+        out.append(f"{who}: detail_view.label {label!r} must be one letter")
+    elif sec.get("enabled") and label.upper() == \
+            str(sec.get("label", "A")).upper():
+        out.append(f"{who}: detail_view.label {label!r} collides with the "
+                   "section label — DETAIL B and SECTION B-B on one sheet")
+    cen = spec.get("center")
+    if not (isinstance(cen, (list, tuple)) and len(cen) == 2
+            and all(isinstance(v, (int, float)) for v in cen)):
+        out.append(f"{who}: detail_view.center must be [x, y] in the "
+                   "parent view's coordinates")
+    try:
+        if float(spec.get("radius", 0)) <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        out.append(f"{who}: detail_view.radius must be > 0")
+    return out
+
 
 def lock(draft_path: Path) -> None:
     m = read_json(draft_path)
@@ -174,6 +255,11 @@ def lock(draft_path: Path) -> None:
         if len(num_den) != 2 or not all(s.strip().isdigit() for s in num_den):
             problems.append(f"{part.get('file')}: bad scale "
                             f"{part.get('scale')!r} (want N:D)")
+        problems += detail_problems(part)
+        for d in (part.get("gdt") or {}).get("datums", []):
+            bad = datum_target_problem(d.get("target"))
+            if bad:
+                problems.append(f"{part.get('file')}: {bad}")
     if m.get("template"):
         problems += mw.template_problems(m["template"])
     asm = m.get("assembly_sheet") or {}

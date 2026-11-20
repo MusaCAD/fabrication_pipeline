@@ -33,10 +33,14 @@ composition), `qa-checker` (21-point output verification, render-and-inspect).
   true-value dimensions (geometry authored full-size; the template is scaled
   uniformly — paper size and aspect ratio are never touched), feature
   location dims (pitch / edge references / TYP), depth-annotated fit
-  callouts (e.g. `3 X Ø4 H7 (REAM) THRU`), ISO 6410 thread convention
+  callouts (e.g. `3 X Ø4 H7 (REAM) THRU`), enlarged detail views (a
+  circled region of a view redrawn at its own scale, dimensioned in true
+  millimetres), ISO 6410 thread convention
   (models carry the real helix; views project the thread blank via
-  `project_feature` and draw the root line), GD&T datum flags + feature
-  control frames, ANSI31 section hatch, fabrication notes, a shaded
+  `project_feature` and draw the root line), GD&T datum flags — on a face
+  or on a feature of size, where the triangle goes on the bore's own size
+  callout — and feature control frames (flatness, position,
+  perpendicularity, coaxiality, circular runout), ANSI31 section hatch, fabrication notes, a shaded
   isometric pictorial, and a fully populated RES title block (scale, rev,
   weight computed from the model, parts row).
 - Per assembly: NTS isometric HLR wireframe with circled balloons, parts
@@ -65,6 +69,8 @@ Build the plot harness once: `tools/build.sh` → `tools/bin/musa_plot`.
 src/          pipeline modules (one per stage + FreeCAD-side scripts)
 tests/        unittest suite (stdlib only; builds throwaway FreeCAD
               fixtures for the assembly checks)
+samples/      sample_sheet.py: a sample sheet through the real composer
+              (no model, no FreeCAD) + the PDF it produces
 tools/        musa_plot: headless .musa -> PDF harness (paper, scale,
               window, raster stamps) derived from MusaCAD's plot_check
 templates/    default title-block template (.musa v14); company
@@ -91,7 +97,12 @@ style contract.
 python3 -m unittest discover -s tests -v
 ```
 
-Standard library only, no venv. The assembly-joint tests build throwaway
+Standard library only, no venv. `samples/sample_sheet.py` redraws
+`samples/out/RES-SAMPLE-01.pdf`, a bushing carrying a 2:1 detail view, a
+datum on its bore and coaxiality/runout frames — run it after touching the
+layout engine and look at the sheet.
+
+The assembly-joint tests build throwaway
 FreeCAD 1.1 assemblies in a temporary directory with the real Assembly
 workbench and run the FreeCAD-side scripts against them; they skip
 themselves if the FreeCAD AppImage is not installed. Nothing under

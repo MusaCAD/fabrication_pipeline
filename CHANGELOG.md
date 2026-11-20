@@ -5,6 +5,64 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.4.0 — 2026-11-20
+
+Three drafting features turned and tubular parts needed before boards could
+be drawn ([#2](https://github.com/MusaCAD/fabrication_pipeline/issues/2)).
+
+### Added
+
+- **Enlarged detail views.** Manifest part `"detail_view": {label, scale,
+  of, center, radius}` — `of` names the view the region is taken from
+  (`front`, `section`, `aux` or `flat`), `center` and `radius` are in that
+  view's own coordinates. The region is clipped out of the parent view's
+  projected geometry (edges, arcs and section hatch alike), redrawn at its
+  own standard scale inside a thin boundary circle, captioned
+  `DETAIL B (2:1)`, and marked with a matching circle and letter on the
+  parent view. It is placed in free space, clear of the other views'
+  dimension gutters, and collision-checked like every other annotation —
+  the two-views rule is now **two views plus an optional detail**.
+  **Its dimensions read true millimetres.** A DIM always displays the
+  distance between its own def points, so a detail drawn at k times size
+  dimensions through a DIMSTYLE carrying `DIMLFAC = 1/k` (the new
+  `DIMUNITS` record): a 2:1 detail on a 1:5 sheet is drawn 10x and its
+  style's factor is 0.1. Detail dims are authored in the parent view's
+  true millimetres; `/draw` moves them onto the enlarged geometry.
+- **Datums on a feature of size.** A datum target may now name a feature
+  instead of a view edge: `"target": "bore_r12.5"` (any `<kind>_r<radius>`,
+  the radius always in true millimetres). The datum is then the feature's
+  AXIS, so the triangle goes on that feature's own size annotation — the
+  shoulder of its callout's leader, as ISO 1101 and ASME Y14.5 draw it, or
+  in line with its diameter dimension line when it is dimensioned that way.
+  A feature with no size annotation fails the sheet rather than carrying a
+  triangle that identifies nothing, and the box is placed clear of other
+  labels so it cannot be read as theirs.
+- **Coaxiality and circular runout** feature control frames, beside the
+  existing flatness, position and perpendicularity. Coaxiality's tolerance
+  zone is cylindrical, so its value carries the diameter sign.
+- `musa_plot --dump-dims` prints every dimension on a sheet with the label
+  **MusaCAD itself composes** for it (its own `compute_dim_geometry`, the
+  plot's path), then exits without plotting. `common.dump_dims()` parses
+  it. This is the only way to check what a sheet reads, and it is what the
+  detail-view tests assert against. Rebuild the harness (`tools/build.sh`)
+  to get it.
+- `samples/sample_sheet.py` draws `samples/out/RES-SAMPLE-01.pdf`, a
+  bushing with a 2:1 detail of its retaining groove, a datum on its bore
+  and coaxiality/runout frames. It goes through the real composer but
+  needs no model and no FreeCAD, so it is a quick look at the layout
+  engine after a change.
+
+### Changed
+
+- `/finalise` (`manifest.py lock`) validates the new keys: a detail view's
+  parent must be a view the sheet carries, its scale must be a standard one
+  that really enlarges, its label must be a single letter that does not
+  collide with the section's, and its centre and radius must be usable.
+  Datum targets must be a known view edge or a parsable `_r<radius>`.
+- `place_callouts` also reports each callout's leader landing, and
+  `place_datums` / `place_fcfs` take the per-view linear factors, so a
+  radius target means the same feature whatever view it is resolved in.
+
 ## v0.3.0 — 2026-11-19
 
 ### Changed
