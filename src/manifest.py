@@ -160,28 +160,16 @@ def datum_target_problem(target) -> str | None:
             f"{', '.join(DATUM_EDGE_TARGETS)} or <kind>_r<radius>)")
 
 
-def detail_problems(part: dict) -> list[str]:
-    """An enlarged detail view: `of` names a view this sheet actually
-    carries, and the detail's own scale is a standard one that really
-    enlarges (a detail at or below the sheet scale is not a detail)."""
-    spec = part.get("detail_view") or {}
-    if not spec or not spec.get("enabled", True):
-        return []
-    who = part.get("file")
+def one_detail_problems(spec: dict, who: str, sheet_scale, have: set,
+                        taken: set) -> list[str]:
+    """One detail view: the parent view must be on the sheet, the scale must
+    be a standard one that really enlarges, and the label must be a free
+    single letter (a sheet with DETAIL B and SECTION B-B says nothing)."""
     out = []
     of = spec.get("of", "front")
-    sec = part.get("section", {})
-    have = {"front"}
-    if sec.get("enabled"):
-        have.add("section")
-    if part.get("aux_view"):
-        have.add("aux")
-    if (part.get("flat_pattern") or {}).get("enabled"):
-        have.add("flat")
     if of not in have:
         out.append(f"{who}: detail_view.of {of!r} is not a view on this "
                    f"sheet (has {', '.join(sorted(have))})")
-    sheet = parse_scale(part.get("scale"))
     det = parse_scale(spec.get("scale"))
     if det is None:
         out.append(f"{who}: bad detail_view.scale {spec.get('scale')!r} "
@@ -189,17 +177,18 @@ def detail_problems(part: dict) -> list[str]:
     elif det not in STANDARD_SCALES:
         out.append(f"{who}: detail_view.scale {spec['scale']} is not a "
                    "standard scale")
-    elif sheet and det[0] / det[1] <= sheet[0] / sheet[1]:
+    elif sheet_scale and det[0] / det[1] <= sheet_scale[0] / sheet_scale[1]:
         out.append(f"{who}: detail_view.scale {spec['scale']} does not "
-                   f"enlarge the sheet's {part['scale']} — a detail view "
-                   "exists to show a region BIGGER")
+                   f"enlarge the sheet's {sheet_scale[0]}:{sheet_scale[1]} — "
+                   "a detail view exists to show a region BIGGER")
     label = str(spec.get("label", "B"))
     if len(label) != 1 or not label.isalpha():
         out.append(f"{who}: detail_view.label {label!r} must be one letter")
-    elif sec.get("enabled") and label.upper() == \
-            str(sec.get("label", "A")).upper():
-        out.append(f"{who}: detail_view.label {label!r} collides with the "
-                   "section label — DETAIL B and SECTION B-B on one sheet")
+    elif label.upper() in taken:
+        out.append(f"{who}: detail_view.label {label!r} is already used on "
+                   "this sheet (a section or another detail)")
+    else:
+        taken.add(label.upper())
     cen = spec.get("center")
     if not (isinstance(cen, (list, tuple)) and len(cen) == 2
             and all(isinstance(v, (int, float)) for v in cen)):
@@ -210,6 +199,80 @@ def detail_problems(part: dict) -> list[str]:
             raise ValueError
     except (TypeError, ValueError):
         out.append(f"{who}: detail_view.radius must be > 0")
+    return out
+
+
+def detail_problems(part: dict) -> list[str]:
+    """An enlarged detail view on a PART sheet."""
+    spec = part.get("detail_view") or {}
+    if not spec or not spec.get("enabled", True):
+        return []
+    sec = part.get("section", {})
+    have = {"front"}
+    if sec.get("enabled"):
+        have.add("section")
+    if part.get("aux_view"):
+        have.add("aux")
+    if (part.get("flat_pattern") or {}).get("enabled"):
+        have.add("flat")
+    taken = {str(sec.get("label", "A")).upper()} if sec.get("enabled") \
+        else set()
+    return one_detail_problems(spec, part.get("file"),
+                               parse_scale(part.get("scale")), have, taken)
+
+
+def assembly_sheet_problems(m: dict) -> list[str]:
+    """The assembly sheet's own decisions (issue #5): its section, its
+    detail views, where each balloon goes and how the table is grouped —
+    checked at the lock exactly as a part sheet's are."""
+    asm = m.get("assembly_sheet") or {}
+    if not asm or not asm.get("enabled", True):
+        return []
+    who = "assembly_sheet"
+    out = []
+    scale = parse_scale(asm.get("scale"))
+    if scale is None:
+        out.append(f"{who}: bad scale {asm.get('scale')!r} (want N:D)")
+    iso = asm.get("view") == "iso"
+    if not iso and asm.get("front_view") not in VIEW_DIRS:
+        out.append(f"{who}: bad front_view {asm.get('front_view')!r}")
+    ids = {str(p["part_id"]) for p in m.get("parts", [])}
+    have = {"front"}
+    sec = asm.get("section") or {}
+    if sec.get("enabled"):
+        if iso:
+            out.append(f"{who}: a section needs an orthographic front view, "
+                       "not the isometric one")
+        if sec.get("projection", "below") not in ("below", "right", "left"):
+            out.append(f"{who}: bad section.projection "
+                       f"{sec.get('projection')!r}")
+        unknown = [i for i in sec.get("not_sectioned", [])
+                   if str(i) not in ids]
+        if unknown:
+            out.append(f"{who}: section.not_sectioned names no such part: "
+                       f"{', '.join(map(str, unknown))}")
+        have.add("section")
+    taken = {str(sec.get("label", "A")).upper()} if sec.get("enabled") \
+        else set()
+    labels = []
+    for spec in asm.get("detail_views") or []:
+        out += one_detail_problems(spec, who, scale, have, taken)
+        label = str(spec.get("label", "B"))
+        labels.append(f"detail:{label}")
+        unknown = [i for i in spec.get("balloons") or [] if str(i) not in ids]
+        if unknown:
+            out.append(f"{who}: detail {label} balloons name no such part: "
+                       f"{', '.join(map(str, unknown))}")
+    for pid, view in (asm.get("balloon_in") or {}).items():
+        if str(pid) not in ids:
+            out.append(f"{who}: balloon_in names no such part: {pid}")
+        if view not in set(have) | set(labels):
+            out.append(f"{who}: balloon_in[{pid}] = {view!r} is not a view "
+                       f"on this sheet ({', '.join(sorted(set(have) | set(labels)))})")
+    table = asm.get("parts_table") or {}
+    if table.get("group_by", "none") not in ("none", "sub_assembly"):
+        out.append(f"{who}: parts_table.group_by "
+                   f"{table.get('group_by')!r} (want none or sub_assembly)")
     return out
 
 
@@ -299,6 +362,7 @@ def lock(draft_path: Path) -> None:
             if bad:
                 problems.append(f"{part.get('file')}: {bad}")
     problems += thin_feature_problems(m)
+    problems += assembly_sheet_problems(m)
     if m.get("template"):
         problems += mw.template_problems(m["template"])
     asm = m.get("assembly_sheet") or {}

@@ -353,7 +353,31 @@ def run_job(job):
     out = {"id": job["id"]}
     sec = job.get("section")
     target = shape
-    if sec:
+    cut_by_instance = {}
+    if sec and instances:
+        # An ASSEMBLY section is cut part by part, not as one solid, for two
+        # reasons (ISO 128-50): each part's cut area has to be hatched on its
+        # own so neighbours can be told apart, and a shaft, screw, nut, pin
+        # or O-ring is NOT sectioned along its length — it is drawn whole in
+        # the middle of the cut. `section_exempt` lists those instances.
+        exempt = set(job.get("section_exempt") or [])
+        pieces, groups = [], []
+        for name, label, sh in instances:
+            if name in exempt:
+                pieces.append(sh)
+                cut_by_instance[name] = sh
+                continue
+            piece = section_cut(sh, sec["plane_point"], sec["plane_normal"])
+            pieces.append(piece)
+            cut_by_instance[name] = piece
+            for g in section_loops(sh, sec["plane_point"],
+                                   sec["plane_normal"], view_dir, up):
+                g["instance"] = name
+                g["label"] = label
+                groups.append(g)
+        target = Part.makeCompound(pieces)
+        out["hatch_groups"] = groups
+    elif sec:
         target = section_cut(shape, sec["plane_point"], sec["plane_normal"])
         out["hatch_groups"] = section_loops(
             shape, sec["plane_point"], sec["plane_normal"], view_dir, up)
@@ -365,6 +389,9 @@ def run_job(job):
         m = to_view_matrix(view_dir, up)
         anchors = []
         for name, label, sh in instances:
+            # in a section view a balloon must land on what is actually
+            # drawn, so the anchor follows the CUT piece
+            sh = cut_by_instance.get(name, sh)
             bb = sh.transformGeometry(m).BoundBox
             # the instance projected ALONE: lets the sheet decide which of
             # the assembly's visible edges belong to this part only, so a

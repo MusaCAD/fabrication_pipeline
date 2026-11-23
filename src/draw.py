@@ -117,12 +117,15 @@ def collect_jobs(m: dict) -> list[dict]:
             d, u = [-k, -k, -k], [0, 0, 1]  # classic iso: viewer at (1,1,1)
         else:
             d, u = VIEW_DIRS[asm["front_view"]]
+        blanks = {p["file"]: p["project_feature"] for p in m["parts"]
+                  if p.get("project_feature")}
         jobs.append({"id": "assembly:front", "file": m["assembly_file"],
                      "assembly": True, "view_dir": d, "up": u,
-                     "section": None,
-                     "link_features": {p["file"]: p["project_feature"]
-                                       for p in m["parts"]
-                                       if p.get("project_feature")}})
+                     "section": None, "link_features": blanks})
+        if (asm.get("section") or {}).get("enabled"):
+            jobs.append({"id": "assembly:section", "file": m["assembly_file"],
+                         "assembly": True, "link_features": blanks,
+                         "_defer_section": asm})
     return jobs
 
 
@@ -130,6 +133,60 @@ def cross(a, b):
     return [a[1] * b[2] - a[2] * b[1],
             a[2] * b[0] - a[0] * b[2],
             a[0] * b[1] - a[1] * b[0]]
+
+
+def section_basis(front_view: str, projection: str, who: str = ""):
+    """(sight direction, up, plane normal) for a section of `front_view`.
+
+    Bases are chosen so the section view stays feature-ALIGNED with the
+    front view (shared sheet axis, reference style). The removed half is
+    always the -sight side, so plane_normal = -sight."""
+    d, u = VIEW_DIRS[front_view]
+    r = cross(d, u)                          # front-view sheet right, world
+    if projection == "below":                # horizontal cut line
+        s, uv = u, [-x for x in d]
+    elif projection == "right":              # vertical cut, view to the right
+        s, uv = [-x for x in r], u
+    elif projection == "left":               # vertical cut, view to the left
+        s, uv = r, u
+    else:
+        die(f"{who}: bad section.projection {projection!r}")
+    return s, uv, [-x for x in s]
+
+
+def assembly_section_job(m: dict) -> dict:
+    """The assembly sheet's own section job: the same geometry rules as a
+    part's, plus the instances the section must NOT cut (shafts, screws,
+    pins, O-rings — ISO 128-50), resolved from part ids to instance paths."""
+    asm = m["assembly_sheet"]
+    sec = asm["section"]
+    s, uv, nrm = section_basis(asm["front_view"],
+                               sec.get("projection", "below"),
+                               "assembly_sheet")
+    return {"id": "assembly:section", "file": m["assembly_file"],
+            "assembly": True, "view_dir": s, "up": uv,
+            "link_features": {p["file"]: p["project_feature"]
+                              for p in m["parts"]
+                              if p.get("project_feature")},
+            "section_exempt": not_sectioned_paths(m),
+            "section": {"plane_point": None, "plane_normal": nrm}}
+
+
+def not_sectioned_paths(m: dict) -> list:
+    """Instance paths of the parts the manifest says not to cut.
+
+    Stated as part ids (`"not_sectioned": ["02", "05"]`), because that is
+    how the user thinks of them; resolved here through the analysis tree,
+    so every instance of such a part is left whole however deep it sits."""
+    sec = (m.get("assembly_sheet") or {}).get("section") or {}
+    ids = set(sec.get("not_sectioned") or [])
+    if not ids:
+        return []
+    files = {p["file"] for p in m["parts"] if p["part_id"] in ids}
+    analysis = read_json(Path(m["_analysis_path"]))
+    return [n["path"] for n in fc_tree.flatten(analysis["assembly"]
+                                               ["instances"])
+            if n.get("target_file") in files]
 
 
 def section_job(part: dict) -> dict:
@@ -142,22 +199,14 @@ def section_job(part: dict) -> dict:
     in cutting_plane() together. The removed half is always the -sight side
     (material between the section viewer and the plane), so plane_normal =
     -s."""
-    d, u = VIEW_DIRS[part["front_view"]]
-    r = cross(d, u)                          # front-view sheet right, world
-    proj = part["section"].get("projection", "below")
-    if proj == "below":                      # horizontal cut line
-        s, uv = u, [-x for x in d]
-    elif proj == "right":                    # vertical cut, view to the right
-        s, uv = [-x for x in r], u
-    elif proj == "left":                     # vertical cut, view to the left
-        s, uv = r, u
-    else:
-        die(f"{part['part_id']}: bad section.projection {proj!r}")
+    s, uv, nrm = section_basis(part["front_view"],
+                               part["section"].get("projection", "below"),
+                               part["part_id"])
     return {"id": f"{part['part_id']}:section", "file": part["file"],
             "project_feature": part.get("project_feature"),
             "view_dir": s, "up": uv,
             "section": {"plane_point": None,   # filled after bbox known
-                        "plane_normal": [-x for x in s]}}
+                        "plane_normal": nrm}}
 
 
 def run_projections(m: dict, analysis: dict) -> dict:
@@ -190,6 +239,18 @@ def run_projections(m: dict, analysis: dict) -> dict:
         b = bbox_by_file[part["file"]]
         lo, hi = b["bbox_min"], b["bbox_max"]
         frac = part["section"].get("offset_frac", 0.5)
+        centre = [lo[i] + (hi[i] - lo[i]) * 0.5 for i in range(3)]
+        nrm = job["section"]["plane_normal"]
+        ax = max(range(3), key=lambda i: abs(nrm[i]))
+        centre[ax] = lo[ax] + (hi[ax] - lo[ax]) * frac
+        job["section"]["plane_point"] = centre
+        sec_jobs.append(job)
+    asm = m.get("assembly_sheet") or {}
+    if asm.get("enabled", True) and (asm.get("section") or {}).get("enabled"):
+        job = assembly_section_job(m)
+        lo = analysis["assembly"]["bbox_min"]
+        hi = analysis["assembly"]["bbox_max"]
+        frac = asm["section"].get("offset_frac", 0.5)
         centre = [lo[i] + (hi[i] - lo[i]) * 0.5 for i in range(3)]
         nrm = job["section"]["plane_normal"]
         ax = max(range(3), key=lambda i: abs(nrm[i]))
@@ -518,6 +579,9 @@ def place_views(ctx: mw.SheetContext, front, section, projection="below",
 # nearest stand-off a location dim uses (LOCDIM_STANDOFFS[0]) plus its label
 # and a margin. Reserve less and the detail's dims have nowhere to go.
 DETAIL_PAD_MM = 15.0
+# An assembly's detail has no dimensions of its own — only balloons, which
+# go to the sheet's own column — so it needs clearance, not a dimension band
+DETAIL_ASSEMBLY_PAD_MM = 4.0
 
 
 def detail_factor(part: dict, spec: dict) -> float:
@@ -735,8 +799,13 @@ def _free_spot(ctx, layout, w, h, zones=(), prefer_top=True):
 
 
 def place_detail_view(ctx, layout, part, spec, parent_job, parent_off,
-                      zones=()):
+                      zones=(), pad_mm=None):
     """Reserve and draw an enlarged detail view.
+
+    `pad_mm` is the clear ring reserved round it, DETAIL_PAD_MM by default
+    — enough for the detail's own dimensions. An ASSEMBLY detail carries no
+    dimensions (its balloons go to the sheet's own column), so it asks for
+    much less and fits where a dimensioned one would not.
 
     Returns (records, job, offset) or (records, None, None) when the sheet
     has no room for it — which fails the sheet, like any other annotation
@@ -751,7 +820,7 @@ def place_detail_view(ctx, layout, part, spec, parent_job, parent_off,
         # nothing, so fail loudly rather than ship it.
         layout.unresolved.append(f"detail-{label}-no-geometry")
         return [], None, None
-    pad = ctx.mm(DETAIL_PAD_MM)
+    pad = ctx.mm(DETAIL_PAD_MM if pad_mm is None else pad_mm)
     cap_h = ctx.mm(4.0) + ctx.mm(8.0)      # caption height + its stand-off
     side = 2.0 * rk
     spot = _free_spot(ctx, layout, side + 2 * pad, side + 2 * pad + cap_h,
@@ -2795,38 +2864,37 @@ def balloon_landing(ctx, asm_job, off, k, knee):
     return snap
 
 
-def balloons(ctx, layout, asm_job, off, id_by_file, m):
-    """P.NO. leader callouts, one per assembly instance, fanned into the
-    right band through the collision layout. Each arrow lands on an edge
-    that belongs to that instance alone (balloon_landing)."""
+def balloons(ctx, layout, asm_job, off, items, start_y=None, knee_x=None):
+    """P.NO. leader callouts fanned into the right band through the
+    collision layout. Each arrow lands on an edge that belongs to that
+    instance alone (balloon_landing).
+
+    `items` is [(instance index, P.NO. as drawn)] — the caller decides
+    WHICH instance carries each part number, because a part number is
+    ballooned once on the whole sheet, in the view where it reads best
+    (balloon_plan). `start_y` continues a fan begun in another view and
+    `knee_x` pins every view's balloons to ONE column: a second column of
+    knees is where leaders start crossing each other."""
     ox, oy = off
     mn, mx = asm_job["bounds"]
     recs = []
     insts = asm_job.get("instances", [])
-    # the projection names every instance by its PATH ("SUB1/SPLATE"),
-    # which is also how the analysis tree identifies it, so a balloon on a
-    # sub-assembly's part still finds the P.NO. of the real part file
-    analysis = read_json(Path(m["_analysis_path"]))
-    file_by_name = {}
-    for i in fc_tree.flatten(analysis["assembly"]["instances"]):
-        if i.get("target_file"):
-            file_by_name[i.get("path") or i["name"]] = i["target_file"]
+    pid_by_index = dict(items)
     h = ctx.mm(3.5)
     brad = 1.4 * h                       # balloon circle radius
-    kx = mx[0] + ox + ctx.mm(16.0)
+    kx = knee_x if knee_x is not None else mx[0] + ox + ctx.mm(16.0)
     # rank by where each arrow will LAND, not by instance centre: knees are
     # handed out top-down, so any disagreement between the two orders makes
     # the leaders cross. Probe the landings from one common reference knee
     # (the top of the band) to break the knee<->landing circularity.
     probe = (kx, mx[1] + oy)
-    ys = sorted(range(len(insts)),
+    ys = sorted(pid_by_index,
                 key=lambda k: -balloon_landing(ctx, asm_job, off, k,
                                                probe)[1])
-    next_y = mx[1] + oy
+    next_y = mx[1] + oy if start_y is None else start_y
     for rank, k in enumerate(ys):
         inst = insts[k]
-        pid = disp_no(id_by_file.get(file_by_name.get(inst["name"], ""),
-                                     "?"))
+        pid = pid_by_index[k]
         placed = None
         for dy in [4.0 * k for k in range(0, 25)]:
             ky = next_y - ctx.mm(dy)
@@ -2849,7 +2917,239 @@ def balloons(ctx, layout, asm_job, off, id_by_file, m):
                 break
         if placed is None:
             layout.unresolved.append(f"balloon-{pid}-{rank}")
-    return recs
+    return recs, next_y
+
+
+# ------------------------------------------------- assembly section hatch
+# ISO 128-50: in an assembly section every cut part is hatched separately,
+# and parts that touch must be told apart — by hatch ANGLE first, then by
+# SPACING. Six styles are enough for any part that touches five others; the
+# assignment is a graph colouring over the parts that actually meet in the
+# cut, so the choice is about the drawing, not about part numbering.
+HATCH_STYLES = ((0.0, 1.0), (math.pi / 2, 1.0), (0.0, 1.6),
+                (math.pi / 2, 1.6), (0.0, 2.4), (math.pi / 2, 2.4))
+# A cut region thinner than this (printed) is filled solid instead of
+# hatched: hatch lines in a 0.8 mm band read as a smear (ISO 128-50 3.4).
+THIN_SOLID_MM = 1.0
+
+
+def _loop_rect(loop, off=(0.0, 0.0)):
+    xs = [q[0] + off[0] for q in loop]
+    ys = [q[1] + off[1] for q in loop]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def hatch_styles_by_instance(groups, clearance):
+    """A hatch style index per instance, so no two parts that MEET in the
+    section share one. Greedy colouring, most-constrained part first, by
+    name on ties — the same model always draws the same way."""
+    rects = {}
+    for g in groups:
+        rects.setdefault(g.get("instance", ""), []).append(
+            _loop_rect(g["outer"]))
+    names = sorted(rects)
+    adj = {n: set() for n in names}
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if any(not (ra[2] + clearance < rb[0] or rb[2] + clearance < ra[0]
+                        or ra[3] + clearance < rb[1]
+                        or rb[3] + clearance < ra[1])
+                   for ra in rects[a] for rb in rects[b]):
+                adj[a].add(b)
+                adj[b].add(a)
+    colour = {}
+    for n in sorted(names, key=lambda x: (-len(adj[x]), x)):
+        used = {colour[o] for o in adj[n] if o in colour}
+        colour[n] = next(k for k in range(len(HATCH_STYLES) * 2)
+                         if k % len(HATCH_STYLES) not in used
+                         or k >= len(HATCH_STYLES)) % len(HATCH_STYLES)
+    return colour
+
+
+def assembly_hatches(ctx, sec_job, s_off):
+    """Section hatch for an ASSEMBLY: one hatch per cut part, neighbours
+    distinguished, very thin cuts filled solid. Returns (records, report)."""
+    groups = sec_job.get("hatch_groups", [])
+    if not groups:
+        return [], {}
+    ox, oy = s_off
+    styles = hatch_styles_by_instance(groups, ctx.mm(0.5))
+    thin = ctx.mm(THIN_SOLID_MM)
+    recs, solid = [], []
+    for g in groups:
+        loops = [[(x + ox, y + oy) for x, y in g["outer"]]]
+        loops += [[(x + ox, y + oy) for x, y in hole]
+                  for hole in g.get("holes", [])]
+        r = _loop_rect(g["outer"])
+        if min(r[2] - r[0], r[3] - r[1]) < thin:
+            recs.append(mw.hatch(loops, "SOLID"))
+            solid.append(g.get("instance", "?"))
+            continue
+        ang, spacing = HATCH_STYLES[styles.get(g.get("instance", ""), 0)]
+        # ANSI31 spacing is 0.125 units (inch pattern): x25.4 prints at
+        # 3.175 mm whatever the sheet scale
+        recs.append(mw.hatch(loops, "ANSI31", scale=ctx.mm(25.4) * spacing,
+                             angle=ang))
+    return recs, {"hatch_styles": {k: v for k, v in sorted(styles.items())},
+                  "solid_filled": sorted(set(solid))}
+
+
+# ------------------------------------------------------ assembly balloons
+
+def balloon_plan(m, views, id_by_path):
+    """Which view balloons each part number — one balloon per P.NO. on the
+    whole sheet (issue #5).
+
+    A part is ballooned in the view where it reads best: the manifest's
+    `balloon_in` if it says, else the detail view that lists it (small
+    parts are put in a detail precisely so they can be ballooned there),
+    else the section when the part is cut there, else the main view.
+    """
+    asm = m.get("assembly_sheet") or {}
+    forced = {str(k): v for k, v in (asm.get("balloon_in") or {}).items()}
+    in_detail = {}
+    for d in asm.get("detail_views") or []:
+        for pid in d.get("balloons") or []:
+            in_detail[str(pid)] = f"detail:{d.get('label', 'B')}"
+    plan = {}
+    for part in m["parts"]:
+        pid = str(part["part_id"])
+        want = forced.get(pid) or in_detail.get(pid)
+        order = ([want] if want else []) + ["front", "section"]
+        for view in order:
+            job = views.get(view)
+            if job is None:
+                continue
+            for k, inst in enumerate(job.get("instances", [])):
+                if id_by_path.get(inst["name"]) == part["part_id"]:
+                    plan.setdefault(pid, (view, k))
+                    break
+            if pid in plan:
+                break
+    return plan
+
+
+# -------------------------------------------------------- parts table
+# The table grows upward from the title block in rows of PARTS_ROW_H. It
+# shares the drawing area with the views, so a long one has to give way —
+# in the order the user asked for: group the small bought-out hardware into
+# one row per kind, then continue onto a second sheet. Text is NEVER shrunk
+# below the template's own floor (musa_writer.PARTS_TEXT_FLOOR).
+TABLE_AREA_FRAC = 0.55      # most of the drawing area a table may occupy
+
+
+def _group_of(part, analysis, m):
+    """The sub-assembly a part belongs to on the sheet: the TOP-LEVEL
+    instance path it is used under, labelled as the tree labels it."""
+    usage = analysis["assembly"].get("part_usage") or {}
+    paths = (usage.get(part["file"]) or {}).get("used_in") or []
+    labels = {n["path"]: n.get("label", n["path"])
+              for n in fc_tree.flatten(analysis["assembly"]["instances"])}
+    tops = []
+    for path in paths:
+        head = path.split("/")[0]
+        if head != path:                 # inside a sub-assembly
+            tops.append(labels.get(head, head))
+    return tops
+
+
+def hardware_kind(part):
+    """What makes two bought-out items 'the same kind' for one table row."""
+    return (part.get("description", ""), part.get("material", ""),
+            part.get("drg_no", ""))
+
+
+def parts_table_plan(m, analysis, max_rows, group_by="none",
+                     group_hardware=None, total=None):
+    """Rows for the parts table, with the fallbacks the sheet may need.
+
+    Returns (rows, report). Each row is a dict: kind "head" (a sub-assembly
+    heading), "part" (one part), "group" (several bought-out items of one
+    kind) or "total". `report` names the fallback actually used, so /draw
+    can say so rather than quietly dropping something.
+
+    Everything here is OPT-IN: with the defaults the table is exactly what
+    it has always been, one row per manifest part in manifest order, so an
+    existing sheet redraws byte for byte.
+    """
+    parts = list(m["parts"])
+    report = {"fallbacks": [], "rows": 0, "sheets": 1}
+
+    def build(group_hw):
+        rows, used = [], set()
+        groups = {}
+        if group_by == "sub_assembly":
+            for part in parts:
+                for g in _group_of(part, analysis, m) or [""]:
+                    groups.setdefault(g, []).append(part)
+        else:
+            groups[""] = parts
+        for name in sorted(groups, key=lambda g: (g == "", g)):
+            members = groups[name]
+            if name:
+                rows.append({"kind": "head", "text": name,
+                             "qty": sum(p["qty"] for p in members)})
+            hw, rest = [], []
+            for part in members:
+                (hw if group_hw and not part.get("sheet", True)
+                 else rest).append(part)
+            for part in rest:
+                rows.append({"kind": "part", "part": part})
+                used.add(part["part_id"])
+            kinds = {}
+            for part in hw:
+                kinds.setdefault(hardware_kind(part), []).append(part)
+            for kind, members_hw in kinds.items():
+                rows.append({"kind": "group", "parts": members_hw,
+                             "qty": sum(p["qty"] for p in members_hw)})
+        return rows
+
+    rows = build(bool(group_hardware))
+    if len(rows) > max_rows and group_hardware is None:
+        # fallback 1: one row per kind of bought-out hardware
+        grouped = build(True)
+        if len(grouped) < len(rows):
+            rows = grouped
+            report["fallbacks"].append("grouped bought-out hardware by kind")
+    # a TOTAL row belongs to a GROUPED table ("quantities per group and in
+    # total"); an ungrouped one is the plain list it has always been
+    if total or (total is None and any(r["kind"] == "head" for r in rows)):
+        rows.append({"kind": "total",
+                     "qty": sum(p["qty"] for p in m["parts"])})
+    if len(rows) > max_rows:
+        # fallback 2: the rest goes on a continuation sheet
+        report["fallbacks"].append(
+            f"continuation sheet ({len(rows) - max_rows} rows of "
+            f"{len(rows)} moved to sheet 2)")
+        report["sheets"] = 2
+    report["rows"] = len(rows)
+    return rows, report
+
+
+def parts_row_cells(row, analysis, m):
+    """The eight title-block cells for one planned row."""
+    if row["kind"] == "head":
+        return {"pno": "", "description": row["text"], "qty": str(row["qty"]),
+                "drg_no": "", "material": "", "size": "", "weight": "",
+                "remarks": "SUB-ASSEMBLY"}
+    if row["kind"] == "total":
+        return {"pno": "", "description": "TOTAL", "qty": str(row["qty"]),
+                "drg_no": "", "material": "", "size": "", "weight": "",
+                "remarks": ""}
+    if row["kind"] == "group":
+        parts = row["parts"]
+        first = parts[0]
+        return {"pno": ", ".join(disp_no(p["part_id"]) for p in parts),
+                "description": first["description"], "qty": str(row["qty"]),
+                "drg_no": first["drg_no"], "material": first["material"],
+                "size": "-", "weight": "-",
+                "remarks": f"{len(parts)} ITEMS"}
+    part = row["part"]
+    wkg = part_weight_kg(analysis, part)
+    return {"pno": disp_no(part["part_id"]),
+            "description": part["description"], "qty": str(part["qty"]),
+            "drg_no": part["drg_no"], "material": part["material"],
+            "size": "-", "weight": weight_label(wkg), "remarks": "-"}
 
 
 # ----------------------------------------------------------- title block
@@ -3424,57 +3724,256 @@ def scale_job(job, f):
     return j
 
 
+def detail_instances(parent_job, spec, k):
+    """The parent view's per-instance anchors, moved into a detail view.
+
+    A balloon in a detail needs the same per-instance edges the main view
+    has, clipped to the detail circle and enlarged with it — otherwise it
+    lands on ink that is not drawn there."""
+    cen = [float(spec["center"][0]), float(spec["center"][1])]
+    r = float(spec["radius"])
+    out = []
+    for inst in parent_job.get("instances", []):
+        edges = clip_prims(inst.get("edges", []), cen, r)
+        if not edges:
+            continue                    # this part is not in the region
+        moved = []
+        for pr in edges:
+            q = dict(pr)
+            if pr["t"] == "seg":
+                q["a"] = [(pr["a"][0] - cen[0]) * k, (pr["a"][1] - cen[1]) * k]
+                q["b"] = [(pr["b"][0] - cen[0]) * k, (pr["b"][1] - cen[1]) * k]
+            else:
+                q["c"] = [(pr["c"][0] - cen[0]) * k, (pr["c"][1] - cen[1]) * k]
+                q["r"] = pr["r"] * k
+            moved.append(q)
+        mn, mx = bounds_of_prims(moved)
+        out.append({"name": inst["name"], "label": inst.get("label", ""),
+                    "center": [(mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2],
+                    "bbox": [mn[0], mn[1], mx[0], mx[1]], "edges": moved})
+    return out
+
+
+def bounds_of_prims(prims):
+    mn = [1e300, 1e300]
+    mx = [-1e300, -1e300]
+    for pr in prims:
+        if pr["t"] == "seg":
+            pts = [pr["a"], pr["b"]]
+        elif pr["t"] in ("circle", "arc"):
+            c, r = pr["c"], pr["r"]
+            pts = [[c[0] - r, c[1] - r], [c[0] + r, c[1] + r]]
+        else:
+            pts = pr["pts"]
+        for x, y in pts:
+            mn = [min(mn[0], x), min(mn[1], y)]
+            mx = [max(mx[0], x), max(mx[1], y)]
+    return mn, mx
+
+
+def continuation_sheet(m, asm, rows, analysis, sheet_of):
+    """A second sheet carrying the rest of a parts table that does not fit.
+
+    Same DRG NO., "SHEET 2 OF 2" (CLAUDE.md: i OF n only within one DRG
+    NO.), title block and table — no views: it exists to carry rows."""
+    num, den = parse_scale(asm["scale"])
+    ctx = mw.SheetContext(num, den)
+    ctx.dimstyles = sheet_dimstyles(ctx)
+    layout = Layout(ctx)
+    sheet = dict(asm, sheet_of=sheet_of)
+    replaced = ctx.add_template(titleblock_replacements(m, sheet),
+                                positional=rev_row_positional(m, asm))
+    overflow = []
+    for idx, row in enumerate(rows):
+        ctx.entities += mw.parts_row_records(
+            ctx, idx, parts_row_cells(row, analysis, m), overflow=overflow)
+    ctx.entities += mw.date_records(ctx, today())
+    rows_h = mw.PARTS_ROW_H * ctx.t * len(rows)
+    ctx.entities += place_notes(
+        ctx, layout, [f"PARTS TABLE CONTINUED FROM SHEET {sheet_of[0] - 1}."],
+        rows_h)
+    layout.unresolved.extend(overflow)
+    ctx._stamp_rect = None
+    return ctx, replaced, layout.report()
+
+
 def build_assembly_sheet(m, proj):
+    """The assembly sheet(s): front view, an optional section, any number of
+    detail views, one balloon per part number across them all, and the
+    parts table grouped by sub-assembly.
+
+    Returns [(ctx, replaced, layout report, meta)] — more than one sheet
+    only when the table needs a continuation."""
     asm = m["assembly_sheet"]
     num, den = parse_scale(asm["scale"])
     ctx = mw.SheetContext(num, den)
-    job = proj["assembly:front"]
-    rows_h = mw.PARTS_ROW_H * ctx.t * len(m["parts"])
-    if asm.get("view") == "iso":
+    analysis = read_json(Path(m["_analysis_path"]))
+    front = proj["assembly:front"]
+    sec_spec = asm.get("section") or {}
+    section = proj.get("assembly:section") if sec_spec.get("enabled") else None
+    iso = asm.get("view") == "iso"
+    if iso and section is None:
         # NTS pictorial: shrink to leave room for balloons + notes
-        vw = job["bounds"][1][0] - job["bounds"][0][0]
-        vh = job["bounds"][1][1] - job["bounds"][0][1]
+        vw = front["bounds"][1][0] - front["bounds"][0][0]
+        vh = front["bounds"][1][1] - front["bounds"][0][1]
         f = min(1.0, ctx.mm(100.0) / vw, ctx.mm(95.0) / vh)
         if f < 1.0:
-            job = scale_job(job, f)
-    offs = place_views(ctx, job, None, right_band=asm.get("balloons", True),
+            front = scale_job(front, f)
+
+    # the parts table is planned BEFORE the views are placed: how many rows
+    # it needs is how much of the sheet the views do not get
+    table = asm.get("parts_table") or {}
+    row_h = mw.PARTS_ROW_H * ctx.t
+    area_h = ctx.draw_area[3] - ctx.draw_area[1]
+    max_rows = max(1, int(area_h * TABLE_AREA_FRAC / row_h))
+    rows, table_report = parts_table_plan(
+        m, analysis, max_rows, group_by=table.get("group_by", "none"),
+        group_hardware=table.get("group_hardware"),
+        total=table.get("total"))
+    here_rows = rows[:max_rows] if table_report["sheets"] > 1 else rows
+    rest_rows = rows[max_rows:] if table_report["sheets"] > 1 else []
+    rows_h = row_h * len(here_rows)
+
+    projection = sec_spec.get("projection", "below")
+    offs = place_views(ctx, front, section, projection,
+                       right_band=asm.get("balloons", True),
                        bottom_reserve=rows_h + ctx.mm(36.0))
     ctx.dimstyles = sheet_dimstyles(ctx)
     layout = Layout(ctx)
-    box_recs, stamp_rect = pictorial_box(ctx, layout, shaded_png("assembly"))
+    views = {"front": front}
+    if section is not None:
+        views["section"] = section
+    zones = [(j["bounds"][0][0] + offs[v][0], j["bounds"][0][1] + offs[v][1],
+              j["bounds"][1][0] + offs[v][0], j["bounds"][1][1] + offs[v][1])
+             for v, j in views.items()]
+    # the balloon column: every view's balloons share it (one fan, no
+    # crossing leaders), so nothing else may be parked there
+    band_x = max(z[2] for z in zones) + ctx.mm(16.0)
+    if asm.get("balloons", True):
+        zones.append((band_x - ctx.mm(2.0), min(z[1] for z in zones),
+                      ctx.draw_area[2], max(z[3] for z in zones)))
+    box_recs, stamp_rect = pictorial_box(ctx, layout, shaded_png("assembly"),
+                                         zones=zones)
     ctx.entities += box_recs
     ctx._stamp_rect = stamp_rect
     ax0, ay0, ax1, _ = ctx.draw_area
     layout.claim((ax0, ay0, ax1, ay0 + rows_h), "parts-rows", "reserved")
-    _claim_view(layout, job, offs["front"], "assembly-view")
-    replaced = ctx.add_template(titleblock_replacements(m, asm),
-                                positional=rev_row_positional(m, asm))
-    analysis = read_json(Path(m["_analysis_path"]))
-    for row, part in enumerate(m["parts"]):
-        wkg = part_weight_kg(analysis, part)
-        ctx.entities += mw.parts_row_records(ctx, row, {
-            "pno": disp_no(part["part_id"]), "description": part["description"],
-            "qty": str(part["qty"]), "drg_no": part["drg_no"],
-            "material": part["material"], "size": "-",
-            "weight": weight_label(wkg),
-            "remarks": "-"})
+    _claim_view(layout, front, offs["front"], "assembly-view")
+    if section is not None:
+        _claim_view(layout, section, offs["section"], "assembly-section")
+
+    # detail views: as many as the manifest asks for, each the parent's own
+    # ink enlarged (the part sheets' machinery, issue #2)
+    detail_specs_list = asm.get("detail_views") or []
+    detail_recs, detail_jobs, detail_offs = [], {}, {}
+    for spec in detail_specs_list:
+        label = str(spec.get("label", "B"))
+        of = spec.get("of", "front")
+        if of not in views:
+            layout.unresolved.append(f"detail-of-{of}-missing")
+            continue
+        recs, job, off = place_detail_view(ctx, layout, asm, spec, views[of],
+                                           offs[of], zones=zones,
+                                           pad_mm=DETAIL_ASSEMBLY_PAD_MM)
+        if job is None:
+            continue
+        job["instances"] = detail_instances(views[of], spec,
+                                            detail_factor(asm, spec))
+        key = f"detail:{label}"
+        detail_jobs[key] = job
+        detail_offs[key] = off
+        detail_recs.append((recs, job, off, spec, of))
+
+    replaced = ctx.add_template(titleblock_replacements(
+        m, dict(asm, sheet_of=asm.get("sheet_of",
+                                      [1, table_report["sheets"]]))),
+        positional=rev_row_positional(m, asm))
+    overflow = []
+    for idx, row in enumerate(here_rows):
+        ctx.entities += mw.parts_row_records(
+            ctx, idx, parts_row_cells(row, analysis, m), overflow=overflow)
     ctx.entities += mw.date_records(ctx, today())
-    emit_prims(ctx, job["visible"], offs["front"])
-    emit_prims(ctx, job["hidden"], offs["front"], P_HIDDEN)
-    ctx.entities += thread_lines(ctx, asm.get("threads", []),
-                                 {"front": job}, offs)
-    if asm.get("view") == "iso":
-        ctx.entities += _view_label(ctx, layout, job, offs["front"],
+
+    emit_prims(ctx, front["visible"], offs["front"])
+    emit_prims(ctx, front["hidden"], offs["front"], P_HIDDEN)
+    cut_segs: list = []
+    cut_arrows: list = []
+    hatch_report = {}
+    if section is not None:
+        label = sec_spec.get("label", "A")
+        frac = sec_spec.get("offset_frac", 0.5)
+        d, u = VIEW_DIRS[asm["front_view"]]
+        axis_vec = u if projection == "below" else cross(d, u)
+        if sum(axis_vec) < 0:
+            frac = 1.0 - frac
+        cut_recs, cut_segs, cut_arrows = cutting_plane(
+            ctx, layout, front, offs["front"], label, projection, frac)
+        ctx.entities += cut_recs
+        emit_prims(ctx, section["visible"], offs["section"])
+        hrecs, hatch_report = assembly_hatches(ctx, section, offs["section"])
+        ctx.entities += hrecs
+    for recs, job, off, spec, of in detail_recs:
+        ctx.entities += recs
+        emit_prims(ctx, job["visible"], off)
+        emit_prims(ctx, job["hidden"], off, P_HIDDEN)
+        ctx.entities += section_hatches(ctx, job, off)
+        ctx.entities += detail_marker(ctx, layout, spec, views[of], offs[of])
+
+    ctx.entities += thread_lines(ctx, asm.get("threads", []), views, offs)
+    if iso and section is None:
+        ctx.entities += _view_label(ctx, layout, front, offs["front"],
                                     "ISOMETRIC VIEW")
-    elif asm.get("front_extent_dims", True):
-        ctx.entities += dim_extents(ctx, layout, job, offs["front"])
+    elif asm.get("front_extent_dims", True) and not iso:
+        ctx.entities += dim_extents(ctx, layout, front, offs["front"])
+    if section is not None:
+        ctx.entities += _view_label(
+            ctx, layout, section, offs["section"],
+            f"SECTION {sec_spec.get('label', 'A')}-{sec_spec.get('label', 'A')}")
+    for _recs, job, off, spec, _of in detail_recs:
+        ctx.entities += _view_label(
+            ctx, layout, job, off,
+            detail_caption(spec["scale"], str(spec.get("label", "B"))))
+
+    balloon_report = {}
     if asm.get("balloons", True):
         id_by_file = {p["file"]: p["part_id"] for p in m["parts"]}
-        ctx.entities += balloons(ctx, layout, job, offs["front"],
-                                 id_by_file, m)
-    ctx.entities += place_notes(ctx, layout, asm.get("fab_notes", []),
-                                rows_h)
-    return ctx, replaced, layout.report()
+        # an analysis written before v0.5.0 has no paths, only names
+        id_by_path = {(n.get("path") or n["name"]):
+                      id_by_file.get(n.get("target_file"))
+                      for n in fc_tree.flatten(
+                          analysis["assembly"]["instances"])}
+        all_views = dict(views, **detail_jobs)
+        all_offs = dict(offs, **detail_offs)
+        plan = balloon_plan(m, all_views, id_by_path)
+        by_view: dict = {}
+        for pid, (view, k) in plan.items():
+            by_view.setdefault(view, []).append((k, disp_no(pid)))
+        next_y = None
+        for view in sorted(by_view, key=lambda v: (v != "front", v)):
+            recs, next_y = balloons(ctx, layout, all_views[view],
+                                    all_offs[view], by_view[view],
+                                    start_y=next_y, knee_x=band_x)
+            ctx.entities += recs
+        missing = [p["part_id"] for p in m["parts"]
+                   if str(p["part_id"]) not in plan]
+        balloon_report = {"ballooned": {k: v[0] for k, v in plan.items()},
+                          "not_shown": missing}
+        for pid in missing:
+            # a part number with nowhere to point is a parts table that does
+            # not match the drawing: say so rather than ship it
+            layout.unresolved.append(f"balloon-{pid}-no-view-shows-it")
+    ctx.entities += place_notes(ctx, layout, asm.get("fab_notes", []), rows_h)
+    layout.unresolved.extend(overflow)
+    meta = {"parts_table": table_report, "hatch": hatch_report,
+            "balloons": balloon_report,
+            "details": [str(s.get("label", "B")) for s in detail_specs_list],
+            "section": section is not None}
+    sheets = [(ctx, replaced, layout.report(), meta)]
+    if rest_rows:
+        sheets.append(continuation_sheet(m, asm, rest_rows, analysis,
+                                         [2, table_report["sheets"]])
+                      + ({"parts_table": {"continuation_of": asm["drg_no"]}},))
+    return sheets
 
 
 def main() -> None:
@@ -3530,26 +4029,47 @@ def main() -> None:
               f"(nudges={lay['nudges']}, unresolved="
               f"{len(lay['unresolved'])})")
     if m.get("assembly_sheet") and m["assembly_sheet"].get("enabled", True):
-        ctx, replaced, lay = build_assembly_sheet(m, proj)
-        stamp_rects[m["assembly_sheet"]["drg_no"]] = ctx._stamp_rect
-        asm_out = OUTPUT_MUSA_DIR / f"{m['assembly_sheet']['drg_no']}.musa"
-        asm_out.write_text(ctx.render())
-        sheets.append({"file": str(asm_out),
-                       "drg_no": m["assembly_sheet"]["drg_no"],
-                       "description": m["assembly_sheet"]["description"],
-                       "scale": m["assembly_sheet"]["scale"],
-                       "window": ctx.window, "kind": "assembly",
-                       "section": False, "replaced_fields": replaced,
-                       "layout": lay,
-                       "stamp": {"png": "output/work/shaded/assembly.png",
-                                 "rect": list(stamp_rects[
-                                     m["assembly_sheet"]["drg_no"]])},
-                       "logo": ctx.logo_stamp()})
-        if lay["unresolved"]:
-            problems.append(f"{m['assembly_sheet']['drg_no']}: "
-                            f"{lay['unresolved']}")
-        print(f"sheet {total}/{total}: {asm_out.name}  scale "
-              f"{m['assembly_sheet']['scale']}")
+        asm = m["assembly_sheet"]
+        built = build_assembly_sheet(m, proj)
+        for k, (ctx, replaced, lay, meta) in enumerate(built, start=1):
+            suffix = "" if k == 1 else f"_{k}"
+            drg = asm["drg_no"]
+            stamp_rects[drg + suffix] = ctx._stamp_rect
+            asm_out = OUTPUT_MUSA_DIR / f"{drg}{suffix}.musa"
+            asm_out.write_text(ctx.render())
+            entry = {"file": str(asm_out), "drg_no": drg,
+                     "description": asm["description"],
+                     "scale": asm["scale"], "window": ctx.window,
+                     "kind": "assembly",
+                     "section": bool(meta.get("section")),
+                     "replaced_fields": replaced, "layout": lay,
+                     "assembly_report": meta,
+                     "logo": ctx.logo_stamp()}
+            if ctx._stamp_rect is not None:
+                entry["stamp"] = {"png": "output/work/shaded/assembly.png",
+                                  "rect": list(ctx._stamp_rect)}
+            if len(built) > 1:
+                entry["sheet_of"] = [k, len(built)]
+            sheets.append(entry)
+            if lay["unresolved"]:
+                problems.append(f"{drg}{suffix}: {lay['unresolved']}")
+            print(f"sheet {total}/{total}: {asm_out.name}  scale "
+                  f"{asm['scale']}"
+                  + (f"  (nudges={lay['nudges']})" if k == 1 else ""))
+        report = built[0][3]
+        if report.get("section"):
+            h = report.get("hatch") or {}
+            print(f"  section: {len(h.get('hatch_styles') or {})} parts "
+                  f"hatched"
+                  + (f", {len(h['solid_filled'])} filled solid (thin)"
+                     if h.get("solid_filled") else ""))
+        if report.get("details"):
+            print(f"  details: {', '.join(report['details'])}")
+        tbl = report.get("parts_table") or {}
+        if tbl.get("fallbacks"):
+            # the table did not fit as asked: say which fallback was used
+            print(f"  parts table ({tbl['rows']} rows): "
+                  + "; ".join(tbl["fallbacks"]))
     write_json(OUTPUT_MUSA_DIR / "sheets.json",
                {"manifest": str(man_path), "sheets": sheets,
                 "deliver_to": m.get("deliver_to")})

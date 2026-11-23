@@ -164,9 +164,43 @@ co-author line to git commits.
   lines}} draws a labelled centre line through each angularly placed feature,
   a "0%%d REF" datum label and a CCW direction arc (draw.py place_angle_refs,
   collision-checked against view ink + claims like every annotation).
-- Per assembly: ONE sheet — front view (section only if needed), P.NO.
-  balloon leaders per instance, parts table filled (P.NO., DESCRIPTION,
-  QTY, DRG NO., MATERIAL, SIZE, WEIGHT, REMARKS; "-" if unknown).
+- Per assembly: ONE sheet — front view, an optional SECTION, any number of
+  DETAIL views, P.NO. balloons and the parts table (P.NO., DESCRIPTION,
+  QTY, DRG NO., MATERIAL, SIZE, WEIGHT, REMARKS; "-" if unknown). All of it
+  is manifest-stated under `assembly_sheet` and checked at the lock
+  (manifest.assembly_sheet_problems), as a part sheet's decisions are:
+  - `section` {enabled, projection, offset_frac, label, not_sectioned}.
+    Each cut part is hatched SEPARATELY and parts that touch in the cut get
+    a different hatch angle or spacing (ISO 128-50) — draw.py colours the
+    adjacency graph of the cut areas, so it is about the drawing, not the
+    part numbering. A cut region thinner than THIN_SOLID_MM printed is
+    filled SOLID instead of hatched. `not_sectioned` lists the part ids a
+    section must not cut along their length — shafts, rods, screws, nuts,
+    pins, O-rings — resolved to instance paths and passed to fc_project as
+    `section_exempt`, which leaves those parts whole inside the cut.
+  - `detail_views`: [{label, scale, of, center, radius, balloons}] — the
+    part sheets' detail machinery (DIMLFAC and all), several per sheet,
+    each with its circle and letter on the parent view. An assembly detail
+    reserves only DETAIL_ASSEMBLY_PAD_MM of clearance: it carries no
+    dimensions of its own, only balloons.
+  - BALLOONS: ONE per P.NO. on the whole sheet, never one per instance —
+    a part with qty 4 is one balloon. draw.balloon_plan picks the view
+    that shows it best (manifest `balloon_in`, else the detail that lists
+    it, else the section, else the front view) and every view's balloons
+    share ONE knee column, so the leaders cannot cross between views. A
+    P.NO. no view shows fails the sheet: the table would claim a part the
+    drawing does not point at.
+  - `parts_table` {group_by: none|sub_assembly, group_hardware, total}.
+    Grouped by sub-assembly it uses the v0.5.0 tree: a heading row per
+    sub-assembly carrying its own quantity, then its parts, then a TOTAL
+    row. If the rows do not fit TABLE_AREA_FRAC of the drawing area the
+    fallbacks run IN ORDER — group bought-out hardware into one row per
+    kind, then move the rest to a continuation sheet (same DRG NO.,
+    "SHEET 2 OF 2") — and the one actually used is REPORTED, in the /draw
+    log and in sheets.json `assembly_report`. Text is never shrunk below
+    musa_writer.PARTS_TEXT_FLOOR; a cell that cannot fit fails the sheet.
+  - Defaults are the old sheet exactly: no section, no details, an
+    ungrouped table, so an existing assembly sheet redraws unchanged.
 - THREADS: model the REAL helix in the .FCStd (PartDesign::SubtractiveHelix,
   ISO 60%%d V truncated to d3 = d - 1.2269*P) so the model and the shaded
   pictorial are a true twin — but NEVER project it: a 20+ turn helix
@@ -265,6 +299,12 @@ composition/rework), qa-checker (verify PDFs after every /export).
   spacer_5mm/spacer_10mm/press_tool, ours to regenerate) and the
   per-project delivery folder (e.g. lisocl2/fabrication/).
 - /judge reports model issues; the user fixes models in FreeCAD themself.
+- THIN FEATURES are judged at the scale the SHEET is drawn at (issue #4):
+  /judge uses the manifest's scale for that part (a locked manifest first,
+  then a draft), and its own suggestion only when no manifest exists;
+  manifest.py lock re-runs the same check (judge.thin_feature_finding), so
+  a scale chosen at /finalise that is still too thin does not lock without
+  a waiver, and one raised far enough needs no waiver at all.
 - Out of scope (Round 0): 3D-print workflows, CAM/G-code, BOM costing,
   other model folders. GD&T IS in scope (amended at /finalise, Round 0):
   drawings must be vendor-publishable — measurable datum labels + feature

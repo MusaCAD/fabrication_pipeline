@@ -338,7 +338,9 @@ class DetailManifestTest(unittest.TestCase):
     def test_the_label_is_one_letter_and_not_the_section_s(self):
         self.assertIn("must be one letter", " ".join(
             mf.detail_problems(self.part(detail_view={"label": "B1"}))))
-        self.assertIn("collides with the section label", " ".join(
+        # "A" is the section's letter: DETAIL A and SECTION A-A on one
+        # sheet name two different things the same
+        self.assertIn("already used on this sheet", " ".join(
             mf.detail_problems(self.part(detail_view={"label": "A"}))))
 
     def test_centre_and_radius(self):

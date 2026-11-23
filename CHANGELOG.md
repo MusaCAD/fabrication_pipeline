@@ -5,6 +5,80 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.6.0 — 2026-11-24
+
+Two issues from a live project, both blocking a locked manifest from
+drawing in full:
+[#4](https://github.com/MusaCAD/fabrication_pipeline/issues/4) and
+[#5](https://github.com/MusaCAD/fabrication_pipeline/issues/5).
+
+### Fixed
+
+- **Thin features are judged at the scale the sheet is drawn at** (#4).
+  `/judge` measured legibility with the scale it suggested itself, so a
+  0.5 mm disc that /finalise puts on a 2:1 sheet — printing at a legible
+  1.0 mm — was still reported as thin at 1:1 and had to be waived at the
+  lock. It now takes the part's scale from the manifest (a locked one
+  first, then a draft) and falls back to its own suggestion only when
+  there is no manifest; the finding says which it used. `manifest.py lock`
+  re-runs the same check, so a scale chosen at /finalise that is still too
+  thin does not lock without a waiver, and one raised far enough needs no
+  waiver at all. The judgement records `scale_used` beside
+  `suggested_scale`.
+
+### Added
+
+- **Assembly sheets can carry a section** (#5). `assembly_sheet.section`
+  works like a part sheet's — cutting plane, arrows, "SECTION A-A" — with
+  the conventions an assembly needs (ISO 128-50):
+  - every cut part is hatched SEPARATELY, and parts that touch in the cut
+    get a different hatch angle or spacing. The styles come from colouring
+    the adjacency graph of the cut areas, so the distinction follows the
+    drawing rather than the part numbering;
+  - `section.not_sectioned` lists the parts a section must not cut along
+    their length — shafts, rods, screws, nuts, pins, O-rings. They are
+    drawn whole inside the cut (`section_exempt` in fc_project, which cuts
+    each instance separately);
+  - a cut region thinner than 1 mm printed is filled solid.
+- **Detail views on assembly sheets**: `assembly_sheet.detail_views`, a
+  list of `{label, scale, of, center, radius, balloons}` using the part
+  sheets' detail machinery from v0.4.0 (so their geometry is the parent
+  view's own ink enlarged), each with its circle and letter on the parent
+  view. A part too small to read in the main view is ballooned in the
+  detail instead.
+- **One balloon per part number on the whole sheet.** Balloons used to be
+  drawn per INSTANCE, so a part with qty 3 carried three identical
+  balloons. Each part number is now ballooned once, in the view that shows
+  it best (the manifest's `balloon_in`, else the detail that lists it,
+  else the section, else the front view), and every view's balloons share
+  one knee column so leaders do not cross between views. A part number no
+  view shows fails the sheet.
+- **A parts table grouped by sub-assembly**, built on the v0.5.0 tree:
+  `assembly_sheet.parts_table` `{group_by: none|sub_assembly,
+  group_hardware, total}`. Grouped, each sub-assembly gets a heading row
+  carrying its own quantity, followed by its parts, with a TOTAL row at
+  the end. When the rows do not fit the drawing area the fallbacks run in
+  order — group bought-out hardware into one row per kind, then move the
+  rest onto a continuation sheet (same DRG NO., "SHEET 2 OF 2") — and the
+  one used is reported in the /draw log and in `sheets.json`
+  (`assembly_report`). Text is never shrunk below the template's floor.
+- `/finalise` validates all of it (`manifest.assembly_sheet_problems`): the
+  section's projection and the parts it names, each detail's parent view,
+  standard-and-enlarging scale and free letter, the parts named by
+  `balloons` / `balloon_in` and the views they point at, and the table's
+  grouping mode.
+
+### Changed
+
+- The assembly composer may now return more than one sheet, so
+  `build_assembly_sheet` returns a list and `sheets.json` gains
+  `assembly_report` (and `sheet_of` when a table continues).
+- **Defaults are the old sheet exactly**: no section, no details, an
+  ungrouped table with no TOTAL row. An existing flat assembly sheet
+  redraws byte-identical — except that a part with several instances now
+  carries one balloon instead of one per instance, which is the point of
+  the change.
+
 ## v0.5.0 — 2026-11-23
 
 ### Fixed

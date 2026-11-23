@@ -27,6 +27,14 @@ and, for sub-assemblies (issue #3):
   cyc_a.FCStd, cyc_b.FCStd -- each contains the other. FreeCAD saves this
                          happily and then SEGFAULTS when asked for the
                          link's Shape, so the walk has to refuse it.
+and, for assembly SHEETS (issue #5):
+  rod.FCStd, screw.FCStd   -- turned parts, which a section does not cut
+                         along their length (ISO 128-50)
+  asm_left.FCStd, asm_right.FCStd -- two sub-assemblies that share a part
+  asm_sheet.FCStd     -- top: both sub-assemblies side by side (their
+                         blocks TOUCH in the cut, so the hatch has to tell
+                         them apart), a rod spanning both and a small screw
+                         for a detail view
 
 The joints are made with the real Assembly workbench (JointObject), so the
 references land in whatever layout this FreeCAD version actually writes --
@@ -46,6 +54,21 @@ def p(*a):
     print(*a, flush=True)
 
 
+def make_rod(out_dir, name, dia, length):
+    """A turned part: a cylinder of `dia` x `length`, built along +Z. The
+    assembly turns it where it wants it (a link's own rotation), the way a
+    real model reuses one rod in several orientations."""
+    doc = FreeCAD.newDocument(name)
+    body = doc.addObject("PartDesign::Body", "Body")
+    cyl = doc.addObject("PartDesign::AdditiveCylinder", "Cylinder")
+    body.addObject(cyl)
+    cyl.Radius, cyl.Height, cyl.Angle = dia / 2.0, length, 360.0
+    doc.recompute()
+    path = os.path.join(out_dir, name + ".FCStd")
+    doc.saveAs(path)
+    return path
+
+
 def make_part(out_dir, name, dx, dy, dz):
     doc = FreeCAD.newDocument(name)
     body = doc.addObject("PartDesign::Body", "Body")
@@ -58,14 +81,15 @@ def make_part(out_dir, name, dx, dy, dz):
     return path
 
 
-def add_link(doc, asm, part_path, label, pos):
+def add_link(doc, asm, part_path, label, pos, rot=None):
     part_doc = FreeCAD.openDocument(part_path)
     tip = [o for o in part_doc.Objects if o.TypeId == "PartDesign::Body"][0]
     link = doc.addObject("App::Link", label)
     link.LinkedObject = tip
     link.Label = label
-    link.Placement = FreeCAD.Placement(FreeCAD.Vector(*pos),
-                                       FreeCAD.Rotation())
+    rotation = FreeCAD.Rotation(FreeCAD.Vector(*rot[0]), rot[1]) if rot \
+        else FreeCAD.Rotation()
+    link.Placement = FreeCAD.Placement(FreeCAD.Vector(*pos), rotation)
     asm.addObject(link)
     return link
 
@@ -182,7 +206,7 @@ def sub_assembly(out_dir, name, members, joints=("Fixed",), loose=()):
     return doc, asm, path
 
 
-def nested(out_dir, name, subs, extra=None, joints=()):
+def nested(out_dir, name, subs, extra=None, extras=(), joints=()):
     """A top assembly over sub-assemblies.
 
     `subs` are (sub AssemblyObject, label, pos, plain) — `plain` picks the
@@ -210,9 +234,11 @@ def nested(out_dir, name, subs, extra=None, joints=()):
                                          FreeCAD.Rotation())
         asm.addObject(lk)
         first = first or lk
-    if extra:
-        stem, label, pos = extra
-        add_link(doc, asm, os.path.join(out_dir, stem + ".FCStd"), label, pos)
+    for item in ([extra] if extra else []) + list(extras):
+        stem, label, pos = item[:3]
+        rot = item[3] if len(item) > 3 else None
+        add_link(doc, asm, os.path.join(out_dir, stem + ".FCStd"), label,
+                 pos, rot)
     ground(doc, group, first)
     for jtype, s1, s2 in joints:
         j = doc.addObject("App::FeaturePython", f"{jtype}_{s1.split('.')[0]}")
@@ -262,6 +288,24 @@ def main():
            [(sub1, "SUB1", (0, 0, 0), False),
             (sub2, "SUB2", (200, 0, 0), False)],
            joints=[("Fixed", "SUB1.PLATE.Vertex1", "SUB2.BLOCK2.Vertex1")])
+    # --- assembly sheets (issue #5) --------------------------------
+    make_rod(out_dir, "rod", 8.0, 120.0)
+    make_rod(out_dir, "screw", 4.0, 10.0)
+    _, left, _ = sub_assembly(out_dir, "asm_left",
+                              [("plate", "LPLATE", (0, 0, 0)),
+                               ("block", "LBLOCK", (0, 0, 10))])
+    # the same block part again, in the other sub-assembly
+    _, right, _ = sub_assembly(out_dir, "asm_right",
+                               [("block", "RBLOCK", (0, 0, 10)),
+                                ("shim", "RSHIM", (0, 0, 30))])
+    nested(out_dir, "asm_sheet",
+           [(left, "SUB_A", (0, 0, 0), False),
+            (right, "SUB_B", (20, 0, 0), False)],
+           extras=[("rod", "ROD", (-10, 10, 20), ((0, 1, 0), 90)),
+                   ("screw", "SCREW", (50, 10, 14))],
+           joints=[("Fixed", "SUB_A.LPLATE.Vertex1", "SUB_B.RBLOCK.Vertex1"),
+                   ("Fixed", "SUB_A.LPLATE.Vertex1", "ROD.Vertex1"),
+                   ("Fixed", "SUB_A.LPLATE.Vertex1", "SCREW.Vertex1")])
     cyclic_pair(out_dir)
     nested(out_dir, "asm_plainlink",
            [(sub1, "SUB1", (100, 0, 0), True)],
