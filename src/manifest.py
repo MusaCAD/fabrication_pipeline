@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import judge
 from common import (MANIFESTS_DIR, REPORTS_DIR, STANDARD_SCALES, die,
                     read_json, write_json)
 import musa_writer as mw
@@ -212,6 +213,37 @@ def detail_problems(part: dict) -> list[str]:
     return out
 
 
+def thin_feature_problems(m: dict) -> list[str]:
+    """Re-run the thin-feature check at the scale the manifest actually
+    draws each part at (issue #4).
+
+    /judge reported it with whatever scale was known then; the lock is the
+    moment the choice becomes final, so it is checked again here. A part
+    still too thin at its chosen scale does not lock unless the user has
+    waived it — and one whose scale was raised enough needs no waiver at
+    all, because there is nothing left to warn about.
+    """
+    src = REPORTS_DIR / "analysis.json"
+    if not src.exists():
+        return []
+    bodies = {p["file"]: p["bodies"][0] for p in read_json(src).get("parts", [])
+              if p.get("bodies")}
+    out = []
+    for part in m.get("parts", []):
+        if not part.get("sheet", True):
+            continue
+        body = bodies.get(part.get("file"))
+        sc = judge.parse_scale(part.get("scale"))
+        if body is None or sc is None:
+            continue
+        msg = judge.thin_feature_finding(body["bbox_size"], sc, "sheet scale")
+        if msg and not any("thinnest extent" in str(w)
+                           for w in part.get("waivers", [])):
+            out.append(f"{part.get('file')}: {msg}; raise the scale or "
+                       "record a waiver")
+    return out
+
+
 def lock(draft_path: Path) -> None:
     m = read_json(draft_path)
     problems = []
@@ -266,6 +298,7 @@ def lock(draft_path: Path) -> None:
             bad = datum_target_problem(d.get("target"))
             if bad:
                 problems.append(f"{part.get('file')}: {bad}")
+    problems += thin_feature_problems(m)
     if m.get("template"):
         problems += mw.template_problems(m["template"])
     asm = m.get("assembly_sheet") or {}

@@ -15,8 +15,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fc_tree
-from common import (DRAWING_AREA, REPORTS_DIR, S0, STANDARD_SCALES, die,
-                    read_json, write_json)
+from common import (DRAWING_AREA, MANIFESTS_DIR, REPORTS_DIR, S0,
+                    STANDARD_SCALES, die, read_json, write_json)
 
 # Drawing-area size in printed mm (constant for every sheet scale).
 AREA_W_MM = (DRAWING_AREA[2] - DRAWING_AREA[0]) * S0
@@ -34,7 +34,47 @@ def best_scale(w: float, h: float) -> tuple[int, int] | None:
     return None
 
 
-def judge_part(part: dict, generated: str = "") -> dict:
+def parse_scale(spec) -> tuple[int, int] | None:
+    parts = str(spec or "").split(":")
+    if len(parts) != 2 or not all(x.strip().isdigit() for x in parts):
+        return None
+    num, den = (int(x) for x in parts)
+    return (num, den) if num and den else None
+
+
+def thin_feature_finding(bbox_size, scale, source="") -> str | None:
+    """The thin-feature warning for a part drawn at `scale`, or None.
+
+    Legibility is a property of the PRINTED sheet, so the scale that
+    matters is the one the sheet is drawn at — the manifest's, once
+    /finalise has chosen it (issue #4). Judging a 0.5 mm disc at the
+    suggested 1:1 while the sheet draws it 2:1 asks the user to waive a
+    warning about a drawing that is perfectly legible.
+    """
+    thin = min(bbox_size)
+    printed = thin * scale[0] / scale[1]
+    if printed >= MIN_FEATURE_PRINT_MM:
+        return None
+    where = f" ({source})" if source else ""
+    return (f"thinnest extent {thin:g} mm prints at {printed:.2f} mm at "
+            f"{scale[0]}:{scale[1]}{where} — check legibility")
+
+
+def manifest_scales(path: Path) -> dict:
+    """part file -> (num, den) from a manifest draft or a locked one."""
+    if not path.exists():
+        return {}
+    out = {}
+    for part in read_json(path).get("parts", []):
+        sc = parse_scale(part.get("scale"))
+        if sc and part.get("file") and part.get("sheet", True):
+            out[part["file"]] = sc
+    return out
+
+
+def judge_part(part: dict, generated: str = "", sheet_scale=None) -> dict:
+    """`sheet_scale` is the scale the manifest draws this part at, when a
+    manifest exists; the suggested scale is used only when it does not."""
     findings, level = [], "PASS"
 
     def flag(sev: str, msg: str):
@@ -83,16 +123,18 @@ def judge_part(part: dict, generated: str = "") -> dict:
         flag("FAIL", f"part {w:g}x{h:g}x{d:g} mm fits no standard scale "
                      f"({', '.join(f'{n}:{dn}' for n, dn in STANDARD_SCALES)})"
                      " — needs sheet split")
-    else:
-        f = sc[0] / sc[1]
-        if dims_sorted[0] * f < MIN_FEATURE_PRINT_MM:
-            flag("WARN", f"thinnest extent {dims_sorted[0]:g} mm prints at "
-                         f"{dims_sorted[0] * f:.2f} mm at {sc[0]}:{sc[1]} — "
-                         "check legibility")
+    used = sheet_scale or sc
+    if used is not None:
+        msg = thin_feature_finding(
+            b["bbox_size"], used,
+            "sheet scale" if sheet_scale else "suggested scale")
+        if msg:
+            flag("WARN", msg)
     for issue in part["issues"]:
         flag("FAIL", issue)
     return {"file": part["file"], "verdict": level, "findings": findings,
-            "suggested_scale": sc and f"{sc[0]}:{sc[1]}"}
+            "suggested_scale": sc and f"{sc[0]}:{sc[1]}",
+            "scale_used": used and f"{used[0]}:{used[1]}"}
 
 
 def instance_id(node: dict) -> str:
@@ -174,7 +216,14 @@ def main() -> None:
         die("no reports/analysis.json — run /analyse first")
     a = read_json(src)
     asm = a["assembly"]
-    parts = [judge_part(p, generated) for p in a["parts"]]
+    # the sheet's own scale beats the suggestion: a locked manifest first,
+    # then a draft under review at /finalise (issue #4)
+    scales = manifest_scales(MANIFESTS_DIR / "manifest.json") \
+        or manifest_scales(MANIFESTS_DIR / "manifest_draft.json")
+    if scales:
+        print(f"judging thin features at the manifest's sheet scales "
+              f"({len(scales)} parts)")
+    parts = [judge_part(p, generated, scales.get(p["file"])) for p in a["parts"]]
     asm_findings = assembly_findings(asm)
     overall = "PASS"
     for v in [p["verdict"] for p in parts] + \
