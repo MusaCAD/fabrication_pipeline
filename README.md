@@ -37,10 +37,12 @@ composition), `qa-checker` (21-point output verification, render-and-inspect).
   circled region of a view redrawn at its own scale, dimensioned in true
   millimetres), ISO 6410 thread convention
   (models carry the real helix; views project the thread blank via
-  `project_feature` and draw the root line), GD&T datum flags — on a face
-  or on a feature of size, where the triangle goes on the bore's own size
-  callout — and feature control frames (flatness, position,
-  perpendicularity, coaxiality, circular runout), ANSI31 section hatch, fabrication notes, a shaded
+  `project_feature` and draw the root line), GD&T datum flags — on a face,
+  or on a feature of size, where the triangle goes on that feature's own
+  size callout even when the views show it only edge-on, as a turned part
+  does — and feature control frames (flatness, position, perpendicularity,
+  coaxiality, circular runout), including frames on a plane face, leadered
+  to the face's edge-on line, ANSI31 section hatch, fabrication notes, a shaded
   isometric pictorial, and a fully populated RES title block (scale, rev,
   weight computed from the model, parts row).
 - Per assembly: NTS isometric HLR wireframe (or an orthographic view with

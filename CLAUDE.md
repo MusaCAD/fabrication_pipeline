@@ -324,6 +324,26 @@ composition/rework), qa-checker (verify PDFs after every /export).
   dimension line when it is dimensioned that way. No size annotation for
   that feature = the sheet fails; a datum triangle on an undimensioned
   feature is not a datum.
+  EDGE-ON FEATURES (issue #6): a turned part drawn as a side view and a
+  section never shows its spigot or bore as a CIRCLE — they are pairs of
+  lines — and that is fine. The datum needs the feature's SIZE dimension,
+  not a circle: when a callout carries that size (an `at`-anchored one
+  still carries `circle_r`), the triangle goes on its landing. A circle is
+  used only for the in-line-with-the-diameter-dimension case. When neither
+  is on the sheet the failure names the view and says to add a %%c callout
+  there or a view showing the feature as a circle.
+  FRAMES ON A PLANE FACE: a face is drawn EDGE-ON, so a perpendicularity /
+  flatness / parallelism frame attaches to that line with a leader and an
+  arrowhead on it (ISO 1101 5.2). Target `face_x<coord>` / `face_y<coord>`
+  (the view's own axes; the longest drawn edge at that coordinate wins) or
+  a named view edge (bottom_face / top_face / left_edge / right_edge).
+  draw.place_frame_near_face puts such a frame BESIDE the view, square to
+  the face, so the leader is short — parking it in the annotation band
+  means a leader across the view and through the callouts. A frame that
+  can reach nothing in its view FAILS loudly: an unleadered frame points
+  at no feature at all. /finalise checks every frame target's form and
+  that each frame's datum letters are datums the sheet carries
+  (manifest.gdt_problems).
 - reports/, manifests/, output/ are generated artifacts (gitignored).
 - TESTS: `python3 -m unittest discover -s tests -v` (stdlib unittest, no
   venv). tests/make_fixtures.py builds throwaway FreeCAD assemblies in a

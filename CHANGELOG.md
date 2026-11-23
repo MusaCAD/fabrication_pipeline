@@ -5,6 +5,55 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.7.0 — 2026-11-24
+
+Two GD&T cases common on turned parts could not be drawn
+([#6](https://github.com/MusaCAD/fabrication_pipeline/issues/6)).
+
+### Fixed
+
+- **A datum on a feature of size the views show only EDGE-ON.** A turned
+  part drawn as a side view and a section shows its spigot or bore as a
+  pair of lines, never as a circle, and `place_datums` demanded a circle
+  before it would hang the triangle on the feature's size callout — so a
+  datum on a ⌀71.5 f7 spigot failed with `datum-A-no-size-dim-r…` although
+  the callout was right there on the sheet. What a datum needs is the
+  feature's SIZE dimension (ISO 1101 / ISO 5459), not a circle: when a
+  callout carries that size — including an `at`-anchored one, which still
+  carries `circle_r` — the triangle now goes on its leader's landing. The
+  circle is used only for the other case, a datum in line with a diameter
+  dimension.
+- When nothing on the sheet carries that size, the failure now says what
+  is missing and what would fix it: `datum-A: no size dimension for r23.5
+  in view 'front' — add a %%c callout for it there, or a view showing the
+  feature as a circle`.
+
+### Added
+
+- **Feature control frames on a plane face.** A face is drawn edge-on, so
+  a perpendicularity, flatness or parallelism frame attaches to that line
+  with a leader ending in an arrowhead on it (ISO 1101 5.2). New frame
+  targets: `face_x<coord>` / `face_y<coord>` — a face at that coordinate
+  in the view's own axes, the longest drawn edge there winning — and the
+  named view edges `bottom_face` / `top_face` / `left_edge` /
+  `right_edge`. Such a frame is placed BESIDE the view, square to its
+  face, so the leader is short; parking it in the annotation band means a
+  leader across the view and through whatever callouts stand between.
+- A frame that can reach nothing in its view now FAILS instead of being
+  drawn without a leader, pointing at no feature at all. The message says
+  whether the feature is not drawn there or its leader has no clear route.
+- `/finalise` checks each frame's target form and that every datum letter
+  a frame refers to is a datum the sheet actually carries
+  (`manifest.gdt_problems`) — a frame referring to a datum that is not on
+  the drawing cannot be measured.
+
+### Compatibility
+
+Existing sheets are untouched: the wider search for a frame's position
+only runs where no leader is possible at all. Verified byte-identical on
+`samples/out/RES-SAMPLE-01`, the TPE assembly sheet and the amogha
+RES-41-LH-01 sheet (real GD&T, two frames and a datum).
+
 ## v0.6.0 — 2026-11-24
 
 Two issues from a live project, both blocking a locked manifest from

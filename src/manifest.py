@@ -160,6 +160,51 @@ def datum_target_problem(target) -> str | None:
             f"{', '.join(DATUM_EDGE_TARGETS)} or <kind>_r<radius>)")
 
 
+def frame_target_problem(target) -> str | None:
+    """Frame targets: a feature of size (`<kind>_r<radius>`), datum A's own
+    face, or a plane face seen EDGE-ON in the view (issue #6)."""
+    # draw.py is imported here, not at the top: it imports this module for
+    # VIEW_DIRS, and by the time any lock runs, this one is fully loaded
+    import draw
+    t = str(target or "")
+    if t == "datum_A_face" or draw.face_target(t) is not None:
+        return None
+    if "_r" in t:
+        try:
+            if float(t.rsplit("_r", 1)[1]) > 0:
+                return None
+        except ValueError:
+            pass
+    return (f"bad frame target {t!r} (want <kind>_r<radius>, datum_A_face, "
+            f"face_x<coord> / face_y<coord>, or "
+            f"{', '.join(sorted(draw.FACE_EDGES))})")
+
+
+def gdt_problems(part: dict, who: str) -> list[str]:
+    """The sheet's GD&T: every target has a form the drawing can place, and
+    every frame's datum letters are datums this sheet actually carries — a
+    frame referring to a datum that is not on the sheet is unmeasurable."""
+    g = part.get("gdt") or {}
+    out = []
+    letters = set()
+    for d in g.get("datums", []):
+        bad = datum_target_problem(d.get("target"))
+        if bad:
+            out.append(f"{who}: {bad}")
+        letters.add(str(d.get("label", "")).upper())
+    for f in g.get("frames", []):
+        bad = frame_target_problem(f.get("target"))
+        if bad:
+            out.append(f"{who}: {bad}")
+        for ref in f.get("refs", []) or []:
+            if str(ref).upper() not in letters:
+                out.append(f"{who}: frame {f.get('symbol', '?')} "
+                           f"{f.get('tol', '')} refers to datum {ref}, which "
+                           "this sheet does not carry — add the datum or "
+                           "drop the reference")
+    return out
+
+
 def one_detail_problems(spec: dict, who: str, sheet_scale, have: set,
                         taken: set) -> list[str]:
     """One detail view: the parent view must be on the sheet, the scale must
@@ -357,10 +402,7 @@ def lock(draft_path: Path) -> None:
             problems.append(f"{part.get('file')}: bad scale "
                             f"{part.get('scale')!r} (want N:D)")
         problems += detail_problems(part)
-        for d in (part.get("gdt") or {}).get("datums", []):
-            bad = datum_target_problem(d.get("target"))
-            if bad:
-                problems.append(f"{part.get('file')}: {bad}")
+        problems += gdt_problems(part, str(part.get("file")))
     problems += thin_feature_problems(m)
     problems += assembly_sheet_problems(m)
     if m.get("template"):

@@ -1768,6 +1768,148 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs):
 _TARGET_R = {"holes": None, "bores": None, "bosses": None}
 
 
+# A plane face is drawn EDGE-ON: in the view that shows it, it is a line,
+# not an area. A frame on such a face (perpendicularity, flatness,
+# parallelism) therefore attaches to that line or to an extension of it,
+# with a leader — ISO 1101 5.2. The manifest names the line two ways:
+#   face_x12.5 / face_y-30  a face at that coordinate in the VIEW's own
+#                           axes (x: a vertical line, y: a horizontal one)
+#   bottom_face / top_face / left_edge / right_edge
+#                           the view's own bounding edges, the same names
+#                           datums use for a surface
+FACE_EDGES = {"bottom_face": ("y", "min"), "top_face": ("y", "max"),
+              "left_edge": ("x", "min"), "right_edge": ("x", "max"),
+              "short_edge": ("y", "min"), "long_edge": ("x", "max")}
+
+
+def face_target(target):
+    """(axis, coordinate or "min"/"max") for a face target, else None."""
+    t = str(target or "")
+    if t in FACE_EDGES:
+        return FACE_EDGES[t]
+    for axis in ("x", "y"):
+        if t.startswith("face_" + axis):
+            try:
+                return (axis, float(t[len("face_" + axis):]))
+            except ValueError:
+                return None
+    return None
+
+
+def face_line(job, off, target, tol=0.05):
+    """The drawn line a face target names, in sheet coordinates.
+
+    For a coordinate target the view must actually DRAW an edge there —
+    that is the face seen edge-on. The longest such segment wins: a face
+    reads as its longest line, and a short coincident edge (a chamfer, a
+    hidden step) is not what the frame is about. Returns (a, b) or None.
+    """
+    spec = face_target(target)
+    if spec is None:
+        return None
+    axis, coord = spec
+    ox, oy = off
+    mn, mx = job["bounds"]
+    if isinstance(coord, str):
+        value = (mn if coord == "min" else mx)[0 if axis == "x" else 1]
+        if axis == "x":
+            return ((value + ox, mn[1] + oy), (value + ox, mx[1] + oy))
+        return ((mn[0] + ox, value + oy), (mx[0] + ox, value + oy))
+    best = None
+    for (x0, y0), (x1, y1) in prim_segments(job.get("visible", [])):
+        if axis == "x" and abs(x0 - coord) <= tol and abs(x1 - coord) <= tol:
+            length = abs(y1 - y0)
+        elif axis == "y" and abs(y0 - coord) <= tol \
+                and abs(y1 - coord) <= tol:
+            length = abs(x1 - x0)
+        else:
+            continue
+        if best is None or length > best[0]:
+            best = (length, ((x0 + ox, y0 + oy), (x1 + ox, y1 + oy)))
+    return best[1] if best else None
+
+
+def leader_point_on_line(ctx, layout, line, land, samples=9):
+    """Where on a face's edge-on line a frame's leader should land.
+
+    Walks the line from the end nearest the frame inwards and takes the
+    first point whose leader runs clear; the ends are tried first because a
+    leader meeting the face near its middle crosses whatever sits beside
+    it. A frame's leader may CROSS ink — that is ordinary drafting — so the
+    second pass tolerates more of it; crossing TEXT is refused in both,
+    which is what _leader_path_clear never relaxes.
+    """
+    (ax, ay), (bx, by) = line
+    near_first = math.dist((ax, ay), land) <= math.dist((bx, by), land)
+    for max_frac in (0.35, 0.7):
+        for i in range(samples):
+            f = (i + 1) / (samples + 1)
+            t = f if near_first else 1.0 - f
+            pt = (ax + (bx - ax) * t, ay + (by - ay) * t)
+            if _leader_path_clear(ctx, layout, pt, land, max_frac=max_frac):
+                return pt
+    return None
+
+
+def _step_towards(ctx, frm, to, mm=1.5):
+    """A point `mm` along frm->to: where a leader's clearance check starts
+    when its tip sits on the very ink it points at."""
+    dx, dy = to[0] - frm[0], to[1] - frm[1]
+    ln = math.hypot(dx, dy) or 1.0
+    f = min(1.0, ctx.mm(mm) / ln)
+    return (frm[0] + dx * f, frm[1] + dy * f)
+
+
+def _frame_edge_towards(rect, pt):
+    """The midpoint of the frame edge that faces `pt` — where its leader
+    leaves the frame."""
+    cx, cy = (rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0
+    if abs(pt[0] - cx) >= abs(pt[1] - cy):
+        return (rect[0] if pt[0] < cx else rect[2], cy)
+    return (cx, rect[1] if pt[1] < cy else rect[3])
+
+
+def place_frame_near_face(ctx, layout, fline, vrect, w, h, label):
+    """Put a frame beside the face it controls, leader first.
+
+    A frame on an edge-on face belongs NEXT to that face, square to it: the
+    leader is then short and perpendicular, as ISO 1101 draws it. Parking
+    the stack in the sheet's annotation band instead means a leader right
+    across the view and through whatever callouts stand between — which is
+    how this used to fail.
+
+    The frame steps outward from the VIEW, not from the short line itself:
+    a shoulder face is a 6 mm line in the middle of the part, and "just
+    below" it is inside the view. Returns (rect, tip) or (None, None).
+    """
+    (ax, ay), (bx, by) = fline
+    vertical = abs(bx - ax) <= abs(by - ay)
+    cands = []
+    for d in (6.0, 10.0, 16.0, 24.0, 32.0):
+        gap = ctx.mm(d)
+        for step in (0.0, 6.0, -6.0, 12.0, -12.0, 20.0, -20.0):
+            off = ctx.mm(step)
+            if vertical:                      # the face is a vertical line
+                x = ax - w / 2.0 + off
+                cands += [(x, vrect[3] + gap), (x, vrect[1] - gap - h)]
+            else:                             # a horizontal one
+                y = ay - h / 2.0 + off
+                cands += [(vrect[2] + gap, y), (vrect[0] - gap - w, y)]
+    for x, y in cands:
+        rect = (x, y, x + w, y + h)
+        if not layout.inside(rect) or layout.collides(rect):
+            continue
+        land = ((rect[0] + rect[2]) / 2.0,
+                (rect[1] + rect[3]) / 2.0) if vertical else \
+            (rect[0], (rect[1] + rect[3]) / 2.0)
+        tip = leader_point_on_line(ctx, layout, fline, land)
+        if tip is None:
+            continue
+        layout.claim(rect, label)
+        return rect, tip
+    return None, None
+
+
 def _target_key(view, rad, lfacs=None):
     """(view, radius) key for a radius target, which is authored in TRUE
     millimetres whatever view it lands in. A detail view's geometry is k
@@ -1930,19 +2072,28 @@ def place_datums(ctx, layout, gdt, view_jobs, offs, callout_rects=None,
             size_rect = (callout_rects or {}).get(key) \
                 or (dim_rects or {}).get(key)
             circle = _feature_circle(job, rad / lf, (ox, oy))
-            if size_rect is None or circle is None:
-                # nothing to hang it on: a datum triangle floating on an
-                # undimensioned feature would not be a datum at all
-                layout.unresolved.append(
-                    f"datum-{d['label']}-no-size-dim-r{rad:g}")
-                continue
             if land is not None:
-                # called out by a leader: the triangle goes on that leader
+                # Called out by a leader: the triangle goes on that leader,
+                # and NO circle is needed (issue #6). A turned part drawn as
+                # a side view and a section shows its spigot as two lines,
+                # never as a circle, but ISO 1101 / ISO 5459 ask only that
+                # the datum sit on the feature's SIZE dimension — which the
+                # callout is.
                 frecs, frect = datum_on_landing(ctx, layout, d["label"],
                                                 land)
-            else:
+            elif size_rect is not None and circle is not None:
+                # dimensioned by a diameter dim: in line with that dim
                 frecs, frect = datum_on_feature(ctx, layout, d["label"],
                                                 circle, size_rect)
+            else:
+                # Nothing on the sheet carries the size of this feature, so
+                # there is nowhere a datum triangle would MEAN anything.
+                # Say what is missing and what would fix it.
+                layout.unresolved.append(
+                    f"datum-{d['label']}: no size dimension for r{rad:g} in "
+                    f"view {view!r} — add a %%c callout for it there, or a "
+                    f"view showing the feature as a circle")
+                continue
             if frect is None:
                 layout.unresolved.append(f"datum-{d['label']}")
                 continue
@@ -2069,6 +2220,13 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
         key = _target_key(view, rad, lfacs)[:2] if rad is not None else None
         anchor = (callout_rects.get(key) or dim_rects.get(key)) \
             if key else None
+        # a face seen edge-on: the frame leaders to that line (issue #6)
+        fline = face_line(job, (ox, oy), tgt) if rad is None else None
+        if rad is None and fline is None and face_target(tgt) is not None:
+            layout.unresolved.append(
+                f"fcf-{tgt}: view {view!r} draws no edge there — the face is "
+                "not shown edge-on in it; add a view that shows it")
+            continue
         rect = None
         if anchor is not None:
             # clear of the anchor's own leader ink (claimed as a corridor
@@ -2078,7 +2236,31 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
             rect = layout.place(cand, stack_w, stack_h, f"fcf-stack-{tgt}")
             if rect is None and layout.unresolved:
                 layout.unresolved.pop()   # fall through to the band
-        need_leader = rect is None
+        face_tip = None
+        if rect is None and fline is not None:
+            # a face frame goes BESIDE its face, with a short square leader
+            mnb, mxb = job["bounds"]
+            vrect = (mnb[0] + ox, mnb[1] + oy, mxb[0] + ox, mxb[1] + oy)
+            rect, face_tip = place_frame_near_face(
+                ctx, layout, fline, vrect, stack_w, stack_h,
+                f"fcf-stack-{tgt}")
+        if rect is None and face_tip is None and anchor is not None \
+                and not [p for p in job["visible"] if p["t"] == "circle"
+                         and rad is not None and abs(p["r"] - rad) < 0.1]:
+            # Nothing in this view can carry a leader — the feature is drawn
+            # edge-on (issue #6) — so the frame has to TOUCH its own size
+            # callout. Only then is the ladder widened: a view that does
+            # show the feature keeps the placement it always had.
+            wider = [(anchor[0], anchor[1] - stack_h - ctx.mm(k))
+                     for k in (22.0, 30.0)]
+            wider += [(anchor[0], anchor[3] + ctx.mm(k)) for k in (1.5, 7.0)]
+            wider += [(anchor[0] + ctx.mm(dx),
+                       anchor[1] - stack_h - ctx.mm(k))
+                      for k in (2.5, 8.0) for dx in (6.0, -6.0, 12.0)]
+            rect = layout.place(wider, stack_w, stack_h, f"fcf-stack-{tgt}")
+            if rect is None and layout.unresolved:
+                layout.unresolved.pop()
+        need_leader = rect is None or face_tip is not None
         if rect is None:
             mnb, mxb = job["bounds"]
             ax1 = layout.area[2]
@@ -2104,17 +2286,57 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
         emit_stack(frames, rect)
         if need_leader:
             # leader from the feature to the stack MID-LEFT (standard)
-            matches = [p for p in job["visible"] if p["t"] == "circle"
-                       and rad is not None and abs(p["r"] - rad) < 0.1]
-            if matches:
-                c = max(matches, key=lambda p: p["c"][1])
-                cx, cy = c["c"][0] + ox, c["c"][1] + oy
-                land = (rect[0], (rect[1] + rect[3]) / 2)
-                ang = math.atan2(land[1] - cy, land[0] - cx)
-                tip = (cx + c["r"] * math.cos(ang),
-                       cy + c["r"] * math.sin(ang))
-                recs.append(mw.line(tip, land, mw.P_ANNO))
-                _claim_leader_ink(ctx, layout, tip, land, f"fcf-{tgt}")
+            land = (rect[0], (rect[1] + rect[3]) / 2)
+            tip = face_tip
+            if tip is not None:
+                # placed beside its face, with the route already found: the
+                # leader leaves the stack by the edge FACING the face, and
+                # is NOT re-routed — the frame's own claim is in the way now
+                land = _frame_edge_towards(rect, tip)
+            else:
+                matches = [p for p in job["visible"] if p["t"] == "circle"
+                           and rad is not None and abs(p["r"] - rad) < 0.1]
+                if matches:
+                    c = max(matches, key=lambda p: p["c"][1])
+                    cx, cy = c["c"][0] + ox, c["c"][1] + oy
+                    ang = math.atan2(land[1] - cy, land[0] - cx)
+                    tip = (cx + c["r"] * math.cos(ang),
+                           cy + c["r"] * math.sin(ang))
+                elif fline is not None:
+                    tip = leader_point_on_line(ctx, layout, fline, land)
+                elif anchor is not None:
+                    # a feature of size the view shows EDGE-ON: its size
+                    # callout is what carries it, so the frame points at
+                    # that callout rather than at a circle it has not got
+                    # (#6). The tip sits ON the callout's own ink, so the
+                    # route is checked from just clear of it.
+                    tip = _frame_edge_towards(anchor, land)
+                    if not _leader_path_clear(
+                            ctx, layout, _step_towards(ctx, tip, land), land,
+                            max_frac=0.7):
+                        tip = None
+            if tip is None:
+                # A frame with no leader points at nothing: the reader
+                # cannot tell which feature it controls. Say what is
+                # missing instead of drawing a frame that means nothing.
+                why = ("the feature is not drawn there as a circle or an "
+                       "edge-on face; give it a %%c callout, or add a view "
+                       "that shows it")
+                if fline is not None or anchor is not None:
+                    why = ("no clear route for its leader — every path from "
+                           "it crosses other annotation")
+                layout.unresolved.append(
+                    f"fcf-stack-{tgt}: nothing in view {view!r} to leader it "
+                    f"to — {why}")
+                continue
+            recs.append(mw.line(tip, land, mw.P_ANNO))
+            if fline is not None:
+                # on a SURFACE the leader ends in an arrowhead on the face
+                # (ISO 1101 5.2); on a feature of size it meets the size
+                # dimension instead, which carries its own arrows
+                recs.append(arrowhead(tip, (tip[0] - land[0],
+                                            tip[1] - land[1]), ctx.mm(2.5)))
+            _claim_leader_ink(ctx, layout, tip, land, f"fcf-{tgt}")
     return recs
 
 

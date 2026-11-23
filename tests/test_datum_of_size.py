@@ -158,9 +158,11 @@ class PlaceDatumsTest(unittest.TestCase):
                                       self.views, self.offs)
         self.assertEqual(recs, [])
         self.assertEqual(pos, {})
-        self.assertTrue(any("no-size-dim" in u
-                            for u in self.layout.unresolved),
-                        self.layout.unresolved)
+        # and the failure says what is missing and how to fix it
+        msg = " ".join(self.layout.unresolved)
+        self.assertIn("no size dimension for r12.5", msg)
+        self.assertIn("view 'front'", msg)
+        self.assertIn("callout", msg)
 
     def test_it_attaches_to_the_callout_when_there_is_one(self):
         lands = {("front", 12.5): ((130.0, 205.0), (134.0, 205.0))}
