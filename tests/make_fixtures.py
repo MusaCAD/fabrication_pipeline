@@ -9,6 +9,24 @@ Writes, into <out_dir>:
   asm_joined.FCStd    -- 3 instances, 1 grounded + 2 Fixed joints, all joined
   asm_loose.FCStd     -- 3 instances, 1 grounded + 1 Fixed joint; "shim" is
                          genuinely unjoined and must still be warned about
+and, for sub-assemblies (issue #3):
+  asm_sub.FCStd       -- a sub-assembly: plate + block, grounded + Fixed
+  asm_sub2.FCStd      -- a second sub-assembly that uses block AGAIN, + shim
+  asm_sub_loose.FCStd -- a sub-assembly whose shim nobody joined
+  asm_nested.FCStd    -- top: AssemblyLink -> asm_sub, plus a direct part,
+                         joined with Fixed, Revolute and Cylindrical joints
+                         (FreeCAD 1.1 has no "Coincident"/"Concentric" type;
+                         these are their names in this version)
+  asm_nested_loose.FCStd -- top over asm_sub_loose: the unjoined part sits
+                         one level down and must still be reported
+  asm_shared.FCStd    -- top over asm_sub AND asm_sub2: block is ONE part
+                         file used by two different sub-assemblies
+  asm_plainlink.FCStd -- the other shape a sub-assembly takes: a plain
+                         App::Link straight at another file's AssemblyObject
+                         (what a script builds; real models use it)
+  cyc_a.FCStd, cyc_b.FCStd -- each contains the other. FreeCAD saves this
+                         happily and then SEGFAULTS when asked for the
+                         link's Shape, so the walk has to refuse it.
 
 The joints are made with the real Assembly workbench (JointObject), so the
 references land in whatever layout this FreeCAD version actually writes --
@@ -77,6 +95,43 @@ def fixed(doc, asm, group, name, link_a, link_b):
     return j
 
 
+def cyclic_pair(out_dir):
+    """Two assemblies that contain each other.
+
+    A model nobody means to build, but the walk must survive one: FreeCAD
+    1.1.1 accepts and saves it, and evaluating such a link's Shape takes
+    the process down with a segmentation fault.
+    """
+    a = FreeCAD.newDocument("cyc_a")
+    a.saveAs(os.path.join(out_dir, "cyc_a.FCStd"))
+    aa = a.addObject("Assembly::AssemblyObject", "Assembly")
+    b = FreeCAD.newDocument("cyc_b")
+    b.saveAs(os.path.join(out_dir, "cyc_b.FCStd"))
+    ba = b.addObject("Assembly::AssemblyObject", "Assembly")
+    l1 = a.addObject("App::Link", "B_IN_A")
+    l1.LinkedObject = ba
+    aa.addObject(l1)
+    a.recompute()
+    a.save()
+    l2 = b.addObject("App::Link", "A_IN_B")
+    l2.LinkedObject = aa
+    ba.addObject(l2)
+    b.recompute()
+    b.save()
+    a.save()
+    return os.path.join(out_dir, "cyc_a.FCStd")
+
+
+def joint(doc, asm, group, name, link_a, link_b, jtype="Fixed"):
+    """Any joint type between two instances, referenced the 1.1 way."""
+    j = doc.addObject("App::FeaturePython", name)
+    group.addObject(j)
+    JointObject.Joint(j, JointObject.JointTypes.index(jtype))
+    j.Reference1 = (asm, [f"{link_a.Name}.Vertex1", f"{link_a.Name}.Vertex1"])
+    j.Reference2 = (asm, [f"{link_b.Name}.Vertex1", f"{link_b.Name}.Vertex1"])
+    return j
+
+
 def build(out_dir, name, loose):
     doc = FreeCAD.newDocument(name)
     # an App::Link into another document is an XLink: FreeCAD refuses to
@@ -101,6 +156,75 @@ def build(out_dir, name, loose):
     return path
 
 
+def sub_assembly(out_dir, name, members, joints=("Fixed",), loose=()):
+    """A sub-assembly document: `members` are (part file stem, label, pos),
+    `joints` the types to join member 0 to the others with, and `loose` the
+    labels nobody joins at all."""
+    doc = FreeCAD.newDocument(name)
+    path = os.path.join(out_dir, name + ".FCStd")
+    doc.saveAs(path)
+    asm = doc.addObject("Assembly::AssemblyObject", "Assembly")
+    group = doc.addObject("Assembly::JointGroup", "Joints")
+    asm.addObject(group)
+    links = []
+    for stem, label, pos in members:
+        links.append(add_link(doc, asm, os.path.join(out_dir,
+                                                     stem + ".FCStd"),
+                              label, pos))
+    ground(doc, group, links[0])
+    for i, lk in enumerate(links[1:], start=1):
+        if lk.Label in loose:
+            continue
+        jtype = joints[(i - 1) % len(joints)]
+        joint(doc, asm, group, f"{jtype}_{lk.Name}", links[0], lk, jtype)
+    doc.recompute()
+    doc.save()
+    return doc, asm, path
+
+
+def nested(out_dir, name, subs, extra=None, joints=()):
+    """A top assembly over sub-assemblies.
+
+    `subs` are (sub AssemblyObject, label, pos, plain) — `plain` picks the
+    shape: an Assembly::AssemblyLink (the GUI's own, which mirrors the
+    sub-assembly's parts into this document) or a plain App::Link straight
+    at the sub-assembly object. `joints` are (type, subname1, subname2)
+    triples written exactly as the workbench writes them, so the references
+    reach THROUGH a sub-assembly."""
+    doc = FreeCAD.newDocument(name)
+    path = os.path.join(out_dir, name + ".FCStd")
+    doc.saveAs(path)
+    asm = doc.addObject("Assembly::AssemblyObject", "Assembly")
+    group = doc.addObject("Assembly::JointGroup", "Joints")
+    asm.addObject(group)
+    first = None
+    for sub_asm, label, pos, plain in subs:
+        if plain:
+            lk = doc.addObject("App::Link", label)
+            lk.LinkedObject = sub_asm
+        else:
+            lk = doc.addObject("Assembly::AssemblyLink", label)
+            lk.LinkedObject = sub_asm
+        lk.Label = label
+        lk.Placement = FreeCAD.Placement(FreeCAD.Vector(*pos),
+                                         FreeCAD.Rotation())
+        asm.addObject(lk)
+        first = first or lk
+    if extra:
+        stem, label, pos = extra
+        add_link(doc, asm, os.path.join(out_dir, stem + ".FCStd"), label, pos)
+    ground(doc, group, first)
+    for jtype, s1, s2 in joints:
+        j = doc.addObject("App::FeaturePython", f"{jtype}_{s1.split('.')[0]}")
+        group.addObject(j)
+        JointObject.Joint(j, JointObject.JointTypes.index(jtype))
+        j.Reference1 = (asm, [s1, s1])
+        j.Reference2 = (asm, [s2, s2])
+    doc.recompute()
+    doc.save()
+    return path
+
+
 def main():
     out_dir = json.loads(os.environ["FABPIPE_ARGS"])[0]
     os.makedirs(out_dir, exist_ok=True)
@@ -109,6 +233,40 @@ def main():
     make_part(out_dir, "shim", 20, 20, 2)
     build(out_dir, "asm_joined", loose=False)
     build(out_dir, "asm_loose", loose=True)
+
+    # --- sub-assemblies (issue #3) ---------------------------------
+    _, sub1, _ = sub_assembly(out_dir, "asm_sub",
+                              [("plate", "PLATE", (0, 0, 0)),
+                               ("block", "BLOCK", (0, 0, 10))])
+    # block AGAIN, in a different sub-assembly, plus a shim
+    _, sub2, _ = sub_assembly(out_dir, "asm_sub2",
+                              [("block", "BLOCK2", (0, 0, 0)),
+                               ("shim", "SHIM2", (0, 0, 20))],
+                              joints=("Revolute",))
+    _, sub_loose, _ = sub_assembly(out_dir, "asm_sub_loose",
+                                   [("plate", "PLATE", (0, 0, 0)),
+                                    ("block", "BLOCK", (0, 0, 10)),
+                                    ("shim", "SHIM", (40, 0, 0))],
+                                   loose=("SHIM",))
+    # two levels, three joint types, every instance joined
+    nested(out_dir, "asm_nested",
+           [(sub1, "SUB1", (100, 0, 0), False)],
+           extra=("shim", "TSHIM", (0, 0, 60)),
+           joints=[("Fixed", "SUB1.PLATE.Vertex1", "TSHIM.Vertex1"),
+                   ("Revolute", "SUB1.BLOCK.Vertex1", "TSHIM.Vertex1"),
+                   ("Cylindrical", "SUB1.PLATE.Vertex1",
+                    "SUB1.BLOCK.Vertex1")])
+    nested(out_dir, "asm_nested_loose",
+           [(sub_loose, "SUB1", (100, 0, 0), False)])
+    nested(out_dir, "asm_shared",
+           [(sub1, "SUB1", (0, 0, 0), False),
+            (sub2, "SUB2", (200, 0, 0), False)],
+           joints=[("Fixed", "SUB1.PLATE.Vertex1", "SUB2.BLOCK2.Vertex1")])
+    cyclic_pair(out_dir)
+    nested(out_dir, "asm_plainlink",
+           [(sub1, "SUB1", (100, 0, 0), True)],
+           extra=("shim", "TSHIM", (0, 0, 60)),
+           joints=[("Fixed", "SUB1.PLATE.Vertex1", "TSHIM.Vertex1")])
     p("FIXTURES_WRITTEN", out_dir)
 
 

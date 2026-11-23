@@ -35,6 +35,7 @@ import TechDraw
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fc_shapes  # noqa: E402  (needs the path above)
+import fc_tree  # noqa: E402
 
 EPS = 1e-6
 
@@ -290,22 +291,31 @@ def load_shape(job):
         # per-target thread-blank overrides, keyed by the part file
         blanks = job.get("link_features") or {}
         shapes, inst = [], []
-        for obj in doc.Objects:
-            if obj.TypeId == "App::Link" and obj.LinkedObject is not None:
-                sh = obj.Shape  # placed shape
-                lo = obj.LinkedObject
-                feat = blanks.get(getattr(lo.Document, "FileName", None))
-                if feat:
-                    src = next((o for o in lo.Document.Objects
-                                if o.Name == feat or o.Label == feat), None)
-                    if src is None or src.Shape.isNull():
-                        raise ValueError(f"no feature {feat!r} in "
-                                         f"{lo.Document.FileName}")
-                    sh = src.Shape.copy()
-                    sh.Placement = obj.Placement.multiply(sh.Placement)
-                if not sh.isNull():
-                    shapes.append(sh)
-                    inst.append((obj.Name, obj.Label, sh))
+        # the REAL parts, through every sub-assembly, each already placed in
+        # top-assembly coordinates (fc_tree). A flat scan of App::Links
+        # would take an AssemblyLink's mirror links at their placement
+        # INSIDE the sub-assembly and miss the AssemblyLink itself, drawing
+        # a nested assembly's parts at the wrong place (issue #3).
+        for node in fc_tree.leaves(fc_tree.walk(doc)):
+            if node.get("broken"):
+                continue
+            sh = node.get("_shape")
+            tgt = node.get("target_file")
+            feat = blanks.get(tgt)
+            if feat:
+                part_doc = FreeCAD.getDocument(node["_document"]) \
+                    if node.get("_document") else None
+                src = next((o for o in (part_doc.Objects if part_doc else [])
+                            if o.Name == feat or o.Label == feat), None)
+                if src is None or src.Shape.isNull():
+                    raise ValueError(f"no feature {feat!r} in {tgt}")
+                sh = src.Shape.copy()
+                plc = node.get("_placement")
+                if plc is not None:
+                    sh.Placement = plc.multiply(sh.Placement)
+            if sh is not None and not sh.isNull():
+                shapes.append(sh)
+                inst.append((node["path"], node["label"], sh))
         comp = Part.makeCompound([s for s in shapes])
         return comp, inst
     feat = job.get("project_feature")

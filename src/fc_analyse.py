@@ -18,6 +18,7 @@ import FreeCAD  # noqa: F401  (import establishes the App context)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fc_shapes  # noqa: E402  (needs the path above)
+import fc_tree  # noqa: E402
 
 
 def p(*a):
@@ -104,52 +105,15 @@ def analyse_part(path):
 JOINT_REF_PROPS = ("Reference1", "Reference2")
 
 
-def instance_index(doc):
-    """Maps for resolving a joint reference to a link instance.
+def joint_connects(obj, nodes, prefix=""):
+    """Instance PATHS a joint connects, newest layout first, in order.
 
-    Returns (by_name, by_label); a label is only a fallback, as FreeCAD
-    subname paths normally carry internal Names.
+    `nodes` are the instances of the assembly this joint belongs to and
+    `prefix` their path prefix, so a joint inside a sub-assembly names
+    "SUB1/SPLATE" and a joint in the top document naming the same part
+    resolves to the same string. That shared identity is what lets /judge
+    see a part as joined wherever its joint was authored (issue #3).
     """
-    by_name, by_label = {}, {}
-    for obj in doc.Objects:
-        if obj.TypeId == "App::Link":
-            by_name[obj.Name] = obj.Name
-            by_label.setdefault(obj.Label, obj.Name)
-    return by_name, by_label
-
-
-def ref_targets(ref, by_name, by_label):
-    """Instance names one joint Reference property points at.
-
-    Two layouts exist in the wild (issue #1):
-      * FreeCAD 1.0 / older: ``(link, ["Vertex1", "Vertex1"])`` -- the
-        referenced object IS the instance, and it shows up in the joint's
-        OutList, so the old OutList scan found it.
-      * FreeCAD 1.1 Assembly workbench: ``(AssemblyObject,
-        ["LinkName.Vertex1", "LinkName.Vertex1"])`` -- the instance is the
-        head of the subname path and the OutList holds only the Assembly
-        object, so the OutList scan found nothing at all.
-    A reference into a sub-assembly container behaves like the second case.
-    """
-    if not ref:
-        return []
-    obj = ref[0]
-    if obj is None:
-        return []
-    if getattr(obj, "TypeId", "") == "App::Link":
-        return [obj.Name]
-    out = []
-    for sub in (ref[1] or []):
-        # FreeCAD marks an element it could not resolve as "?Vertex15"
-        head = str(sub).lstrip("?").split(".")[0]
-        name = by_name.get(head) or by_label.get(head)
-        if name:
-            out.append(name)
-    return out
-
-
-def joint_connects(obj, by_name, by_label):
-    """Link instances a joint connects, newest layout first, in order."""
     names = []
 
     def add(n):
@@ -157,13 +121,14 @@ def joint_connects(obj, by_name, by_label):
             names.append(n)
 
     ground = getattr(obj, "ObjectToGround", None)
-    add(getattr(ground, "Name", None))
+    if ground is not None:
+        add(prefix + getattr(ground, "Name", ""))
     for prop in JOINT_REF_PROPS:
-        for n in ref_targets(getattr(obj, prop, None), by_name, by_label):
+        for n in fc_tree.resolve_ref_path(getattr(obj, prop, None), nodes):
             add(n)
     for o in obj.OutList:       # pre-1.1 layouts and other workbenches
-        if o.TypeId == "App::Link":
-            add(o.Name)
+        if o.TypeId in fc_tree.LINK_TYPES:
+            add(prefix + o.Name)
     return names
 
 
@@ -173,7 +138,7 @@ def is_joint(obj):
         or "Grounded" in obj.Name)
 
 
-def joint_info(obj, by_name, by_label):
+def joint_info(obj, nodes, prefix="", assembly=""):
     grounded = (hasattr(obj, "ObjectToGround")
                 or "Grounded" in obj.Label
                 or obj.Name.startswith("GroundedJoint"))
@@ -184,55 +149,97 @@ def joint_info(obj, by_name, by_label):
         "grounded": grounded,
         # a suppressed joint is present but constrains nothing
         "suppressed": bool(getattr(obj, "Suppressed", False)),
-        "connects": joint_connects(obj, by_name, by_label),
+        # which assembly document authored it ("" = the top one): a
+        # sub-assembly's joints constrain only its own parts
+        "assembly": assembly,
+        "connects": joint_connects(obj, nodes, prefix),
     }
+
+
+def node_geometry(node):
+    """Fill a tree node's placement/bbox fields from the private handles
+    fc_tree left on it, then drop them (they hold FreeCAD objects)."""
+    plc = node.pop("_placement", None)
+    shape = node.pop("_shape", None)
+    node.pop("_document", None)        # a FreeCAD handle, not report data
+    if plc is not None:
+        node["position"] = vec(plc.Base)
+        node["rotation_axis"] = vec(plc.Rotation.Axis)
+        node["rotation_deg"] = round(plc.Rotation.Angle * 180.0
+                                     / 3.141592653589793, 6)
+    try:
+        bb = shape.BoundBox
+        node["bbox_min"] = [round(bb.XMin, 6), round(bb.YMin, 6),
+                            round(bb.ZMin, 6)]
+        node["bbox_max"] = [round(bb.XMax, 6), round(bb.YMax, 6),
+                            round(bb.ZMax, 6)]
+    except Exception:
+        pass
+    for kid in node.get("children", []):
+        node_geometry(kid)
+    return node
+
+
+def assembly_joints(doc, nodes, prefix="", assembly=""):
+    """The joints of one assembly document, resolved against ITS instances."""
+    return [joint_info(obj, nodes, prefix, assembly)
+            for obj in doc.Objects if is_joint(obj)]
+
+
+def collect_joints(doc, nodes, seen=None):
+    """Joints of this assembly and of every sub-assembly under it.
+
+    A sub-assembly's joints live in ITS OWN file and constrain its own
+    parts, so they are read there and re-addressed to the parent's paths
+    (issue #3). One sub-assembly document is read once per instance path:
+    the same file used twice holds twice as many jointed parts.
+    """
+    seen = set() if seen is None else seen
+    joints = list(assembly_joints(doc, nodes))
+    for node in fc_tree.flatten(nodes):
+        if node.get("kind") != "assembly" or node.get("cyclic"):
+            continue
+        sub_name = node.get("sub_document")
+        sub = FreeCAD.getDocument(sub_name) if sub_name else None
+        if sub is None:
+            continue
+        key = node["path"]
+        if key in seen:
+            continue
+        seen.add(key)
+        joints += assembly_joints(sub, node.get("children", []),
+                                  prefix=node["path"] + "/",
+                                  assembly=node["path"])
+    return joints
 
 
 def analyse_assembly(path):
     doc = FreeCAD.openDocument(path)
-    instances, joints, issues = [], [], []
-    # links are indexed up front: joints and instances are interleaved in
-    # doc.Objects, so a joint can be met before the links it references
-    by_name, by_label = instance_index(doc)
-    for obj in doc.Objects:
-        if obj.TypeId == "App::Link":
-            lo = obj.LinkedObject
-            if lo is None:
-                issues.append(f"broken link: {obj.Name} ({obj.Label})")
-                instances.append({"name": obj.Name, "label": obj.Label,
-                                  "target_file": None, "broken": True})
-                continue
-            pl = obj.Placement
-            tgt = getattr(lo.Document, "FileName", None)
-            inst = {"name": obj.Name, "label": obj.Label,
-                    "target_file": tgt, "broken": False,
-                    "position": vec(pl.Base),
-                    "rotation_axis": vec(pl.Rotation.Axis),
-                    "rotation_deg": round(pl.Rotation.Angle * 180.0
-                                          / 3.141592653589793, 6)}
-            try:
-                bb = obj.Shape.BoundBox
-                inst["bbox_min"] = [round(bb.XMin, 6), round(bb.YMin, 6),
-                                    round(bb.ZMin, 6)]
-                inst["bbox_max"] = [round(bb.XMax, 6), round(bb.YMax, 6),
-                                    round(bb.ZMax, 6)]
-            except Exception:
-                pass
-            instances.append(inst)
-        elif is_joint(obj):
-            joints.append(joint_info(obj, by_name, by_label))
+    issues = []
+    # the instance TREE first: sub-assemblies are followed to the real
+    # parts, mirrors are not double-counted, cycles are refused (fc_tree)
+    nodes = fc_tree.walk(doc, issues)
+    for node in nodes:
+        node_geometry(node)
+    joints = collect_joints(doc, nodes)
     wb = ("builtin-assembly"
           if any(o.TypeId == "Assembly::AssemblyObject" for o in doc.Objects)
           else "unknown")
-    # overall assembly bbox from instance shapes
+    # overall assembly bbox from every instance shape, at any depth
     mn = [1e300] * 3
     mx = [-1e300] * 3
-    for i in instances:
+    for i in fc_tree.flatten(nodes):
         if "bbox_min" in i:
             mn = [min(a, b) for a, b in zip(mn, i["bbox_min"])]
             mx = [max(a, b) for a, b in zip(mx, i["bbox_max"])]
+    usage = fc_tree.part_usage(nodes)
     return {"file": path, "document": doc.Name, "workbench": wb,
-            "instances": instances, "joints": joints, "issues": issues,
+            "instances": nodes, "joints": joints, "issues": issues,
+            # the real parts: analysed once, counted per instance
+            "part_usage": {f: u for f, u in sorted(usage.items())},
+            "sub_assembly_files": sorted(
+                {n["target_file"] for n in fc_tree.flatten(nodes)
+                 if n.get("kind") == "assembly" and n.get("target_file")}),
             "bbox_min": mn, "bbox_max": mx}
 
 
@@ -245,11 +252,12 @@ def main():
     else:
         asm = {"file": "", "document": "", "workbench": "none",
                "instances": [], "joints": [], "issues": [],
+               "part_usage": {}, "sub_assembly_files": [],
                "bbox_min": None, "bbox_max": None}
     result = {"model_dir": model_dir, "assembly": asm}
-    part_files = sorted({i["target_file"] for i in
-                         result["assembly"]["instances"]
-                         if i.get("target_file")})
+    # the real parts, each analysed ONCE however many instances use it —
+    # and never a sub-assembly file, which is not a part
+    part_files = sorted(asm.get("part_usage", {}))
     part_files += [f for f in extra_parts if f not in part_files]
     result["parts"] = [analyse_part(f) for f in part_files]
     fcv = FreeCAD.Version()

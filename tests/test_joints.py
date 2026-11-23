@@ -27,6 +27,7 @@ sys.path.insert(0, str(SRC))
 sys.modules.setdefault("FreeCAD", types.ModuleType("FreeCAD"))
 
 import fc_analyse  # noqa: E402
+import fc_tree  # noqa: E402
 import judge  # noqa: E402
 
 
@@ -50,31 +51,36 @@ def assembly():
     return Obj("Assembly", "Assembly::AssemblyObject")
 
 
+def node(name, label=None, children=(), path=None, kind="part"):
+    """A tree node as fc_tree.walk builds them."""
+    return {"name": name, "label": label or name, "path": path or name,
+            "kind": kind, "children": list(children), "broken": False}
+
+
 class TestRefTargets(unittest.TestCase):
-    """fc_analyse.ref_targets over every layout seen in the wild."""
+    """fc_tree.resolve_ref_path over every layout seen in the wild."""
 
     def setUp(self):
         self.plate = link("PLATE")
         self.block = link("Body002", label="BLOCK")
-        self.by_name = {"PLATE": "PLATE", "Body002": "Body002"}
-        self.by_label = {"PLATE": "PLATE", "BLOCK": "Body002"}
+        self.nodes = [node("PLATE"), node("Body002", label="BLOCK")]
 
     def targets(self, ref):
-        return fc_analyse.ref_targets(ref, self.by_name, self.by_label)
+        return fc_tree.resolve_ref_path(ref, self.nodes)
 
     def test_freecad_11_reference_through_the_assembly(self):
         # the layout of issue #1: the reference object is the Assembly and
         # the instance is the head of the subname path
         ref = (assembly(), ["PLATE.Vertex1", "PLATE.Vertex1"])
-        self.assertEqual(self.targets(ref), ["PLATE", "PLATE"])
+        self.assertEqual(self.targets(ref), ["PLATE"])
 
     def test_freecad_10_reference_straight_at_the_link(self):
         ref = (self.plate, ["Vertex1", "Vertex1"])
         self.assertEqual(self.targets(ref), ["PLATE"])
 
     def test_nested_subname_under_a_link_reference(self):
-        # a link into a sub-assembly: the path walks into the link, so the
-        # instance is the link itself, not the head of the path
+        # a link into a sub-assembly, but this assembly has no children
+        # under PLATE: the walk stops at the link, as it does on an element
         ref = (self.plate, ["Child_0.Face1", "Child_0.Vertex1"])
         self.assertEqual(self.targets(ref), ["PLATE"])
 
@@ -105,11 +111,10 @@ class TestJointInfo(unittest.TestCase):
         self.plate = link("PLATE")
         self.block = link("BLOCK")
         self.asm = assembly()
-        self.by_name = {"PLATE": "PLATE", "BLOCK": "BLOCK"}
-        self.by_label = dict(self.by_name)
+        self.nodes = [node("PLATE"), node("BLOCK")]
 
     def info(self, obj):
-        return fc_analyse.joint_info(obj, self.by_name, self.by_label)
+        return fc_analyse.joint_info(obj, self.nodes)
 
     def test_freecad_11_fixed_joint(self):
         # OutList holds only the Assembly object -- the old scan found

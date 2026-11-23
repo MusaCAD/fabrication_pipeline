@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (MANIFESTS_DIR, OUTPUT_MUSA_DIR, SCRATCH_DIR, die,
                     png_size, read_json, run_freecad, today, write_json)
+import fc_tree
 import musa_writer as mw
 from manifest import VIEW_DIRS
 
@@ -2802,11 +2803,14 @@ def balloons(ctx, layout, asm_job, off, id_by_file, m):
     mn, mx = asm_job["bounds"]
     recs = []
     insts = asm_job.get("instances", [])
-    file_by_name = {}
+    # the projection names every instance by its PATH ("SUB1/SPLATE"),
+    # which is also how the analysis tree identifies it, so a balloon on a
+    # sub-assembly's part still finds the P.NO. of the real part file
     analysis = read_json(Path(m["_analysis_path"]))
-    for i in analysis["assembly"]["instances"]:
+    file_by_name = {}
+    for i in fc_tree.flatten(analysis["assembly"]["instances"]):
         if i.get("target_file"):
-            file_by_name[i["name"]] = i["target_file"]
+            file_by_name[i.get("path") or i["name"]] = i["target_file"]
     h = ctx.mm(3.5)
     brad = 1.4 * h                       # balloon circle radius
     kx = mx[0] + ox + ctx.mm(16.0)

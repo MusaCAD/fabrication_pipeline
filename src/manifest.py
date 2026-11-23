@@ -51,11 +51,17 @@ def propose() -> None:
         die("judgement is FAIL — fix models and rerun /analyse + /judge")
 
     verdicts = {p["file"]: p for p in j["parts"]}
-    instances = a["assembly"]["instances"]
-    qty: dict[str, int] = {}
-    for i in instances:
-        if i.get("target_file"):
-            qty[i["target_file"]] = qty.get(i["target_file"], 0) + 1
+    # how many of each real part the assembly uses, counted through every
+    # sub-assembly (fc_analyse's part_usage); older analyses, written before
+    # sub-assemblies were followed, only have top-level instances
+    usage = a["assembly"].get("part_usage")
+    if usage:
+        qty: dict[str, int] = {f: u["qty"] for f, u in usage.items()}
+    else:
+        qty = {}
+        for i in a["assembly"]["instances"]:
+            if i.get("target_file"):
+                qty[i["target_file"]] = qty.get(i["target_file"], 0) + 1
 
     parts = []
     for idx, part in enumerate(a["parts"], start=1):

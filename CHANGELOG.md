@@ -5,6 +5,71 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.5.0 — 2026-11-23
+
+### Fixed
+
+- **Nested sub-assemblies are followed to the real parts**
+  ([#3](https://github.com/MusaCAD/fabrication_pipeline/issues/3)).
+  `/analyse` followed every link exactly one level, so a sub-assembly file
+  was reported as if it were a part and the parts inside it were never
+  analysed at all. On the 700 W enclosure model (10 sub-assemblies, 100
+  real parts) the analysis listed **10 parts — every one of them an
+  assembly file** — and /finalise would have proposed a part sheet for
+  each. It now reports 282 instances across those 10 sub-assemblies, 100
+  real part files, and no findings.
+
+  The new `src/fc_tree.py` walks both shapes a sub-assembly takes in
+  FreeCAD 1.1 — an `Assembly::AssemblyLink`, which mirrors the
+  sub-assembly's parts into the top document as links to links, and a
+  plain `App::Link` straight at another file's `Assembly::AssemblyObject`
+  — to any depth. It is shared by `fc_analyse` and `fc_project`, so the
+  report and the sheet can never disagree about what is in the model.
+  Specifically:
+  - mirrors are no longer counted at the top level as well (every
+    sub-assembly part used to appear twice, once with the wrong target);
+  - a nested instance's placement and shape are composed with their
+    parents', so a sub-assembly away from the origin is analysed AND drawn
+    where it really is (it used to draw at the origin, over the top
+    assembly's own parts);
+  - a sub-assembly's joints are read from its own file and re-addressed to
+    the parent's instance paths, and a reference reaching through a
+    sub-assembly (`SUB1.SPLATE.Vertex1`) resolves, so correctly joined
+    parts are no longer reported as unjoined;
+  - a cyclic sub-assembly link is refused with a named chain instead of
+    being followed. FreeCAD 1.1.1 saves such a model and then **segfaults**
+    when asked for the link's shape, so the cycle is found before any shape
+    is touched.
+- `/judge` walks the whole tree: an instance is joined when a live joint
+  names its path or anything inside it (a joint on a part of a rigid
+  sub-assembly locates that sub-assembly), never because a sibling or a
+  parent is joined — so a genuinely unjoined part one level down is still
+  reported, by path (`SUB1/SHIM`). Grounding is checked per assembly
+  document, the top one and each sub-assembly.
+
+### Added
+
+- `assembly.instances` in `analysis.json` is now a tree (`path`, `kind`,
+  `children`, global `position`/`bbox` per node); `assembly.part_usage`
+  maps each real part file to `{qty, used_in}` and
+  `assembly.sub_assembly_files` lists the sub-assembly documents. The
+  markdown report prints the tree and a "Parts used" table.
+- `/finalise` takes each part's QTY from `part_usage`, so the parts table
+  counts a part correctly across every sub-assembly that uses it.
+- Balloons resolve an instance by path, so a balloon on a sub-assembly's
+  part still finds the P.NO. of the real part file.
+- Fixtures and tests for two-level assemblies: three joint types through a
+  sub-assembly with no false warnings, an unjoined part one level down
+  that still warns, one part file used by two sub-assemblies (analysed
+  once, counted twice), a plain-link sub-assembly, and a cyclic pair.
+
+### Note
+
+- Issue [#1](https://github.com/MusaCAD/fabrication_pipeline/issues/1)
+  (FreeCAD 1.1 joint references) shipped in **v0.2.0** and is unchanged
+  here beyond moving its resolver into `fc_tree` alongside the new
+  through-a-sub-assembly case.
+
 ## v0.4.0 — 2026-11-20
 
 Three drafting features turned and tubular parts needed before boards could

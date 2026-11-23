@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fc_tree
 from common import REPORTS_DIR, die, read_json, run_freecad, write_json
 
 FC_SCRIPT = Path(__file__).resolve().parent / "fc_analyse.py"
@@ -40,22 +41,46 @@ def to_markdown(a: dict) -> str:
     lines = [f"# Analysis — {Path(asm['file']).name}",
              f"- model dir: `{a['model_dir']}`",
              f"- FreeCAD: {a['freecad_version']}  |  workbench: {asm['workbench']}",
-             f"- instances: {len(asm['instances'])}  |  joints: {len(asm['joints'])}",
+             f"- instances: {len(fc_tree.flatten(asm['instances']))}"
+             f"  |  joints: {len(asm['joints'])}"
+             + (f"  |  sub-assemblies: "
+                f"{len(asm.get('sub_assembly_files') or [])}"
+                if asm.get("sub_assembly_files") else ""),
              "", "## Instances"]
-    for i in asm["instances"]:
-        tgt = Path(i["target_file"]).name if i.get("target_file") else "BROKEN"
-        lines.append(f"- {i['label']} ({i['name']}) -> {tgt}"
-                     + (" **BROKEN LINK**" if i.get("broken") else ""))
+    lines += instance_markdown(asm["instances"])
+    usage = asm.get("part_usage") or {}
+    if usage:
+        lines += ["", "## Parts used",
+                  "", "| part | qty | instances |", "|---|---|---|"]
+        for f, u in usage.items():
+            lines.append(f"| {Path(f).name} | {u['qty']} | "
+                         f"{', '.join(u['used_in'])} |")
     lines += ["", "## Joints"]
     for j in asm["joints"]:
         on = ", ".join(j["connects"]) or "no instance resolved"
-        lines.append(f"- {j['label']}: {j['type']} on {on}"
+        where = f" *(in {j['assembly']})*" if j.get("assembly") else ""
+        lines.append(f"- {j['label']}: {j['type']} on {on}{where}"
                      + (" *(suppressed)*" if j.get("suppressed") else ""))
     lines += part_markdown(a)
     if asm["issues"]:
         lines += ["", "## Assembly issues"]
         lines += [f"- {i}" for i in asm["issues"]]
     return "\n".join(lines) + "\n"
+
+
+def instance_markdown(nodes: list, depth: int = 0) -> list:
+    """The instance tree, indented — a sub-assembly and the real parts
+    under it, each with the file it is an instance of."""
+    lines = []
+    for i in nodes:
+        pad = "  " * depth
+        tgt = Path(i["target_file"]).name if i.get("target_file") else "BROKEN"
+        kind = " *(sub-assembly)*" if i.get("kind") == "assembly" else ""
+        lines.append(f"{pad}- {i['label']} ({i['name']}) -> {tgt}{kind}"
+                     + (" **BROKEN LINK**" if i.get("broken") else "")
+                     + (" **CYCLIC**" if i.get("cyclic") else ""))
+        lines += instance_markdown(i.get("children", []), depth + 1)
+    return lines
 
 
 def part_markdown(a: dict) -> list:

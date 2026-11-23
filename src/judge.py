@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fc_tree
 from common import (DRAWING_AREA, REPORTS_DIR, S0, STANDARD_SCALES, die,
                     read_json, write_json)
 
@@ -94,8 +95,20 @@ def judge_part(part: dict, generated: str = "") -> dict:
             "suggested_scale": sc and f"{sc[0]}:{sc[1]}"}
 
 
+def instance_id(node: dict) -> str:
+    """How an instance is named in a finding: its PATH once it lives inside
+    a sub-assembly ("SUB1/SPLATE" says where to look), its label at the top
+    level, where the label is what the user sees in the tree."""
+    path = node.get("path") or node.get("name", "?")
+    return path if "/" in path else node.get("label", path)
+
+
 def assembly_findings(asm: dict) -> list:
     """Model-level findings for the assembly document.
+
+    Everything here walks the whole instance TREE: a sub-assembly's parts
+    are instances of this assembly too, and each is joined by the joints of
+    the assembly document it actually lives in (issue #3).
 
     A standalone part pack has no assembly document, so none of these
     checks have anything to say about it.
@@ -103,22 +116,44 @@ def assembly_findings(asm: dict) -> list:
     out = []
     if not asm.get("file"):
         return out
-    for i in asm["instances"]:
+    nodes = asm.get("instances", [])
+    flat = fc_tree.flatten(nodes)
+    for i in flat:
         if i.get("broken"):
             out.append({"severity": "FAIL",
-                        "message": f"broken link {i['label']}"})
+                        "message": f"broken link {instance_id(i)}"})
     for issue in asm["issues"]:
         out.append({"severity": "FAIL", "message": issue})
     # a suppressed joint is in the tree but constrains nothing
     live = [j for j in asm["joints"] if not j.get("suppressed")]
-    if not any(j.get("grounded") for j in live):
+    # grounding is per assembly DOCUMENT: the top one, and every
+    # sub-assembly, each solves its own file
+    if not any(j.get("grounded") for j in live if not j.get("assembly")):
         out.append({"severity": "WARN",
                     "message": "no grounded joint — assembly may "
                                "be under-constrained"})
+    for node in flat:
+        if node.get("kind") != "assembly" or not node.get("children"):
+            continue
+        own = [j for j in live if j.get("assembly") == node.get("path")]
+        if not any(j.get("grounded") for j in own):
+            out.append({"severity": "WARN",
+                        "message": f"{instance_id(node)}: no grounded joint "
+                                   "in the sub-assembly"})
     # an instance is joined if any live joint, grounded included, names it
-    joined = {n for j in live for n in j.get("connects", [])}
-    loose = [i["label"] for i in asm["instances"]
-             if not i.get("broken") and i["name"] not in joined]
+    # — or names something INSIDE it: a joint reaching a part of a rigid
+    # sub-assembly locates that whole sub-assembly, so demanding a joint on
+    # the sub-assembly itself as well would be a false warning. Ancestors
+    # only: a joined part says nothing about its unjoined siblings.
+    joined = set()
+    for j in live:
+        for n in j.get("connects", []):
+            parts = n.split("/")
+            for i in range(len(parts)):
+                joined.add("/".join(parts[:i + 1]))
+    loose = [instance_id(i) for i in flat
+             if not i.get("broken")
+             and (i.get("path") or i.get("name")) not in joined]
     if loose:
         out.append({"severity": "WARN",
                     "message": f"instances with no joint: "

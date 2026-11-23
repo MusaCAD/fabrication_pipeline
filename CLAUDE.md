@@ -53,15 +53,38 @@ co-author line to git commits.
   hard/smooth, hidden hard/smooth); edges discretize to polylines.
 - Assembly is FreeCAD 1.x builtin workbench (Assembly::AssemblyObject,
   App::Link instances, App::FeaturePython joints).
+- SUB-ASSEMBLIES come in two shapes and both occur (issue #3):
+  `Assembly::AssemblyLink` (the GUI's Insert Component on an assembly file)
+  MIRRORS every part of the sub-assembly as an `App::Link` in the TOP
+  document, each mirror pointing at the sub-file's own link (a link to a
+  link) and owned by the AssemblyLink's `Group`; a plain `App::Link` whose
+  `LinkedObject` is another file's `Assembly::AssemblyObject` mirrors
+  nothing and keeps its children in that other document's `Group`. Either
+  way the real part is `getLinkedObject(True)` and the part FILE is that
+  object's document. src/fc_tree.py walks both, at any depth, and is shared
+  by fc_analyse and fc_project so the report and the sheet see ONE tree.
+  Hard-won facts: a mirror's placement and Shape are relative to its
+  AssemblyLink (compose with the parent, or a sub-assembly draws at the
+  origin); mirrors must be excluded from the top level or every part is
+  counted twice; a sub-assembly's joints live in ITS OWN file and are read
+  there; an instance is identified by PATH ("SUB1/SPLATE") everywhere —
+  report, joints, balloons; and asking a CYCLIC link for its `Shape`
+  SEGFAULTS FreeCAD 1.1.1, so fc_tree refuses a cycle (issue -> /judge
+  FAIL) before any shape is touched.
 - JOINT REFERENCES come in two layouts and both must be read (issue #1):
   1.1's Assembly workbench writes `Reference1 = (AssemblyObject,
   ["LinkName.Vertex1", ...])` — the instance is the HEAD of the subname
   path and the joint's `OutList` holds only the Assembly, so an OutList
   scan finds nothing; 1.0 and older write `(link, ["Vertex1", ...])`,
   where the referenced object IS the instance. GroundedJoint carries
-  `ObjectToGround`. fc_analyse.ref_targets/joint_connects handle all
-  three, and joints also report `suppressed` (a suppressed joint is in the
-  tree but constrains nothing, so /judge does not count it as joining).
+  `ObjectToGround`. A reference may also reach THROUGH a sub-assembly, as
+  a three-part subname `SUB1.SPLATE.Vertex1` (AssemblyLink, mirror,
+  element). fc_tree.resolve_ref_path handles all of them with one rule —
+  start at the referenced object when it is itself an instance, else at
+  this assembly's instances, then walk down the subname while it keeps
+  naming children — and joints also report `suppressed` (a suppressed
+  joint is in the tree but constrains nothing) and `assembly` (which
+  assembly document authored it; "" = the top one).
 - Origin planes/axes have 1e100 bboxes — filter to PartDesign::Body.
 
 ### MusaCAD 0.1.0
@@ -173,6 +196,17 @@ co-author line to git commits.
 - STANDALONE PARTS: `/analyse <dir> --no-assembly` (and `--parts <files>`)
   analyses a part pack with no assembly document; the analysis carries an
   empty assembly stub and /judge skips every assembly-level check.
+- NESTED ASSEMBLIES in the report: `assembly.instances` is a TREE (each
+  node: name, label, path, kind part|assembly, target_file, children, with
+  GLOBAL position/bbox), `assembly.part_usage` maps each real part file to
+  {qty, used_in: [paths]} — one part analysed once however many instances
+  use it, counted per instance — and `assembly.sub_assembly_files` lists
+  the sub-assembly documents. /finalise takes each part's QTY from
+  part_usage, so the parts table counts correctly across sub-assemblies.
+  /judge joins an instance if a live joint names its path or anything
+  INSIDE it (a joint on a part of a rigid sub-assembly locates that
+  sub-assembly), never by what a sibling or a parent carries, so a
+  genuinely unjoined part one level down is still reported — by path.
 - Round 0 output: 4 part sheets + 1 assembly sheet + merged print set.
 - COMPANY TITLE BLOCKS ARE PROJECT FILES, never pipeline files: the
   pipeline is a tool and holds no project or company information. A
