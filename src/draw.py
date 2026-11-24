@@ -944,6 +944,28 @@ class Layout:
     def claim(self, r, label, kind="anno"):
         self.claims.append((r[0], r[1], r[2], r[3], label, kind))
 
+    def release(self, kind) -> int:
+        """Drop every claim of one kind. The GD&T slots (place_callouts'
+        `reserve`) exist to keep a callout's column free while the frames
+        and datums find their places; once those are down, what they did
+        not use belongs to the notes block like any other free space."""
+        n = len(self.claims)
+        self.claims = [c for c in self.claims if c[5] != kind]
+        return n - len(self.claims)
+
+    def unclaim(self, r, label) -> bool:
+        """Give back a claim this label took: a candidate that was free but
+        failed a LATER test (a frame that fits under a callout but does not
+        read as that callout's, issue #7). Only the exact rect goes."""
+        if r is None:
+            return False
+        for i in range(len(self.claims) - 1, -1, -1):
+            c = self.claims[i]
+            if c[4] == label and c[:4] == tuple(r):
+                del self.claims[i]
+                return True
+        return False
+
     def place(self, cands, w, h, label, kind="anno", ignore=()):
         for i, (x, y) in enumerate(cands):
             r = (x, y, x + w, y + h)
@@ -1633,17 +1655,81 @@ def fit_lines(s, h, avail):
     return out or [s]
 
 
-def place_callouts(ctx, layout, callouts, view_jobs, offs):
+def size_callouts(part, view, rad, target=None):
+    """The callouts in `view` carrying the size of a feature of radius
+    `rad` (TRUE millimetres), narrowed by the target's selector when it has
+    one. A detail view draws its geometry k times size, so its circle_r is
+    k times the true radius and the comparison follows it."""
+    k = 1.0
+    if view == "detail":
+        spec = part.get("detail_view") or {}
+        if spec:
+            k = detail_factor(part, spec)
+    out = [co for co in part.get("callouts") or []
+           if co.get("view", "front") == view and "circle_r" in co
+           and abs(float(co["circle_r"]) - rad * k) < 0.0015]
+    sel = _target_parts(target)[1] if target else None
+    if sel is not None:
+        out = [co for co in out
+               if _anchor_matches(feature_anchor(view, co["circle_r"],
+                                                 (0, 0, 0, 0),
+                                                 cid=co.get("id"),
+                                                 at=co.get("at")), sel)]
+    return out
+
+
+def gdt_reserve(ctx, part) -> dict:
+    """Room each size callout must keep BELOW its text for the GD&T hung on
+    it: the frame stack that has to touch it, and the datum box on its
+    shoulder, as {(view, circle_r): height}.
+
+    A column of `at` callouts stacks 8 mm apart, which leaves no slot for
+    either (issue #7). Reserving it makes the room the drawing needs, so
+    this runs on a RETRY pass: a sheet whose GD&T already placed keeps the
+    layout it had."""
+    g = part.get("gdt") or {}
+    h, gap = ctx.mm(3.0), ctx.mm(1.2)
+    need: dict = {}
+    frames_by: dict = {}
+    for f in g.get("frames", []):
+        tgt = f.get("target", "")
+        rad = _target_radius(tgt)
+        if rad is None:
+            continue
+        view = f.get("view", "front")
+        for co in size_callouts(part, view, rad, tgt):
+            frames_by.setdefault((view, round(co["circle_r"], 3)),
+                                 []).append(f)
+    for key, frames in frames_by.items():
+        need[key] = need.get(key, 0.0) + (len(frames) * 1.8 * h
+                                          + (len(frames) - 1) * gap
+                                          + ctx.mm(3.5))
+    for d in g.get("datums", []):
+        tgt = d.get("target", "")
+        rad = _target_radius(tgt)
+        if rad is None:
+            continue
+        view = d.get("view", "front")
+        for co in size_callouts(part, view, rad, tgt):
+            key = (view, round(co["circle_r"], 3))
+            need[key] = need.get(key, 0.0) + 1.7 * ctx.mm(3.2) + ctx.mm(3.5)
+    return need
+
+
+def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None):
     """Leader callouts (fit specs, hole callouts) landing in the right-hand
     band. A callout carries either a single "text" or a "lines" stack
     (ASME Y14.5 hole note: optional per-line "sym" prefix glyph, cbore /
     depth); the leader knee meets the FIRST line, the rest stack below,
     left-aligned. The claimed rect covers the whole stack incl. glyphs.
     Returns (records, {(view, circle_r): full_rect}, suppress_radii,
-    {(view, circle_r): (knee, text_left)}) — the last is the leader's
-    landing, where a datum on that feature of size attaches."""
+    {(view, circle_r): (knee, text_left)}, anchors) — the landing is where
+    a datum on that feature of size attaches, and `anchors` lists EVERY
+    callout as its own annotation, so two features of one size stay
+    distinguishable (issue #7; the dicts keep only the last of them)."""
     h = ctx.mm(3.2)
     recs, rects, suppress, lands = [], {}, {}, {}
+    anchors: list = []
     for co in callouts:
         spec_lines = co.get("lines") or [{"text": co["text"]}]
         lines = spec_lines
@@ -1753,16 +1839,28 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs):
                 break
         if placed is not None:
             if "circle_r" in co:
-                rects[(view, round(co["circle_r"], 3))] = placed
-                lands[(view, round(co["circle_r"], 3))] = \
-                    ((knee_x, ky), (x1, ky))
+                key = (view, round(co["circle_r"], 3))
+                rects[key] = placed
+                lands[key] = ((knee_x, ky), (x1, ky))
+                anchors.append(feature_anchor(
+                    view, co["circle_r"], placed, lands[key],
+                    cid=co.get("id"),
+                    at=co.get("at") or (cx - ox, cy - oy)))
+                extra = (reserve or {}).get(key)
+                if extra:
+                    # keep the slot under this callout free for the datum or
+                    # the frame hung on it: kind "slot", which only those two
+                    # may place into (issue #7)
+                    layout.claim((knee_x - ctx.mm(8.0), placed[1] - extra,
+                                  placed[2], placed[1]),
+                                 f"slot-{key[0]}-{key[1]:g}", "slot")
             if "suppress_radii" in co:
                 suppress.setdefault(view, []).extend(co["suppress_radii"])
             elif co.get("suppress_dia_dim") and "circle_r" in co:
                 suppress.setdefault(view, []).append(co["circle_r"])
         else:
             layout.unresolved.append(label)
-    return recs, rects, suppress, lands
+    return recs, rects, suppress, lands, anchors
 
 
 _TARGET_R = {"holes": None, "bores": None, "bosses": None}
@@ -1796,26 +1894,28 @@ def face_target(target):
     return None
 
 
-def face_line(job, off, target, tol=0.05):
-    """The drawn line a face target names, in sheet coordinates.
+def face_lines(job, off, target, tol=0.05):
+    """EVERY drawn line a face target names, in sheet coordinates, longest
+    first.
 
-    For a coordinate target the view must actually DRAW an edge there —
-    that is the face seen edge-on. The longest such segment wins: a face
-    reads as its longest line, and a short coincident edge (a chamfer, a
-    hidden step) is not what the frame is about. Returns (a, b) or None.
+    One face can show as several segments: a shoulder on a turned part is
+    one short line each side of the axis, and both ARE that face. The
+    frame goes beside the nearest of them — a leader to the far one runs
+    right across the view and through its section hatch (issue #7) — so
+    the caller is given all of them and picks.
     """
     spec = face_target(target)
     if spec is None:
-        return None
+        return []
     axis, coord = spec
     ox, oy = off
     mn, mx = job["bounds"]
     if isinstance(coord, str):
         value = (mn if coord == "min" else mx)[0 if axis == "x" else 1]
         if axis == "x":
-            return ((value + ox, mn[1] + oy), (value + ox, mx[1] + oy))
-        return ((mn[0] + ox, value + oy), (mx[0] + ox, value + oy))
-    best = None
+            return [((value + ox, mn[1] + oy), (value + ox, mx[1] + oy))]
+        return [((mn[0] + ox, value + oy), (mx[0] + ox, value + oy))]
+    found = []
     for (x0, y0), (x1, y1) in prim_segments(job.get("visible", [])):
         if axis == "x" and abs(x0 - coord) <= tol and abs(x1 - coord) <= tol:
             length = abs(y1 - y0)
@@ -1824,12 +1924,56 @@ def face_line(job, off, target, tol=0.05):
             length = abs(x1 - x0)
         else:
             continue
-        if best is None or length > best[0]:
-            best = (length, ((x0 + ox, y0 + oy), (x1 + ox, y1 + oy)))
-    return best[1] if best else None
+        found.append((length, ((x0 + ox, y0 + oy), (x1 + ox, y1 + oy))))
+    found.sort(key=lambda f: -f[0])
+    return [f[1] for f in found]
 
 
-def leader_point_on_line(ctx, layout, line, land, samples=9):
+def face_line(job, off, target, tol=0.05):
+    """The longest line a face target names — a face reads as its longest
+    line, and a short coincident edge (a chamfer, a hidden step) is not
+    what the frame is about. None when the view draws no edge there."""
+    lines = face_lines(job, off, target, tol)
+    return lines[0] if lines else None
+
+
+def hatch_polys(job, off):
+    """A view's hatched cut areas (outer loops) in sheet coordinates: the
+    SOLID, which a leader must not be routed through — a leader crossing a
+    hatched cut reads as part of the hatch (ISO 128-50)."""
+    return [[(x + off[0], y + off[1]) for x, y in g["outer"]]
+            for g in job.get("hatch_groups", [])]
+
+
+def _point_in_poly(poly, p) -> bool:
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x0, y0 = poly[i]
+        x1, y1 = poly[(i + 1) % n]
+        if (y0 > p[1]) != (y1 > p[1]):
+            xx = x0 + (p[1] - y0) * (x1 - x0) / (y1 - y0)
+            if p[0] < xx:
+                inside = not inside
+    return inside
+
+
+def crosses_polys(ctx, polys, a, b) -> bool:
+    """True if segment a-b passes through any of `polys`. Sampled, and the
+    ends are skipped: a leader's tip SITS on the hatch boundary."""
+    if not polys:
+        return False
+    length = math.hypot(b[0] - a[0], b[1] - a[1])
+    steps = max(4, round(length / ctx.mm(1.5)))
+    for i in range(1, steps):
+        f = i / steps
+        p = (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
+        if any(_point_in_poly(poly, p) for poly in polys):
+            return True
+    return False
+
+
+def leader_point_on_line(ctx, layout, line, land, samples=9, avoid=()):
     """Where on a face's edge-on line a frame's leader should land.
 
     Walks the line from the end nearest the frame inwards and takes the
@@ -1837,7 +1981,8 @@ def leader_point_on_line(ctx, layout, line, land, samples=9):
     leader meeting the face near its middle crosses whatever sits beside
     it. A frame's leader may CROSS ink — that is ordinary drafting — so the
     second pass tolerates more of it; crossing TEXT is refused in both,
-    which is what _leader_path_clear never relaxes.
+    which is what _leader_path_clear never relaxes. `avoid` holds areas no
+    route may pass through at all (the section's own hatch, issue #7).
     """
     (ax, ay), (bx, by) = line
     near_first = math.dist((ax, ay), land) <= math.dist((bx, by), land)
@@ -1846,7 +1991,8 @@ def leader_point_on_line(ctx, layout, line, land, samples=9):
             f = (i + 1) / (samples + 1)
             t = f if near_first else 1.0 - f
             pt = (ax + (bx - ax) * t, ay + (by - ay) * t)
-            if _leader_path_clear(ctx, layout, pt, land, max_frac=max_frac):
+            if _leader_path_clear(ctx, layout, pt, land, max_frac=max_frac) \
+                    and not crosses_polys(ctx, avoid, pt, land):
                 return pt
     return None
 
@@ -1869,7 +2015,7 @@ def _frame_edge_towards(rect, pt):
     return (cx, rect[1] if pt[1] < cy else rect[3])
 
 
-def place_frame_near_face(ctx, layout, fline, vrect, w, h, label):
+def place_frame_near_face(ctx, layout, flines, vrect, w, h, label, avoid=()):
     """Put a frame beside the face it controls, leader first.
 
     A frame on an edge-on face belongs NEXT to that face, square to it: the
@@ -1880,34 +2026,57 @@ def place_frame_near_face(ctx, layout, fline, vrect, w, h, label):
 
     The frame steps outward from the VIEW, not from the short line itself:
     a shoulder face is a 6 mm line in the middle of the part, and "just
-    below" it is inside the view. Returns (rect, tip) or (None, None).
+    below" it is inside the view.
+
+    `flines` holds every segment that face is drawn as (one each side of
+    the axis, on a turned part): each is tried and the SHORTEST clear
+    route wins, so the leader goes to the near edge and not across the
+    view (issue #7). Routes through `avoid` — the section hatch — are
+    taken only when there is no clear one at all.
+    Returns (rect, tip) or (None, None).
     """
-    (ax, ay), (bx, by) = fline
-    vertical = abs(bx - ax) <= abs(by - ay)
-    cands = []
-    for d in (6.0, 10.0, 16.0, 24.0, 32.0):
-        gap = ctx.mm(d)
-        for step in (0.0, 6.0, -6.0, 12.0, -12.0, 20.0, -20.0):
-            off = ctx.mm(step)
-            if vertical:                      # the face is a vertical line
-                x = ax - w / 2.0 + off
-                cands += [(x, vrect[3] + gap), (x, vrect[1] - gap - h)]
-            else:                             # a horizontal one
-                y = ay - h / 2.0 + off
-                cands += [(vrect[2] + gap, y), (vrect[0] - gap - w, y)]
-    for x, y in cands:
-        rect = (x, y, x + w, y + h)
-        if not layout.inside(rect) or layout.collides(rect):
-            continue
-        land = ((rect[0] + rect[2]) / 2.0,
-                (rect[1] + rect[3]) / 2.0) if vertical else \
-            (rect[0], (rect[1] + rect[3]) / 2.0)
-        tip = leader_point_on_line(ctx, layout, fline, land)
-        if tip is None:
-            continue
-        layout.claim(rect, label)
-        return rect, tip
-    return None, None
+    if flines and isinstance(flines[0][0], (int, float)):
+        flines = [flines]
+    best = None
+    for fline in flines:
+        (ax, ay), (bx, by) = fline
+        mid = ((ax + bx) / 2.0, (ay + by) / 2.0)
+        vertical = abs(bx - ax) <= abs(by - ay)
+        cands = []
+        for d in (6.0, 10.0, 16.0, 24.0, 32.0):
+            gap = ctx.mm(d)
+            for step in (0.0, 6.0, -6.0, 12.0, -12.0, 20.0, -20.0):
+                off = ctx.mm(step)
+                if vertical:                  # the face is a vertical line
+                    x = ax - w / 2.0 + off
+                    cands += [(x, vrect[3] + gap), (x, vrect[1] - gap - h)]
+                else:                         # a horizontal one
+                    y = ay - h / 2.0 + off
+                    cands += [(vrect[2] + gap, y), (vrect[0] - gap - w, y)]
+        for x, y in cands:
+            rect = (x, y, x + w, y + h)
+            if not layout.inside(rect) or layout.collides(rect):
+                continue
+            # the leader leaves the frame by the edge FACING the face —
+            # the same landing place_fcfs draws it to
+            land = _frame_edge_towards(rect, mid)
+            tip, through = None, 0
+            for keep_out in (avoid, ()):
+                tip = leader_point_on_line(ctx, layout, fline, land,
+                                           avoid=keep_out)
+                if tip is not None:
+                    break
+                through = 1
+            if tip is None:
+                continue
+            score = (through, math.dist(tip, land))
+            if best is None or score < best[0]:
+                best = (score, rect, tip)
+            break        # this line's nearest free spot is its best one
+    if best is None:
+        return None, None
+    layout.claim(best[1], label)
+    return best[1], best[2]
 
 
 def _target_key(view, rad, lfacs=None):
@@ -1919,13 +2088,112 @@ def _target_key(view, rad, lfacs=None):
     return (view, round(rad / lf, 3), lf)
 
 
+def _target_parts(target: str):
+    """(radius, selector) of a feature-of-size target.
+
+    Two features of the SAME size in one view cannot be told apart by size
+    alone — a tube with a bore at each end has two r35.75 callouts, and
+    whichever was authored last used to win silently (issue #7). The
+    target therefore carries a selector that names WHICH one:
+
+      bore_r35.75         the only feature of that size in the view
+      bore_r35.75@tail    the callout whose manifest "id" is "tail"
+      bore_r35.75@y500    the feature at that coordinate in the VIEW's own
+                          axes, written exactly as a callout's "at" is
+    """
+    t = str(target or "")
+    sel = None
+    if "@" in t:
+        t, _, sel = t.partition("@")
+        sel = sel.strip() or None
+    if "_r" not in t:
+        return None, sel
+    try:
+        return float(t.rsplit("_r", 1)[1]), sel
+    except ValueError:
+        return None, sel
+
+
 def _target_radius(target: str):
-    if "_r" in target:
+    return _target_parts(target)[0]
+
+
+def feature_anchor(view, rad, rect, land=None, cid=None, at=None,
+                   source="callout"):
+    """One size annotation a GD&T target may attach to: `rad` is the radius
+    as the view DRAWS it (the manifest's own circle_r), `rect` its ink,
+    `land` its leader landing (knee, text left) when it has one, `cid` the
+    manifest "id" that names it and `at` the feature's position in the
+    view's own axes."""
+    return {"view": view, "r": round(rad, 3), "rect": rect, "land": land,
+            "id": cid, "at": tuple(at) if at is not None else None,
+            "source": source}
+
+
+def legacy_anchors(callout_rects=None, dim_rects=None, callout_lands=None):
+    """Anchor records from the old (view, radius) dicts — what a direct
+    caller still passes when it has no anchor list of its own."""
+    out = []
+    for key, rect in (callout_rects or {}).items():
+        out.append(feature_anchor(key[0], key[1], rect,
+                                  (callout_lands or {}).get(key)))
+    for key, rect in (dim_rects or {}).items():
+        out.append(feature_anchor(key[0], key[1], rect, source="dim"))
+    return out
+
+
+def _anchor_name(a) -> str:
+    if a.get("id"):
+        return f"@{a['id']}"
+    if a.get("at"):
+        return f"at {a['at'][0]:g},{a['at'][1]:g}"
+    return a["source"]
+
+
+def _anchor_matches(a, sel: str) -> bool:
+    if a.get("id") is not None and str(a["id"]) == sel:
+        return True
+    axis = sel[:1].lower()
+    if axis in ("x", "y") and a.get("at") is not None:
         try:
-            return float(target.rsplit("_r", 1)[1])
+            want = float(sel[1:])
         except ValueError:
-            return None
-    return None
+            return False
+        return abs(a["at"][0 if axis == "x" else 1] - want) <= 0.5
+    return False
+
+
+def resolve_feature_anchor(anchors, view, target, lfacs=None):
+    """The ONE size annotation a feature-of-size target names.
+
+    Returns (anchor, problem): the anchor, or a message when the target
+    names nothing in that view or more than one thing. Ambiguity FAILS the
+    sheet — a datum or a frame on the wrong one of two same-size features
+    is a drawing that says something the designer did not (issue #7).
+    """
+    rad, sel = _target_parts(target)
+    if rad is None:
+        return None, None
+    lf = (lfacs or {}).get(view, 1.0)
+    want = round(rad / lf, 3)
+    cands = [a for a in anchors
+             if a["view"] == view and abs(a["r"] - want) < 0.0015]
+    if sel is not None:
+        named = [a for a in cands if _anchor_matches(a, sel)]
+        if not named:
+            how = ", ".join(_anchor_name(a) for a in cands) or "nothing"
+            return None, (f"{target}: no size annotation in view {view!r} "
+                          f"matches @{sel} ({how} there)")
+        cands = named
+    # a callout is the feature's own size note; a diameter dim is the
+    # fallback, exactly as it was before there were selectors
+    cands = [a for a in cands if a["source"] == "callout"] or cands
+    if len(cands) > 1:
+        how = ", ".join(_anchor_name(a) for a in cands)
+        return None, (f"{target}: view {view!r} carries {len(cands)} "
+                      f"annotations of that size ({how}) — say which with "
+                      f"@<callout id> or @x<coord>/@y<coord>")
+    return (cands[0] if cands else None), None
 
 
 def _feature_circle(job, rad, off):
@@ -1943,43 +2211,74 @@ def _feature_circle(job, rad, off):
     return (c["c"][0] + ox, c["c"][1] + oy, c["r"])
 
 
-def datum_on_landing(ctx, layout, letter, landing):
+def datum_on_landing(ctx, layout, letter, landing, stack=None):
     """Datum symbol on a leader-directed size callout.
 
     When the feature of size is called out by a leader (`%%c25 H7 THRU`),
     ISO 1101 and ASME Y14.5 put the datum triangle on that leader — at its
     shoulder, where the text starts — not on a line of its own. The box
     then hangs directly off the shoulder: a 1.2 mm stem, nothing dragged
-    across the sheet. Returns (records, box_rect) or ([], None)."""
+    across the sheet.
+
+    `stack` is the callout's whole ink rect, which opens two further
+    placements for a CROWDED column (issue #7: several `at` callouts in one
+    view stack 8 mm apart, and the next one's text sits exactly where the
+    box would go, leaving the datum unresolved whatever order they are in):
+    off the far end of the landing — ISO 1101 5.3 allows the triangle on an
+    extension of the dimension line — and under the whole stack, where the
+    stem runs down the knee column and crosses no text at all.
+    Returns (records, box_rect) or ([], None)."""
     (kx, ky), _ = landing
     h = ctx.mm(3.2)
     sq = 1.7 * h
     gap = ctx.mm(1.2)
-    tip = (kx, ky)
     cands = []
     for dx in (0.0, 4.0, 8.0, -4.0, 12.0):
         for below in (True, False):
             x = kx + ctx.mm(dx) - sq / 2.0
             y = ky - gap - sq if below else ky + gap
-            cands.append((x, y))
+            cands.append((x, y, (kx, ky)))
     # a datum box 1 mm from a foreign label reads as that label's, so the
     # first legal spot is not good enough: take the first one that stands
     # CLEAR of other text, else the clearest one there is
     clear_enough = ctx.mm(4.0)
-    legal = []
-    for bx, by in cands:
-        rect = (bx, by, bx + sq, by + sq)
-        if not layout.inside(rect) or layout.collides(rect):
-            continue
-        gap = layout.anno_clearance(rect)
-        if gap >= clear_enough:
-            legal = [(gap, rect)]
-            break
-        legal.append((gap, rect))
+
+    def legal_spots(spots):
+        out = []
+        for bx, by, tip in spots:
+            rect = (bx, by, bx + sq, by + sq)
+            if not layout.inside(rect) \
+                    or layout.collides(rect, ignore=("slot",)):
+                continue
+            clr = layout.anno_clearance(rect)
+            if clr >= clear_enough:
+                return [(clr, rect, tip)]
+            out.append((clr, rect, tip))
+        return out
+
+    legal = legal_spots(cands)
+    if not legal and stack is not None:
+        more = []
+        for dx in (1.5, 4.0, 8.0):               # past the text, in line
+            more.append((stack[2] + ctx.mm(dx), ky - sq / 2.0,
+                         (stack[2], ky)))
+        for dy in (2.0, 6.0):                    # below the whole stack
+            more.append((kx - sq / 2.0, stack[1] - ctx.mm(dy) - sq,
+                         (kx, ky)))
+        for dy in (1.5, 5.0):                    # above it
+            more.append((kx - sq / 2.0, stack[3] + ctx.mm(dy), (kx, ky)))
+        legal = legal_spots(more)
     if not legal:
         return [], None
-    rect = max(legal, key=lambda g: g[0])[1]
+    clr, rect, tip = max(legal, key=lambda g: g[0])
     layout.claim(rect, f"datum-{letter}")
+    if math.dist(((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0),
+                 tip) > ctx.mm(2.5):
+        # a box hung off the end of the landing or below the stack draws a
+        # stem back to it: that stem is ink like any other
+        _claim_leader_ink(ctx, layout, tip,
+                          ((rect[0] + rect[2]) / 2.0,
+                           (rect[1] + rect[3]) / 2.0), f"datum-{letter}")
     recs, _ = mw.datum_label((rect[0], rect[1]), letter, tip, h,
                              props=mw.P_ANNO)
     return recs, rect
@@ -2043,12 +2342,17 @@ def datum_on_feature(ctx, layout, letter, circle, size_rect):
 
 
 def place_datums(ctx, layout, gdt, view_jobs, offs, callout_rects=None,
-                 dim_rects=None, lfacs=None, callout_lands=None):
+                 dim_rects=None, lfacs=None, callout_lands=None,
+                 anchors=None):
     """Datum boxes (A/B/C). A target naming a view edge (bottom_face,
     short_edge, long_edge) anchors to that edge; one naming a radius
     (`bore_r12.5`, `boss_r20`) is a feature of size and anchors to that
-    feature's size annotation instead — see datum_on_feature.
+    feature's size annotation instead — see datum_on_feature. A radius
+    shared by two features in one view needs a selector naming which
+    (`bore_r35.75@tail`), else the target is ambiguous and fails.
     Returns (recs, pos)."""
+    if anchors is None:
+        anchors = legacy_anchors(callout_rects, dim_rects, callout_lands)
     h = ctx.mm(3.2)
     recs, pos = [], {}
     for d in gdt.get("datums", []):
@@ -2066,11 +2370,13 @@ def place_datums(ctx, layout, gdt, view_jobs, offs, callout_rects=None,
         rad = _target_radius(tgt)
         if rad is not None:
             # a feature of size: the datum is the bore's or spigot's axis
-            vkey = _target_key(view, rad, lfacs)
-            key, lf = vkey[:2], vkey[2]
-            land = (callout_lands or {}).get(key)
-            size_rect = (callout_rects or {}).get(key) \
-                or (dim_rects or {}).get(key)
+            lf = (lfacs or {}).get(view, 1.0)
+            anc, problem = resolve_feature_anchor(anchors, view, tgt, lfacs)
+            if problem is not None:
+                layout.unresolved.append(f"datum-{d['label']}: {problem}")
+                continue
+            land = anc["land"] if anc is not None else None
+            size_rect = anc["rect"] if anc is not None else None
             circle = _feature_circle(job, rad / lf, (ox, oy))
             if land is not None:
                 # Called out by a leader: the triangle goes on that leader,
@@ -2080,7 +2386,7 @@ def place_datums(ctx, layout, gdt, view_jobs, offs, callout_rects=None,
                 # the datum sit on the feature's SIZE dimension — which the
                 # callout is.
                 frecs, frect = datum_on_landing(ctx, layout, d["label"],
-                                                land)
+                                                land, stack=size_rect)
             elif size_rect is not None and circle is not None:
                 # dimensioned by a diameter dim: in line with that dim
                 frecs, frect = datum_on_feature(ctx, layout, d["label"],
@@ -2156,13 +2462,52 @@ def place_datums(ctx, layout, gdt, view_jobs, offs, callout_rects=None,
     return recs, pos
 
 
+FRAME_ATTACH_MM = 16.0      # printed mm: a frame further from its own size
+                            # annotation than this is a separate note
+
+
+def _frame_attached(ctx, layout, rect, anchor) -> bool:
+    """Does a frame stack at `rect` READ as the annotation at `anchor`'s?
+
+    Only if it sits directly under or over it, overlapping it across,
+    close enough to pair with by eye, and with no OTHER annotation in the
+    gap between them. A frame parked under a NEIGHBOUR's callout belongs
+    to that callout as far as the reader is concerned, which is how a
+    runout frame ended up on the wrong feature (issue #7)."""
+    if rect is None or anchor is None:
+        return False
+    if min(rect[2], anchor[2]) - max(rect[0], anchor[0]) <= 0.0:
+        return False
+    gap = max(anchor[1] - rect[3], rect[1] - anchor[3])
+    if gap > ctx.mm(FRAME_ATTACH_MM):
+        return False
+    if gap <= 0.0:
+        return True
+    lo, hi = ((rect[3], anchor[1]) if anchor[1] >= rect[3]
+              else (anchor[3], rect[1]))
+    band = (max(rect[0], anchor[0]), lo, min(rect[2], anchor[2]), hi)
+    for c in layout.claims:
+        if c[5] != "anno" or c[:4] == tuple(rect) or c[:4] == tuple(anchor):
+            continue
+        if Layout._overlap(band, c[:4], 0.0):
+            return False
+    return True
+
+
 def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
-               dim_rects=None, lfacs=None):
+               dim_rects=None, lfacs=None, anchors=None):
     """Feature control frames: stacked under the matching callout or the
     feature's own diameter-dim text when either exists, else leadered to
     the feature into the right band; flatness frames sit beside their
-    datum box."""
+    datum box.
+
+    A frame is only ever emitted ATTACHED to its own feature's size
+    annotation or with a leader to the feature — never floating (issue
+    #7); and a target that names two features of one size fails rather
+    than taking whichever came last."""
     dim_rects = dim_rects or {}
+    if anchors is None:
+        anchors = legacy_anchors(callout_rects, dim_rects)
     h = ctx.mm(3.0)
     gap = ctx.mm(1.2)
     recs = []
@@ -2217,33 +2562,46 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
         stack_w = max(sizes)
         stack_h = len(frames) * 1.8 * h + (len(frames) - 1) * gap
         rad = _target_radius(tgt)
-        key = _target_key(view, rad, lfacs)[:2] if rad is not None else None
-        anchor = (callout_rects.get(key) or dim_rects.get(key)) \
-            if key else None
-        # a face seen edge-on: the frame leaders to that line (issue #6)
-        fline = face_line(job, (ox, oy), tgt) if rad is None else None
+        anc, problem = resolve_feature_anchor(anchors, view, tgt, lfacs)
+        if problem is not None:
+            layout.unresolved.append(f"fcf-{problem}")
+            continue
+        anchor = anc["rect"] if anc is not None else None
+        # a face seen edge-on: the frame leaders to that line (issue #6),
+        # to the NEAREST of its segments and clear of the hatch (issue #7)
+        flines = face_lines(job, (ox, oy), tgt) if rad is None else []
+        fline = flines[0] if flines else None
+        keep_out = hatch_polys(job, (ox, oy))
         if rad is None and fline is None and face_target(tgt) is not None:
             layout.unresolved.append(
                 f"fcf-{tgt}: view {view!r} draws no edge there — the face is "
                 "not shown edge-on in it; add a view that shows it")
             continue
         rect = None
+        attached = False
         if anchor is not None:
             # clear of the anchor's own leader ink (claimed as a corridor
             # half a leader-width around the knee) before stepping down
             cand = [(anchor[0], anchor[1] - stack_h - ctx.mm(k))
                     for k in (2.5, 8.0, 15.0)]
-            rect = layout.place(cand, stack_w, stack_h, f"fcf-stack-{tgt}")
+            rect = layout.place(cand, stack_w, stack_h, f"fcf-stack-{tgt}",
+                                ignore=("slot",))
             if rect is None and layout.unresolved:
                 layout.unresolved.pop()   # fall through to the band
+            attached = _frame_attached(ctx, layout, rect, anchor)
+            if rect is not None and not attached:
+                # under another callout, not its own: give the spot back
+                # and look for a placement that can carry a leader
+                layout.unclaim(rect, f"fcf-stack-{tgt}")
+                rect = None
         face_tip = None
         if rect is None and fline is not None:
             # a face frame goes BESIDE its face, with a short square leader
             mnb, mxb = job["bounds"]
             vrect = (mnb[0] + ox, mnb[1] + oy, mxb[0] + ox, mxb[1] + oy)
             rect, face_tip = place_frame_near_face(
-                ctx, layout, fline, vrect, stack_w, stack_h,
-                f"fcf-stack-{tgt}")
+                ctx, layout, flines, vrect, stack_w, stack_h,
+                f"fcf-stack-{tgt}", avoid=keep_out)
         if rect is None and face_tip is None and anchor is not None \
                 and not [p for p in job["visible"] if p["t"] == "circle"
                          and rad is not None and abs(p["r"] - rad) < 0.1]:
@@ -2251,16 +2609,21 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
             # edge-on (issue #6) — so the frame has to TOUCH its own size
             # callout. Only then is the ladder widened: a view that does
             # show the feature keeps the placement it always had.
-            wider = [(anchor[0], anchor[1] - stack_h - ctx.mm(k))
-                     for k in (22.0, 30.0)]
-            wider += [(anchor[0], anchor[3] + ctx.mm(k)) for k in (1.5, 7.0)]
+            wider = [(anchor[0], anchor[3] + ctx.mm(k)) for k in (1.5, 7.0)]
             wider += [(anchor[0] + ctx.mm(dx),
                        anchor[1] - stack_h - ctx.mm(k))
                       for k in (2.5, 8.0) for dx in (6.0, -6.0, 12.0)]
-            rect = layout.place(wider, stack_w, stack_h, f"fcf-stack-{tgt}")
+            wider += [(anchor[0], anchor[1] - stack_h - ctx.mm(k))
+                      for k in (22.0, 30.0)]
+            rect = layout.place(wider, stack_w, stack_h, f"fcf-stack-{tgt}",
+                                ignore=("slot",))
             if rect is None and layout.unresolved:
                 layout.unresolved.pop()
-        need_leader = rect is None or face_tip is not None
+            attached = _frame_attached(ctx, layout, rect, anchor)
+            if rect is not None and not attached:
+                layout.unclaim(rect, f"fcf-stack-{tgt}")
+                rect = None
+        need_leader = rect is None or face_tip is not None or not attached
         if rect is None:
             mnb, mxb = job["bounds"]
             ax1 = layout.area[2]
@@ -2283,8 +2646,9 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
         if rect is None:
             layout.unresolved.append(f"fcf-stack-{tgt}")
             continue
-        emit_stack(frames, rect)
-        if need_leader:
+        if not need_leader:
+            emit_stack(frames, rect)
+        else:
             # leader from the feature to the stack MID-LEFT (standard)
             land = (rect[0], (rect[1] + rect[3]) / 2)
             tip = face_tip
@@ -2302,8 +2666,15 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
                     ang = math.atan2(land[1] - cy, land[0] - cx)
                     tip = (cx + c["r"] * math.cos(ang),
                            cy + c["r"] * math.sin(ang))
-                elif fline is not None:
-                    tip = leader_point_on_line(ctx, layout, fline, land)
+                elif flines:
+                    for lines_try in ((flines, keep_out), (flines, ())):
+                        opts = [leader_point_on_line(ctx, layout, fl, land,
+                                                     avoid=lines_try[1])
+                                for fl in lines_try[0]]
+                        opts = [p for p in opts if p is not None]
+                        if opts:
+                            tip = min(opts, key=lambda p: math.dist(p, land))
+                            break
                 elif anchor is not None:
                     # a feature of size the view shows EDGE-ON: its size
                     # callout is what carries it, so the frame points at
@@ -2328,7 +2699,9 @@ def place_fcfs(ctx, layout, gdt, view_jobs, offs, callout_rects, datum_pos,
                 layout.unresolved.append(
                     f"fcf-stack-{tgt}: nothing in view {view!r} to leader it "
                     f"to — {why}")
+                layout.unclaim(rect, f"fcf-stack-{tgt}")
                 continue
+            emit_stack(frames, rect)
             recs.append(mw.line(tip, land, mw.P_ANNO))
             if fline is not None:
                 # on a SURFACE the leader ends in an arrowhead on the face
@@ -3622,7 +3995,26 @@ def build_part_sheet(m, part, proj):
     centring the view boxes alone leaves the sheet visibly lopsided
     (round-5 QA D3). Iterates on the measured imbalance and keeps the best
     fully-resolved pass."""
+    reserve = None
     best = _compose_part_sheet(m, part, proj)
+    if best[2].unresolved and any(u.startswith(("datum-", "fcf-"))
+                                  for u in best[2].unresolved):
+        # A datum or a frame found no room on its own callout: give it one
+        # by reserving the slot under that callout and re-composing, which
+        # restacks the column around it (issue #7). Only then — a sheet
+        # whose GD&T already placed keeps the layout it had.
+        trial_reserve = gdt_reserve(best[0], part)
+        retry = _compose_part_sheet(m, part, proj, reserve=trial_reserve)
+
+        def score(p):
+            u = p[2].unresolved
+            return (len(u), sum(1 for x in u
+                                if x.startswith(("datum-", "fcf-"))))
+
+        if score(retry) < score(best):
+            # fewer failures wins; on a tie the pass that placed more of the
+            # GD&T does, so the message names what is really in the way
+            best, reserve = retry, trial_reserve
     if best[2].unresolved:
         return best[0], best[1], best[2].report()
     ctx = best[0]
@@ -3639,7 +4031,8 @@ def build_part_sheet(m, part, proj):
         shift = max(-limit - dx, min(limit - dx, shift))
         if abs(shift) <= tol:
             break
-        trial = _compose_part_sheet(m, part, proj, dx=dx + shift)
+        trial = _compose_part_sheet(m, part, proj, dx=dx + shift,
+                                    reserve=reserve)
         tlo, thi = content_balance(trial[2])
         if trial[2].unresolved or abs(thi - tlo) >= abs(hi - lo):
             break
@@ -3648,10 +4041,12 @@ def build_part_sheet(m, part, proj):
     return best[0], best[1], best[2].report()
 
 
-def _compose_part_sheet(m, part, proj, dx=0.0):
+def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
     """One placement pass; `dx` shifts the whole view group (and therefore
-    everything anchored to it) horizontally. Returns (ctx, replaced,
-    layout) — the live Layout, so the caller can measure the balance."""
+    everything anchored to it) horizontally, and `reserve` keeps a slot
+    under named size callouts for the GD&T hung on them (gdt_reserve).
+    Returns (ctx, replaced, layout) — the live Layout, so the caller can
+    measure the balance."""
     num, den = parse_scale(part["scale"])
     ctx = mw.SheetContext(num, den)
     front = proj[f"{part['part_id']}:front"]
@@ -3818,8 +4213,8 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
     # before the leader callouts route around them
     ctx.entities += place_angle_refs(ctx, layout, part.get("angle_refs"),
                                      view_jobs, offs, geom)
-    co_recs, co_rects, suppress, co_lands = place_callouts(
-        ctx, layout, callouts, view_jobs, offs)
+    co_recs, co_rects, suppress, co_lands, co_anchors = place_callouts(
+        ctx, layout, callouts, view_jobs, offs, reserve=reserve)
     ctx.entities += co_recs
     dim_rects: dict = {}
 
@@ -3901,13 +4296,20 @@ def _compose_part_sheet(m, part, proj, dx=0.0):
     frames = gdt.get("frames", [])
     anchored = [f for f in frames if f["target"] != "datum_A_face"]
     on_datum = [f for f in frames if f["target"] == "datum_A_face"]
+    # every callout is its own anchor (issue #7), with the diameter dims
+    # behind them as the fallback they have always been
+    anchors = co_anchors + legacy_anchors(dim_rects=dim_rects)
     ctx.entities += place_fcfs(ctx, layout, {"frames": anchored}, view_jobs,
-                               offs, co_rects, {}, dim_rects, lfacs)
+                               offs, co_rects, {}, dim_rects, lfacs,
+                               anchors=anchors)
     dat_recs, datum_pos = place_datums(ctx, layout, gdt, view_jobs, offs,
-                                       co_rects, dim_rects, lfacs, co_lands)
+                                       co_rects, dim_rects, lfacs, co_lands,
+                                       anchors=anchors)
     ctx.entities += dat_recs
     ctx.entities += place_fcfs(ctx, layout, {"frames": on_datum}, view_jobs,
-                               offs, co_rects, datum_pos, dim_rects, lfacs)
+                               offs, co_rects, datum_pos, dim_rects, lfacs,
+                               anchors=anchors)
+    layout.release("slot")       # the GD&T is placed; free what it left
     if flat:
         ctx.entities += place_bend_table(ctx, layout, part, rows_h)
     notes = part.get("fab_notes", []) + part.get("extra_notes", [])

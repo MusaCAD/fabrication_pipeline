@@ -214,8 +214,13 @@ class SampleSheetDatumTest(unittest.TestCase):
         self.assertEqual(len(bore), 1)
         knee = bore[0]["knee"]
         tips = [t[0] for t in solid_triangles(self.text)]
-        self.assertTrue(any(math.dist(t, knee) < 1e-6 for t in tips),
-                        f"no datum triangle at the leader shoulder {knee}")
+        # on the leader's shoulder, or further along the same landing — ISO
+        # 1101 5.3 also allows the triangle on an EXTENSION of the
+        # dimension line, which is where it goes when the slots beside the
+        # shoulder are taken by the callout stacked under it (issue #7)
+        self.assertTrue(any(abs(t[1] - knee[1]) < 1e-6 and t[0] >= knee[0]
+                            for t in tips),
+                        f"no datum triangle on the landing from {knee}")
 
     def test_the_frames_refer_to_it(self):
         self.assertEqual(self.info["layout"]["unresolved"], [])

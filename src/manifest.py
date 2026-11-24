@@ -143,15 +143,40 @@ def parse_scale(spec) -> tuple[int, int] | None:
     return (num, den) if num and den else None
 
 
+def selector_problem(target) -> str | None:
+    """A feature-of-size target may name WHICH feature of that size it
+    means (issue #7): `@<callout id>`, `@x<coord>` or `@y<coord>`. Only the
+    form is checked here; whether it names anything is gdt_problems' job."""
+    t = str(target or "")
+    if "@" not in t:
+        return None
+    sel = t.partition("@")[2].strip()
+    if not sel:
+        return (f"empty selector in {t!r} (want @<callout id>, @x<coord> or "
+                "@y<coord>)")
+    if sel[:1].lower() in ("x", "y") and len(sel) > 1:
+        try:
+            float(sel[1:])
+        except ValueError:
+            return (f"bad coordinate selector @{sel} in {t!r} — @x/@y take a "
+                    "number in the view's own axes")
+    return None
+
+
 def datum_target_problem(target) -> str | None:
     """Datum targets: a view edge, or `<kind>_r<radius>` for a feature of
-    size (a bore or a spigot, whose datum is its axis)."""
+    size (a bore or a spigot, whose datum is its axis), optionally with a
+    selector naming which feature of that size (`bore_r35.75@tail`)."""
     t = str(target or "")
-    if t in DATUM_EDGE_TARGETS:
+    bad = selector_problem(t)
+    if bad:
+        return f"bad datum target: {bad}"
+    base = t.partition("@")[0]
+    if base in DATUM_EDGE_TARGETS:
         return None
-    if "_r" in t:
+    if "_r" in base:
         try:
-            if float(t.rsplit("_r", 1)[1]) > 0:
+            if float(base.rsplit("_r", 1)[1]) > 0:
                 return None
         except ValueError:
             pass
@@ -161,17 +186,22 @@ def datum_target_problem(target) -> str | None:
 
 
 def frame_target_problem(target) -> str | None:
-    """Frame targets: a feature of size (`<kind>_r<radius>`), datum A's own
-    face, or a plane face seen EDGE-ON in the view (issue #6)."""
+    """Frame targets: a feature of size (`<kind>_r<radius>`, with an
+    optional selector), datum A's own face, or a plane face seen EDGE-ON in
+    the view (issue #6)."""
     # draw.py is imported here, not at the top: it imports this module for
     # VIEW_DIRS, and by the time any lock runs, this one is fully loaded
     import draw
     t = str(target or "")
-    if t == "datum_A_face" or draw.face_target(t) is not None:
+    bad = selector_problem(t)
+    if bad:
+        return f"bad frame target: {bad}"
+    base = t.partition("@")[0]
+    if base == "datum_A_face" or draw.face_target(base) is not None:
         return None
-    if "_r" in t:
+    if "_r" in base:
         try:
-            if float(t.rsplit("_r", 1)[1]) > 0:
+            if float(base.rsplit("_r", 1)[1]) > 0:
                 return None
         except ValueError:
             pass
@@ -180,10 +210,66 @@ def frame_target_problem(target) -> str | None:
             f"{', '.join(sorted(draw.FACE_EDGES))})")
 
 
+def size_annotations(part: dict, view: str, rad: float) -> list[dict]:
+    """The callouts in `view` that carry the size of a feature of radius
+    `rad` (true millimetres) — what a feature-of-size target attaches to.
+    A detail view draws its geometry k times size, so its circle_r is k
+    times the true radius; the comparison follows it."""
+    import draw
+    k = 1.0
+    if view == "detail":
+        spec = part.get("detail_view") or {}
+        if spec:
+            k = draw.detail_factor(part, spec)
+    return [co for co in part.get("callouts") or []
+            if co.get("view", "front") == view and "circle_r" in co
+            and abs(float(co["circle_r"]) - rad * k) < 0.0015]
+
+
+def ambiguity_problem(part: dict, item: dict, kind: str) -> str | None:
+    """Does this datum/frame target name exactly ONE size annotation?
+
+    Two features of the same size in one view (a tube's two end bores) are
+    told apart by the target's selector; without one the drawing would
+    attach to whichever callout came last, which is a sheet that says
+    something the designer did not (issue #7)."""
+    import draw
+    rad, sel = draw._target_parts(item.get("target"))
+    if rad is None:
+        return None
+    view = item.get("view", "front")
+    cos = size_annotations(part, view, rad)
+    tgt = item.get("target")
+    if sel is None:
+        if len(cos) > 1:
+            named = [co.get("id") or f"at {co.get('at')}" for co in cos]
+            return (f"{kind} target {tgt!r} fits {len(cos)} callouts in view "
+                    f"{view!r} ({', '.join(map(str, named))}) — say which "
+                    f"with @<callout id> or @x<coord>/@y<coord>")
+        return None
+    hit = [co for co in cos
+           if draw._anchor_matches(
+               draw.feature_anchor(view, co["circle_r"], (0, 0, 0, 0),
+                                   cid=co.get("id"),
+                                   at=co.get("at")), sel)]
+    if not hit:
+        if not cos:
+            return (f"{kind} target {tgt!r}: view {view!r} has no callout of "
+                    f"that size for @{sel} to name")
+        return (f"{kind} target {tgt!r}: no callout in view {view!r} matches "
+                f"@{sel} — give the one you mean an \"id\", or use "
+                f"@x<coord>/@y<coord>")
+    if len(hit) > 1:
+        return (f"{kind} target {tgt!r}: @{sel} matches {len(hit)} callouts "
+                f"in view {view!r} — ids must be unique per view")
+    return None
+
+
 def gdt_problems(part: dict, who: str) -> list[str]:
-    """The sheet's GD&T: every target has a form the drawing can place, and
-    every frame's datum letters are datums this sheet actually carries — a
-    frame referring to a datum that is not on the sheet is unmeasurable."""
+    """The sheet's GD&T: every target has a form the drawing can place and
+    names exactly one feature, and every frame's datum letters are datums
+    this sheet actually carries — a frame referring to a datum that is not
+    on the sheet is unmeasurable."""
     g = part.get("gdt") or {}
     out = []
     letters = set()
@@ -191,11 +277,19 @@ def gdt_problems(part: dict, who: str) -> list[str]:
         bad = datum_target_problem(d.get("target"))
         if bad:
             out.append(f"{who}: {bad}")
+        else:
+            bad = ambiguity_problem(part, d, "datum")
+            if bad:
+                out.append(f"{who}: {bad}")
         letters.add(str(d.get("label", "")).upper())
     for f in g.get("frames", []):
         bad = frame_target_problem(f.get("target"))
         if bad:
             out.append(f"{who}: {bad}")
+        else:
+            bad = ambiguity_problem(part, f, "frame")
+            if bad:
+                out.append(f"{who}: {bad}")
         for ref in f.get("refs", []) or []:
             if str(ref).upper() not in letters:
                 out.append(f"{who}: frame {f.get('symbol', '?')} "

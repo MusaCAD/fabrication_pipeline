@@ -42,7 +42,12 @@ composition), `qa-checker` (21-point output verification, render-and-inspect).
   size callout even when the views show it only edge-on, as a turned part
   does — and feature control frames (flatness, position, perpendicularity,
   coaxiality, circular runout), including frames on a plane face, leadered
-  to the face's edge-on line, ANSI31 section hatch, fabrication notes, a shaded
+  to the nearest edge-on line of that face and never across the section
+  hatch. Where one view holds two features of the same size, the datum or
+  frame says which it means (`bore_r35.75@tail`, naming a callout's `id`,
+  or `@x280`, its coordinate in the view); a frame is drawn only when it
+  touches its own size callout or carries a leader to it, and the sheet
+  fails loudly otherwise. ANSI31 section hatch, fabrication notes, a shaded
   isometric pictorial, and a fully populated RES title block (scale, rev,
   weight computed from the model, parts row).
 - Per assembly: NTS isometric HLR wireframe (or an orthographic view with

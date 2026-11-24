@@ -324,6 +324,24 @@ composition/rework), qa-checker (verify PDFs after every /export).
   dimension line when it is dimensioned that way. No size annotation for
   that feature = the sheet fails; a datum triangle on an undimensioned
   feature is not a datum.
+  TWO FEATURES OF ONE SIZE (issue #7): size alone does not name a feature
+  on a tube bored the same at both ends, so a target may carry a SELECTOR
+  — `bore_r35.75@tail` (the callout whose manifest `"id"` is `tail`) or
+  `bore_r35.75@x280` / `@y-30` (the feature's coordinate in the view's own
+  axes, written as a callout's `at` is). A target that still fits two
+  annotations FAILS, at the lock (manifest.ambiguity_problem) and at
+  /draw (draw.resolve_feature_anchor): attaching to whichever callout came
+  last is a sheet that says something the designer did not.
+  A FRAME IS ITS FEATURE'S OR IT IS NOTHING (issue #7): a stack is emitted
+  only when it TOUCHES its own size annotation — directly under or over
+  it, with no other annotation in the gap (draw._frame_attached) — or
+  carries a leader to it. Otherwise the sheet fails with the reason; no
+  frame ink is written for a failure. When a crowded callout column leaves
+  no room, draw.gdt_reserve re-composes the sheet with that callout's slot
+  reserved (claims of kind "slot", which only the frame and datum hung on
+  it may use, released once they are placed); the datum's own last resort
+  is the far end of its landing — ISO 1101 5.3's extension of the
+  dimension line.
   EDGE-ON FEATURES (issue #6): a turned part drawn as a side view and a
   section never shows its spigot or bore as a CIRCLE — they are pairs of
   lines — and that is fine. The datum needs the feature's SIZE dimension,
@@ -335,10 +353,14 @@ composition/rework), qa-checker (verify PDFs after every /export).
   FRAMES ON A PLANE FACE: a face is drawn EDGE-ON, so a perpendicularity /
   flatness / parallelism frame attaches to that line with a leader and an
   arrowhead on it (ISO 1101 5.2). Target `face_x<coord>` / `face_y<coord>`
-  (the view's own axes; the longest drawn edge at that coordinate wins) or
-  a named view edge (bottom_face / top_face / left_edge / right_edge).
-  draw.place_frame_near_face puts such a frame BESIDE the view, square to
-  the face, so the leader is short — parking it in the annotation band
+  (the view's own axes) or a named view edge (bottom_face / top_face /
+  left_edge / right_edge). One face can be drawn as SEVERAL segments — a
+  shoulder on a turned part is one short line each side of the axis — so
+  draw.face_lines returns them all and place_frame_near_face takes the one
+  it can reach by the shortest clear route, never routing through the
+  section hatch while a clear route exists (draw.hatch_polys /
+  crosses_polys; issue #7). It puts such a frame BESIDE the view, square
+  to the face, so the leader is short — parking it in the annotation band
   means a leader across the view and through the callouts. A frame that
   can reach nothing in its view FAILS loudly: an unleadered frame points
   at no feature at all. /finalise checks every frame target's form and
