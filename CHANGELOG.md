@@ -5,6 +5,99 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.9.0 — 2026-11-24
+
+Two drawing conventions a real set needed, and the check that should have
+caught what went out without them:
+[#11](https://github.com/MusaCAD/fabrication_pipeline/issues/11),
+[#12](https://github.com/MusaCAD/fabrication_pipeline/issues/12) and
+[#14](https://github.com/MusaCAD/fabrication_pipeline/issues/14).
+
+### Added
+
+- **Tabulated drawings** (#11). A family that differs in ONE size is drawn
+  once: the varying size carries a LETTER and a table gives its value per
+  variant, with each one's mark and quantity. New part key:
+
+  ```json
+  "variants": {
+    "letter": "T", "title": "TRIM DISC KIT %%c40",
+    "dim": {"view": "section", "orient": "h", "side": "bottom",
+            "a": [0.0, -20.0], "b": [5.0, -20.0]},
+    "columns": ["MARK", "T", "QTY"],
+    "rows": [["A", "5", "1"], ["B", "2", "3"],
+             ["C", "1", "1"], ["D", "0.5", "2"]]
+  }
+  ```
+
+  A DIM entity always prints the distance between its own def points —
+  `core/dimension.cpp` composes prefix + measurement + suffix, and nothing
+  replaces the middle — so the modelled variant's own 5 mm printed and
+  read as the thickness of every disc in the kit. The workaround was to
+  suppress the dimension and leave a leader note pointing at a paragraph.
+  `draw.place_letter_dim` draws the dimension itself instead: the same
+  extension lines, dimension line and filled arrowheads MusaCAD would
+  draw for that style (`dim_arrowhead` matching `append_arrowhead`'s own
+  proportions, so two kinds of arrow never appear on one sheet), with the
+  letter where the value goes, placed and collision-checked through the
+  same candidate ladder as any location dimension. The table goes in free
+  space like the bend table — both now through `draw.place_table` — and
+  fails the sheet rather than shrinking below the legibility floor. The
+  lock checks the table has a column for the letter and every row is
+  filled (`manifest.variants_problems`).
+- **ISO 6410 for a tapped hole** (#12). `threads` drew the external
+  convention only: a root line at the minor diameter inside the modelled
+  crest. A tapped hole is modelled as its tap drill, so the solid's own
+  edge is the minor diameter and the thread lived in the callout text
+  alone — a sheet with an M6 x 13 deep on a ⌀5 x 16 drill showed only the
+  drill. `"kind": "internal"` now draws it: a thin continuous line each
+  side at the MAJOR diameter over the threaded span, the thread-end line
+  where the usable thread stops short of the drill depth (on by default
+  for an internal thread, since nothing else marks it), and a
+  three-quarter thin arc at the major diameter — open in the upper-right
+  quadrant — in a view that shows the hole as a circle
+  (`"circles": [{"view": "front", "center": [0, 0]}]`). The section hatch
+  already stops at the drill wall, where the solid ends, so the thread
+  lines simply overlay it. The lock checks the thread is wider than its
+  tap drill and that its span is a real length inside the part
+  (`manifest.thread_problems`).
+- **The value check** (#14). What the manifest STATES must be what the
+  sheet PRINTS, and now the pipeline compares them. Nothing did before:
+  the layout engine only guarantees that what it places does not overlap,
+  and the qa-checker reads the PDF against the template rules — so a
+  dropped tolerance and a model coordinate printed as a dimension both
+  shipped while the draftsman's report said "every number kept".
+
+  `src/verify.py` reads the stated values (callout and note text, GD&T
+  tolerances and datum letters, thread designations, the variants table,
+  the title block, and the value each location dimension must measure)
+  and the printed ones (every MTEXT / TEXT / LEADER content in the .musa,
+  plus every DIM label as MusaCAD itself composes it through
+  `musa_plot --dump-dims`, so DIMLFAC and precision are already applied).
+  Findings are of four kinds: `missing`, `changed` — which names the
+  words that are not there, "the sheet is missing: f7" — `extra`, a
+  printed VALUE the manifest does not account for, and `impossible`, a
+  dimension bigger than the part it dimensions, which is what a model
+  coordinate printed as a dimension looks like. Text wrapped across lines
+  still matches, because the sheet is read as one running string both
+  ways round (the notes block draws its lines bottom-up).
+
+  /draw prints the findings and records them in sheets.json; /export
+  REFUSES to run on any that is not waived by an explicit
+  `"value_waivers"` entry in the manifest, named like every other waiver
+  here. Over the eleven part sheets of a live set it reports nothing on
+  the nine that place everything, and on the two that do not it names
+  exactly what is missing — including a ⌀71.5 f7 (SPIGOT) callout that is
+  not on the sheet at all.
+
+### Compatibility
+
+A manifest that asks for none of this gets none of it: every sheet of
+four real sets — eleven sslxbt part sheets, the TPE assembly and its
+parts, amogha RES-41-LH-01 and `samples/out/RES-SAMPLE-01` — redraws byte
+for byte. The value check is new output, not new ink: it adds a `values`
+list per sheet in sheets.json and a line to the /draw log.
+
 ## v0.8.0 — 2026-11-24
 
 Three faults found drawing a real set, and the paper size they ran into:
