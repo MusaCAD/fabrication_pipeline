@@ -200,19 +200,75 @@ def resolve_template(spec: str | Path) -> Path:
     return p if p.is_absolute() else TEMPLATE.parent / p
 
 
+def template_elements_off_sheet(path: Path, tol: float = 0.01) -> list[str]:
+    """Every element of a title block has to be ON the sheet it draws
+    (issue #15): the text, the logo box and the stamp it makes all lie
+    inside the template's own extents. One outside prints nowhere and
+    nothing downstream reads it, so the sheet would go out with a piece
+    simply missing. The frame and the rules ARE those extents
+    (template_bbox measures them), so what this catches is a field or a
+    logo placed off the sheet they draw."""
+    lo, hi = template_bbox(path)
+    out = []
+    for r in parse_template(path):
+        if r.kind == "MTEXT":
+            pts = [(r.nums[0], r.nums[1])]
+        elif r.kind == "LINE":
+            pts = [(r.nums[0], r.nums[1]), (r.nums[2], r.nums[3])]
+        elif r.kind in ("CIRCLE", "ARC"):
+            cx, cy, rad = r.nums[0], r.nums[1], r.nums[2]
+            pts = [(cx - rad, cy - rad), (cx + rad, cy + rad)]
+        else:
+            pts = [(r.nums[i], r.nums[i + 1])
+                   for i in range(0, len(r.nums), 2)]
+        for x, y in pts:
+            if not (lo[0] - tol <= x <= hi[0] + tol
+                    and lo[1] - tol <= y <= hi[1] + tol):
+                out.append(f"{r.kind} at ({x:.1f}, {y:.1f}) is outside the "
+                           f"sheet ({lo[0]:.1f}, {lo[1]:.1f})-"
+                           f"({hi[0]:.1f}, {hi[1]:.1f})")
+                break
+    lg = template_logo(path)
+    if lg is not None:
+        x0, y0, x1, y1 = lg["box"]
+        if not (lo[0] - tol <= x0 and x1 <= hi[0] + tol
+                and lo[1] - tol <= y0 and y1 <= hi[1] + tol):
+            out.append(f"the logo box ({x0:.1f}, {y0:.1f})-({x1:.1f}, "
+                       f"{y1:.1f}) is outside the sheet — it would print "
+                       "nowhere (is it entered in the A4 template's units?)")
+        else:
+            # and where it really STAMPS: on a widened sheet the box
+            # travels with the right edge, so a box already moved by the
+            # widening is moved twice and lands off the paper (issue #15)
+            ctx = SheetContext(1, 1, geom=template_geom(path), template=path)
+            st = ctx.logo_stamp()
+            if st:
+                sx, sy, sw, sh = st["rect"]
+                if not (-tol <= sx and sx + sw <= ctx.window[2] + tol
+                        and -tol <= sy and sy + sh <= ctx.window[3] + tol):
+                    out.append(
+                        f"the logo stamps at ({sx:.1f}, {sy:.1f}) "
+                        f"{sw:.1f}x{sh:.1f} on a {ctx.window[2]:.1f}x"
+                        f"{ctx.window[3]:.1f} sheet — off the paper. Give "
+                        "the box in the A4 template's own units: the "
+                        "pipeline moves it with the right edge itself")
+    return out
+
+
 def template_problems(spec: str | Path) -> list[str]:
     """Why a manifest's template cannot be drawn on (empty = fine): it must
-    exist, parse with the default template's record kinds, and any logo
-    sidecar must resolve."""
+    exist, parse with the default template's record kinds, any logo
+    sidecar must resolve, and every element must lie on the sheet."""
     path = resolve_template(spec)
     if not path.exists():
         return [f"template not found: {path}"]
     try:
         parse_template(path)
         template_logo(path)
+        bad = template_elements_off_sheet(path)
     except Exception as e:   # noqa: BLE001 — report, never crash the lock
         return [f"template {path}: {e}"]
-    return []
+    return [f"template {path.name}: {b}" for b in bad]
 
 
 def png_size(path: Path) -> tuple[int, int]:
@@ -490,6 +546,9 @@ class SheetContext:
         MTEXT's exact original content -> new content ('' keeps a field's
         original text). Returns the list of replaced keys for QA."""
         used: list[str] = []
+        # a field whose text is wider than the box the template drew for
+        # it prints through its own rule (issue #15)
+        self.field_overflow: list[str] = []
         for r in parse_template(self.template):
             pr = r.props
             if r.kind == "LINE":
@@ -522,6 +581,14 @@ class SheetContext:
                         plain = prep["new"]
                         used.append(f"pos:{prep['new'][:16]}")
                         break
+                box_w = r.nums[2]
+                if box_w > 0:
+                    for part in plain.split("\n"):
+                        ink = glyph_ink_w(part, r.nums[3])
+                        if ink > box_w + 0.01:
+                            self.field_overflow.append(
+                                f"{part[:28]!r} is {ink:.0f} wide in a "
+                                f"{box_w:.0f} box")
                 px, py = self.tx(r.nums[0]), self.ty(r.nums[1])
                 self.add(mtext((px, py), plain, r.nums[3] * self.t,
                                width=r.nums[2] * self.t, rotation=r.nums[4],

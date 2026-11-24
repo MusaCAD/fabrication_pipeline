@@ -557,7 +557,8 @@ MIN_VIEW_GAP = 16.0
 
 def place_views(ctx: mw.SheetContext, front, section, projection="below",
                 right_band=False, bottom_reserve=0.0, top_reserve=0.0,
-                band_w=0.0, band_inboard=False, gutters=(0.0, 0.0)):
+                band_w=0.0, band_inboard=False, gutters=(0.0, 0.0),
+                band_gap_w=0.0):
     """Offsets placing the views in the drawing area. `below`: front upper
     band, section under it, SHARED x offset (feature alignment). right/left:
     side by side, SHARED y offset. Errors if they don't fit.
@@ -570,6 +571,10 @@ def place_views(ctx: mw.SheetContext, front, section, projection="below",
         that is NOT the outermost one. Either that flag or a sheet too
         narrow for the column outside the group opens the inter-view gap up
         to hold it instead, so no leader has to cross the far view;
+      * `band_gap_w` — width the INNER view of a side-by-side pair needs
+        for its own callouts, which land in the gap. Both columns are
+        reserved and the group is centred with both, so a sheet with
+        leaders on both views has room for each (issue #13);
       * `top_reserve` / `bottom_reserve` — printed height the dimension band
         above the front view and the label/notes/parts-rows band below the
         last view need. A part too tall for both bands gives the inter-view
@@ -587,8 +592,11 @@ def place_views(ctx: mw.SheetContext, front, section, projection="below",
     if section:
         sw, sh, smn, smx = view_size(section)
     lg, rg = gutters
-    if right_band and band_w <= 0.0:
-        band_w = ctx.mm(32.0)      # unmeasured band (assembly balloons)
+    if right_band and band_w <= 0.0 and band_gap_w <= 0.0:
+        # an unmeasured band (the assembly sheet's balloons). A part sheet
+        # that measured ZERO for one of its two columns means it, and must
+        # not have 32 mm invented for it (issue #13)
+        band_w = ctx.mm(32.0)
     side_by_side = bool(section) and projection in ("right", "left")
 
     def sizes(g):
@@ -597,17 +605,23 @@ def place_views(ctx: mw.SheetContext, front, section, projection="below",
 
     total_w, total_h = sizes(gap)
     band_in_gap = False
-    if side_by_side and band_w > 0.0:
-        # the annotation column belongs OUTSIDE the group whenever the sheet
-        # is wide enough for it AND nothing is in the way; a callout whose
-        # own view is not the outermost one has to land in the inter-view
-        # gap instead, because its leader would otherwise cross the far view
+    want_gap = band_gap_w
+    if side_by_side and band_w > 0.0 and not band_gap_w:
+        # one column, no side stated: it belongs OUTSIDE the group whenever
+        # the sheet is wide enough for it AND nothing is in the way; a
+        # callout whose own view is not the outermost one has to land in
+        # the inter-view gap instead, because its leader would otherwise
+        # cross the far view
         if band_inboard or aw - lg - total_w - rg - band_w < 0.0:
-            gap = max(gap, min(band_w, aw - lg - rg - fw - sw))
-            total_w, total_h = sizes(gap)
-            band_in_gap = gap >= band_w
+            want_gap = band_w
+    if side_by_side and want_gap > 0.0:
+        gap = max(gap, min(want_gap, aw - lg - rg - fw - sw))
+        total_w, total_h = sizes(gap)
+        band_in_gap = gap >= want_gap
     need_l = lg
-    need_r = rg + (0.0 if band_in_gap else band_w)
+    # the outer column holds what the gap does not: with band_gap_w stated,
+    # the two are different callouts and both are reserved (issue #13)
+    need_r = rg + (band_w if band_gap_w or not band_in_gap else 0.0)
     # a band wider than the sheet can hold is capped, not honoured: the
     # callout stack wraps to the width it really gets (place_callouts)
     if need_l + total_w + need_r > aw:
@@ -620,9 +634,24 @@ def place_views(ctx: mw.SheetContext, front, section, projection="below",
     if over > 0 and section and not side_by_side:
         gap = max(ctx.mm(MIN_VIEW_GAP), gap - over)
         total_w, total_h = sizes(gap)
+    # the views' OWN size, at the tightest gap they would ever be given:
+    # what is left over is the annotation columns' problem, not the scale's
+    views_w, views_h = sizes(ctx.mm(MIN_VIEW_GAP)) if side_by_side \
+        else (total_w, total_h)
+    if views_w > aw - 2 * margin or views_h > ah - 2 * margin:
+        die(f"views ({views_w:.0f}x{views_h:.0f} sheet-units) exceed drawing "
+            f"area ({aw:.0f}x{ah:.0f}); pick a smaller scale, a bigger "
+            "sheet, or split the part across sheets")
     if total_w > aw - 2 * margin or total_h > ah - 2 * margin:
-        die(f"views ({total_w:.0f}x{total_h:.0f} sheet-units) exceed drawing "
-            f"area ({aw:.0f}x{ah:.0f}); pick a smaller scale in the manifest")
+        # the views fit; the callout columns beside them do not. Say which
+        # ones and by how much, because shortening a callout or moving it
+        # to the other view is the fix — not a smaller scale (issue #13)
+        room = aw - 2 * margin - views_w
+        die(f"the callout columns do not fit beside the views: the inner "
+            f"one needs {band_gap_w:.0f} and the outer one {band_w:.0f} "
+            f"sheet-units, with {max(room, 0.0):.0f} left of "
+            f"{aw:.0f}; shorten a callout, move it to the other view, or "
+            "use a bigger sheet")
     free = ah - total_h
     centered = free / 2 - ctx.mm(6.0)
     # roomy sheets get >= 24 mm top headroom (two-tier dim chains: inner
@@ -1701,15 +1730,21 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4, lfac=1.0):
 CALLOUT_KNEE_STEPS = (10.0, 18.0, 26.0)
 
 
-def annotation_band_width(ctx, callouts, gdt):
-    """Width (sheet units) the right-hand annotation column needs: the widest
-    callout stack / feature-control-frame stack that lands there, plus the
-    leader knee stand-off and a clearance. EVERY view's callouts are counted
-    — stacked views share one band, and a side-by-side section's callouts
-    land in the same column as the front view's. Mirrors the sizing inside
-    place_callouts()/place_fcfs() — keep the three in step."""
+def annotation_band_width(ctx, callouts, gdt, views=None):
+    """Width (sheet units) an annotation column needs: the widest callout
+    stack / feature-control-frame stack that lands there, plus the leader
+    knee stand-off and a clearance. Stacked views share one column, so by
+    default every view's callouts are counted; `views` narrows it to one
+    side of a side-by-side pair, which gets its OWN column (issue #13).
+    Mirrors the sizing inside place_callouts()/place_fcfs() — keep the
+    three in step."""
     h_co, h_f = ctx.mm(3.2), ctx.mm(3.0)
     need = 0.0
+    if views is not None:
+        callouts = [co for co in callouts
+                    if co.get("view", "front") in views]
+        gdt = {"frames": [f for f in gdt.get("frames", [])
+                          if f.get("view", "front") in views]}
     for co in callouts:
         lines = co.get("lines") or [{"text": co["text"]}]
         s, gap = 1.2 * h_co, 0.45 * h_co
@@ -1811,12 +1846,17 @@ def gdt_reserve(ctx, part) -> dict:
     return need
 
 
-def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None):
+def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
+                   limits=None):
     """Leader callouts (fit specs, hole callouts) landing in the right-hand
     band. A callout carries either a single "text" or a "lines" stack
     (ASME Y14.5 hole note: optional per-line "sym" prefix glyph, cbore /
     depth); the leader knee meets the FIRST line, the rest stack below,
     left-aligned. The claimed rect covers the whole stack incl. glyphs.
+    `limits` caps a view's text column at an x of its own: the INNER
+    view of a side-by-side pair wraps to the inter-view gap, not to the
+    sheet edge, so its note stays in its own column (issue #13).
+
     Returns (records, {(view, circle_r): full_rect}, suppress_radii,
     {(view, circle_r): (knee, text_left)}, anchors) — the landing is where
     a datum on that feature of size attaches, and `anchors` lists EVERY
@@ -1893,7 +1933,8 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None):
             # re-flow to the column this knee actually leaves: a band too
             # narrow for the note makes it two or three lines, never a
             # dropped callout (round-8: the 3X %%c27 bore note on sheet 03)
-            avail = ctx.draw_area[2] - x1 - ctx.mm(1.0)
+            avail = (limits or {}).get(view, ctx.draw_area[2]) \
+                - x1 - ctx.mm(1.0)
             lines = []
             for ln in spec_lines:
                 room = avail - ((s + gap) if ln.get("sym") else 0.0)
@@ -3674,33 +3715,167 @@ def balloon_landing(ctx, asm_job, off, k, knee):
     return snap
 
 
-def balloons(ctx, layout, asm_job, off, items, start_y=None, knee_x=None):
-    """P.NO. leader callouts fanned into the right band through the
-    collision layout. Each arrow lands on an edge that belongs to that
-    instance alone (balloon_landing).
+BALLOON_TEXT_MM = 3.5            # P.NO. height; the circle is 1.4 x it
+
+
+def balloon_pitch(ctx, dense=False):
+    """Centre-to-centre of two balloons in one column. A SPLIT fan packs
+    them closer — 2.5 mm apart instead of 4 — which is ordinary practice
+    on a crowded assembly and is what lets two columns hold a set that one
+    cannot."""
+    brad = 1.4 * ctx.mm(BALLOON_TEXT_MM)
+    return 2 * brad + ctx.mm(2.5 if dense else 4.0)
+
+
+def balloon_capacity(ctx, top, floor, dense=False):
+    """How many balloons one column can hold between `top` and `floor`.
+
+    The first sits AT `top` and each one after it a pitch lower, so the
+    last one's circle has to clear the floor by its own radius."""
+    brad = 1.4 * ctx.mm(BALLOON_TEXT_MM)
+    room = top - floor - brad
+    if room < 0:
+        return 0
+    return int(room / balloon_pitch(ctx, dense)) + 1
+
+
+def _rebalance(sides, order, capacity):
+    """Move the balloons nearest the view's CENTRE to the other column
+    when their own side is full. A part out at the edge keeps the side it
+    is on — its leader would otherwise cross the view — while one near the
+    middle reads as well either way, so that is what gives."""
+    per = {"left": [], "right": []}
+    for key in sides:
+        per[sides[key]].append(key)
+    for full, other in (("left", "right"), ("right", "left")):
+        while len(per[full]) > capacity and len(per[other]) < capacity:
+            # the one whose part sits closest to the centre line
+            key = min(per[full], key=lambda k: abs(order[k]))
+            per[full].remove(key)
+            per[other].append(key)
+            sides[key] = other
+    return sides
+
+
+def balloon_sides(ctx, views, offs, by_view, capacity, columns):
+    """{(view, instance): "left"|"right"} when ONE column cannot hold them
+    all, else {} (one column, as a sheet with few part numbers has always
+    had).
+
+    26 part numbers need about 360 mm of column and A3 landscape has 290,
+    so the fan splits in two, one each side of the view. Each balloon goes
+    on the side ITS OWN PART sits on, so its leader never crosses the view
+    to reach a column — and since each side is then fanned top-down by
+    where its arrow lands, leaders cannot cross inside a column either.
+    """
+    total = sum(len(v) for v in by_view.values())
+    if total <= capacity:
+        return {}
+    sides, offset = {}, {}
+    for view, items in by_view.items():
+        job, off = views[view], offs[view]
+        top = job["bounds"][1][1] + off[1]
+        for k, _pid in items:
+            # where the arrow would really land from each column — through
+            # the same function that will place it — and how far it would
+            # then have to reach
+            reach = {sd: abs(balloon_landing(ctx, job, off, k,
+                                             (kx, top))[0] - kx)
+                     for sd, kx in columns.items()}
+            sides[(view, k)] = min(reach, key=lambda sd: reach[sd])
+            offset[(view, k)] = reach["left"] - reach["right"]
+    return _rebalance(sides, offset, capacity)
+
+
+def _uncross(order, tip_of, kx, start, pitch, rounds=8):
+    """Exchange neighbours in a fan whose leaders would cross.
+
+    The knee of position i is fixed — `start - i * pitch` — so a crossing
+    between two neighbours is removed by swapping which balloon sits
+    where, and repeated passes settle the whole column. Ordering by the
+    angle from the fan's middle gets almost every pair right; this is
+    what settles the ones where a landing's height and its distance from
+    the column disagree."""
+    for _ in range(rounds):
+        swapped = False
+        for i in range(len(order) - 1):
+            a, b = order[i], order[i + 1]
+            ka = (kx, start - i * pitch)
+            kb = (kx, start - (i + 1) * pitch)
+            if _proper_crossing(ka, tip_of[a], kb, tip_of[b], 0.0):
+                order[i], order[i + 1] = b, a
+                swapped = True
+        if not swapped:
+            break
+    return order
+
+
+def balloons(ctx, layout, asm_job, off, items, start_y=None, knee_x=None,
+             side="right", dense=False):
+    """P.NO. leader callouts fanned into a band through the collision
+    layout. Each arrow lands on an edge that belongs to that instance
+    alone (balloon_landing).
 
     `items` is [(instance index, P.NO. as drawn)] — the caller decides
     WHICH instance carries each part number, because a part number is
     ballooned once on the whole sheet, in the view where it reads best
     (balloon_plan). `start_y` continues a fan begun in another view and
     `knee_x` pins every view's balloons to ONE column: a second column of
-    knees is where leaders start crossing each other."""
+    knees on the SAME side is where leaders start crossing each other.
+    `side` puts the column left of the view instead, for the other half of
+    a split fan (balloon_sides) — the balloon then sits left of its knee,
+    so the leader still meets it from the view."""
     ox, oy = off
     mn, mx = asm_job["bounds"]
     recs = []
     insts = asm_job.get("instances", [])
     pid_by_index = dict(items)
-    h = ctx.mm(3.5)
+    h = ctx.mm(BALLOON_TEXT_MM)
     brad = 1.4 * h                       # balloon circle radius
-    kx = knee_x if knee_x is not None else mx[0] + ox + ctx.mm(16.0)
+    sgn = -1.0 if side == "left" else 1.0
+    if knee_x is not None:
+        kx = knee_x
+    elif sgn > 0:
+        kx = mx[0] + ox + ctx.mm(16.0)
+    else:
+        kx = mn[0] + ox - ctx.mm(16.0)
     # rank by where each arrow will LAND, not by instance centre: knees are
     # handed out top-down, so any disagreement between the two orders makes
     # the leaders cross. Probe the landings from one common reference knee
     # (the top of the band) to break the knee<->landing circularity.
-    probe = (kx, mx[1] + oy)
-    ys = sorted(pid_by_index,
-                key=lambda k: -balloon_landing(ctx, asm_job, off, k,
-                                               probe)[1])
+    start = start_y if start_y is not None else mx[1] + oy
+    # the fan radiates from the MIDDLE of the column it will occupy, not
+    # from its top: angles measured at the top make the order of two
+    # landings at similar heights turn on a rounding, and the leaders
+    # then cross
+    probe = (kx, start - (len(pid_by_index) - 1)
+             * balloon_pitch(ctx, dense) / 2.0)
+
+    def _fan_key(k):
+        """Where this arrow lands, as SEEN from the column.
+
+        Knees are handed out top-down, so the order has to be the order
+        the landings appear from the column — a radial fan, which cannot
+        cross itself. Ranking by the landing's height alone says nothing
+        when the parts are spread ALONG the assembly instead of up it,
+        which is exactly when the fan has to be split (two columns), so
+        that is where the angle is used."""
+        p = balloon_landing(ctx, asm_job, off, k, probe)
+        if not dense:
+            return -p[1]
+        # the x term points INWARD, away from the column, for both sides:
+        # a right-hand column looks left and a left-hand one looks right
+        return -math.atan2(p[1] - probe[1], -sgn * (p[0] - kx) or 1e-9)
+
+    ys = sorted(pid_by_index, key=_fan_key)
+    # a split fan FIXES each arrow where the fan was ordered from: the
+    # landing is otherwise recomputed for every candidate knee and slides
+    # along the part's own edge, so two leaders ordered apart end up
+    # crossing after all
+    fixed = {k: balloon_landing(ctx, asm_job, off, k, probe) for k in ys} \
+        if dense else {}
+    if dense:
+        ys = _uncross(ys, fixed, kx, start, balloon_pitch(ctx, dense))
     next_y = mx[1] + oy if start_y is None else start_y
     for rank, k in enumerate(ys):
         inst = insts[k]
@@ -3708,8 +3883,10 @@ def balloons(ctx, layout, asm_job, off, items, start_y=None, knee_x=None):
         placed = None
         for dy in [4.0 * k for k in range(0, 25)]:
             ky = next_y - ctx.mm(dy)
-            tip = balloon_landing(ctx, asm_job, off, k, (kx, ky))
-            r = layout.place([(kx, ky - brad)], 2 * brad, 2 * brad,
+            tip = fixed.get(k) or balloon_landing(ctx, asm_job, off, k,
+                                                  (kx, ky))
+            r = layout.place([(kx if sgn > 0 else kx - 2 * brad,
+                               ky - brad)], 2 * brad, 2 * brad,
                              f"balloon-{pid}-{rank}")
             if r is None:
                 layout.unresolved.pop()
@@ -3719,10 +3896,11 @@ def balloons(ctx, layout, asm_job, off, items, start_y=None, knee_x=None):
                 recs.append(mw.leader(tip, (kx, ky), "", h, props=mw.P_ANNO))
                 _claim_leader_ink(ctx, layout, tip, (kx, ky),
                                   f"balloon-{pid}-{rank}")
-                recs.append(mw.circle((kx + brad, ky), brad, mw.P_ANNO))
-                recs.append(mw.cell_text((kx + brad, ky), pid, h,
+                recs.append(mw.circle((kx + sgn * brad, ky), brad,
+                                      mw.P_ANNO))
+                recs.append(mw.cell_text((kx + sgn * brad, ky), pid, h,
                                          mw.P_ANNO))
-                next_y = ky - 2 * brad - ctx.mm(4.0)
+                next_y = ky - 2 * brad - ctx.mm(2.5 if dense else 4.0)
                 placed = r
                 break
         if placed is None:
@@ -4378,13 +4556,27 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
     # which view sits outermost right? anything leadering out of the other
     # one has to keep its band in the inter-view gap
     outer = second if projection == "right" else "front"
+    inner = "front" if projection == "right" else second
     inboard = projection in ("right", "left") and any(
         co.get("view", "front") != outer for co in callouts)
+    band_w = annotation_band_width(ctx, callouts, gdt)
+    band_gap_w = 0.0
+    if projection in ("right", "left") and inboard:
+        # BOTH views carry leaders: each gets its own column, the inner
+        # view's in the gap and the outer view's outside the group, each
+        # sized to its own callouts (issue #13). A detail view's callouts
+        # go with the outer column, which is where a detail is placed.
+        band_gap_w = annotation_band_width(ctx, callouts, gdt,
+                                           views={inner})
+        band_w = annotation_band_width(
+            ctx, callouts, gdt,
+            views={v for v in ("front", "section", "aux", "flat", "detail")
+                   if v != inner})
     offs = place_views(ctx, front, section or aux or flat, projection,
                        right_band=right_band,
                        bottom_reserve=rows_h_pre + ctx.mm(16.0),
                        top_reserve=dim_gutter(ctx, part, "front", "top"),
-                       band_w=annotation_band_width(ctx, callouts, gdt),
+                       band_w=band_w, band_gap_w=band_gap_w,
                        band_inboard=inboard, gutters=(lg, rg))
     if dx:
         offs = {k: (v[0] + dx, v[1]) for k, v in offs.items()}
@@ -4522,8 +4714,15 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
     # before the leader callouts route around them
     ctx.entities += place_angle_refs(ctx, layout, part.get("angle_refs"),
                                      view_jobs, offs, geom)
+    co_limits = {}
+    if projection in ("right", "left") and inner in view_jobs:
+        # the inner view's column ends where the outer view starts
+        omn, omx = view_jobs[outer]["bounds"]
+        oox = offs[outer if outer in offs else "section"][0]
+        co_limits[inner] = omn[0] + oox - ctx.mm(2.0)
     co_recs, co_rects, suppress, co_lands, co_anchors = place_callouts(
-        ctx, layout, callouts, view_jobs, offs, reserve=reserve)
+        ctx, layout, callouts, view_jobs, offs, reserve=reserve,
+        limits=co_limits)
     ctx.entities += co_recs
     dim_rects: dict = {}
 
@@ -4760,6 +4959,24 @@ def build_assembly_sheet(m, proj):
     row_h = mw.PARTS_ROW_H * ctx.t
     area_h = ctx.draw_area[3] - ctx.draw_area[1]
     max_rows = max(1, int(area_h * TABLE_AREA_FRAC / row_h))
+    if asm.get("balloons", True) and m.get("parts"):
+        # The balloons need column height, and on this sheet they come
+        # first: a part number with no balloon fails the sheet, while a
+        # table row has somewhere else to go. Two columns hold half the
+        # numbers each, so the table keeps what is left over and the rows
+        # it cannot keep move to the continuation sheet — the fallback
+        # that is already reported.
+        # what one column of a split fan needs: half the numbers at the
+        # dense pitch, plus the half-balloon the top one hangs above its
+        # own centre. balloon_capacity measures the same span back.
+        # one spare slot per column: a balloon that has to step past the
+        # view's own dimension text eats into the fan's budget, and a
+        # column with no slack loses the last number
+        need = ((math.ceil(len(m["parts"]) / 2.0) + 1)
+                * balloon_pitch(ctx, True)
+                + 1.4 * ctx.mm(BALLOON_TEXT_MM))
+        max_rows = max(1, min(max_rows,
+                              int((area_h - need) / row_h)))
     rows, table_report = parts_table_plan(
         m, analysis, max_rows, group_by=table.get("group_by", "none"),
         group_hardware=table.get("group_hardware"),
@@ -4769,8 +4986,21 @@ def build_assembly_sheet(m, proj):
     rows_h = row_h * len(here_rows)
 
     projection = sec_spec.get("projection", "below")
+    # will the balloon fan need BOTH sides? Decided before the views are
+    # placed, because a left-hand column has to be reserved like the
+    # right-hand one — the views give it the room.
+    brad = 1.4 * ctx.mm(BALLOON_TEXT_MM)
+    # the column sits OUTBOARD of the view's own left-hand dimension
+    # gutter: the assembly sheet dimensions its overall width and height
+    # there, and a balloon parked on a dimension is not a balloon
+    left_dim = dim_gutter(ctx, asm, "front", "left")
+    left_band = 2 * brad + ctx.mm(18.0) + left_dim
+    split_fan = bool(asm.get("balloons", True)) and len(
+        m.get("parts") or []) > balloon_capacity(
+            ctx, ctx.draw_area[3] - brad, ctx.draw_area[1] + rows_h)
     offs = place_views(ctx, front, section, projection,
                        right_band=asm.get("balloons", True),
+                       gutters=(left_band if split_fan else 0.0, 0.0),
                        bottom_reserve=rows_h + ctx.mm(36.0))
     ctx.dimstyles = sheet_dimstyles(ctx)
     layout = Layout(ctx)
@@ -4784,8 +5014,23 @@ def build_assembly_sheet(m, proj):
     # crossing leaders), so nothing else may be parked there
     band_x = max(z[2] for z in zones) + ctx.mm(16.0)
     if asm.get("balloons", True):
-        zones.append((band_x - ctx.mm(2.0), min(z[1] for z in zones),
-                      ctx.draw_area[2], max(z[3] for z in zones)))
+        # a SPLIT fan runs the whole column, from the top of the drawing
+        # area down to the table, so its band is reserved over that whole
+        # height — the pictorial box would otherwise take the top of it
+        band_lo = (ctx.draw_area[1] + rows_h) if split_fan \
+            else min(z[1] for z in zones)
+        band_hi = ctx.draw_area[3] if split_fan \
+            else max(z[3] for z in zones)
+        zones.append((band_x - ctx.mm(2.0), band_lo,
+                      ctx.draw_area[2], band_hi))
+        # the fan may need the other side too; its column is reserved
+        # here as well, or the pictorial box would take it first
+        if split_fan:
+            # only the column itself, not every millimetre left of the
+            # views: the rest of that slack is where a detail view goes
+            lx = min(z[0] for z in zones) - ctx.mm(16.0) - left_dim
+            zones.append((lx - 2 * brad - ctx.mm(2.0), band_lo,
+                          lx + ctx.mm(2.0), band_hi))
     # the parts table is claimed BEFORE the pictorial box is placed, and
     # the box is given its floor: otherwise the box slid down the bottom
     # band and its frame was drawn straight across the table's upper rows
@@ -4886,15 +5131,57 @@ def build_assembly_sheet(m, proj):
         by_view: dict = {}
         for pid, (view, k) in plan.items():
             by_view.setdefault(view, []).append((k, disp_no(pid)))
-        next_y = None
+        # ONE column while it holds them all; otherwise one each side of
+        # the view, every balloon on the side its own part sits on. 26
+        # numbers need about 360 mm of column and A3 landscape has 290.
+        # a fan beside the views may use the whole drawing area's height,
+        # not only the part of it the views happen to occupy
+        top = ctx.draw_area[3] - 1.4 * ctx.mm(BALLOON_TEXT_MM)
+        floor = ctx.draw_area[1] + rows_h
+        cap = balloon_capacity(ctx, top, floor, dense=True)
+        # the knee of the left column: the balloon itself sits further
+        # left again, so the view has to have left room for both
+        left_x = min(j["bounds"][0][0] + offs[v][0]
+                     for v, j in views.items()) - ctx.mm(16.0) - left_dim
+        columns = {"right": band_x, "left": left_x}
+        sides = balloon_sides(ctx, all_views, all_offs, by_view,
+                              balloon_capacity(ctx, top, floor), columns)
+        if sides:                       # a split fan packs closer
+            sides = balloon_sides(ctx, all_views, all_offs, by_view, cap,
+                                  columns)
+        if sides:
+            per = {"left": 0, "right": 0}
+            for sd in sides.values():
+                per[sd] += 1
+            if max(per.values()) > cap:
+                full = max(per, key=lambda k: per[k])
+                layout.unresolved.append(
+                    f"balloons: the {full} column has {per[full]} numbers "
+                    f"and room for {cap} — even with both sides in use "
+                    f"{sum(per.values())} balloons need more column than "
+                    "this sheet has; use a bigger sheet or balloon fewer "
+                    "part numbers per view")
+        # a single column keeps starting level with the view (every sheet
+        # drawn so far); a split one starts at the top of the area, where
+        # the room it needs is
+        next_y = {"left": top, "right": top} if sides \
+            else {"left": None, "right": None}
         for view in sorted(by_view, key=lambda v: (v != "front", v)):
-            recs, next_y = balloons(ctx, layout, all_views[view],
-                                    all_offs[view], by_view[view],
-                                    start_y=next_y, knee_x=band_x)
-            ctx.entities += recs
+            for sd in ("right", "left"):
+                items = [it for it in by_view[view]
+                         if sides.get((view, it[0]), "right") == sd]
+                if not items:
+                    continue
+                recs, next_y[sd] = balloons(
+                    ctx, layout, all_views[view], all_offs[view], items,
+                    start_y=next_y[sd], knee_x=columns[sd], side=sd,
+                    dense=bool(sides))
+                ctx.entities += recs
         missing = [p["part_id"] for p in m["parts"]
                    if str(p["part_id"]) not in plan]
         balloon_report = {"ballooned": {k: v[0] for k, v in plan.items()},
+                          "columns": 2 if sides else 1,
+                          "capacity_per_column": cap,
                           "not_shown": missing}
         for pid in missing:
             # a part number with nowhere to point is a parts table that does
@@ -4966,6 +5253,8 @@ def main() -> None:
         value_findings += [f"{part['drg_no']}: {ln}"
                            for ln in verify.report(live)]
         sheets.append({"values": live, "values_waived": done,
+                       "template_problems": list(
+                           getattr(ctx, "field_overflow", [])),
                        "file": str(out), "drg_no": part["drg_no"],
                        "description": part["description"],
                        "scale": part["scale"], "window": ctx.window,
@@ -4995,6 +5284,8 @@ def main() -> None:
             asm_out = OUTPUT_MUSA_DIR / f"{drg}{suffix}.musa"
             asm_out.write_text(ctx.render())
             entry = {"file": str(asm_out), "drg_no": drg,
+                     "template_problems": list(
+                         getattr(ctx, "field_overflow", [])),
                      "description": asm["description"],
                      "scale": asm["scale"], "window": ctx.window,
                      "paper": ctx.paper, "orientation": ctx.orientation,

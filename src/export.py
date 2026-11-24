@@ -35,6 +35,8 @@ def main() -> None:
     # the export — a dropped tolerance reaches the vendor otherwise.
     bad = []
     for sheet in meta["sheets"]:
+        for t in sheet.get("template_problems") or []:
+            bad.append(f"{sheet['drg_no']}: TITLE BLOCK: {t}")
         for f in sheet.get("values") or []:
             bad.append(f"{sheet['drg_no']}: {f['kind'].upper()}: {f['what']}"
                        + (f" — the sheet prints {f['found']!r}"
@@ -69,6 +71,17 @@ def main() -> None:
             if not Path(lg["png"]).exists():
                 die(f"{sheet['drg_no']}: title block logo missing: {lg['png']}")
             extra.append((lg["png"], *lg["rect"]))
+        # a stamp outside the sheet's own window is drawn nowhere and
+        # nothing downstream reads it, so the sheet would go out with the
+        # logo or the pictorial simply missing (issue #15)
+        win = sheet.get("window")
+        for png, x, y, w, h in extra + ([stamp] if stamp else []):
+            if win and (x < -0.01 or y < -0.01
+                        or x + w > win[2] + 0.01 or y + h > win[3] + 0.01):
+                die(f"{sheet['drg_no']}: the stamp {Path(png).name} lands "
+                    f"at ({x:.1f}, {y:.1f}) {w:.1f}x{h:.1f}, outside the "
+                    f"sheet ({win[2]:.1f}x{win[3]:.1f}) — it would print "
+                    "nowhere")
         paper = sheet.get("paper", "A4")
         orient = sheet.get("orientation", "portrait")
         info = run_musa_plot(Path(sheet["file"]), pdf,

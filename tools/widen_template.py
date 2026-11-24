@@ -88,11 +88,12 @@ def widen(src: Path, dst: Path, paper="A3", orientation="landscape") -> dict:
     dst.write_text(widen_text(src.read_text(), dx, dy))
     side = src.with_name(src.stem + ".logo.json")
     if side.exists():
-        lg = json.loads(side.read_text())
-        x0, y0, x1, y1 = (float(v) for v in lg["box"])
-        lg["box"] = [x0 + dx, y0 + dy, x1 + dx, y1 + dy]
+        # the box is copied UNMOVED, in the A4 title block's own units:
+        # SheetContext.logo_stamp moves a title-block x with the right
+        # edge itself, and a box written already moved is moved twice and
+        # prints off the sheet (issue #15)
         (dst.parent / (dst.stem + ".logo.json")).write_text(
-            json.dumps(lg, indent=1) + "\n")
+            json.dumps(json.loads(side.read_text()), indent=1) + "\n")
     return {"dx": dx, "dy": dy, "paper": paper, "orientation": orientation}
 
 

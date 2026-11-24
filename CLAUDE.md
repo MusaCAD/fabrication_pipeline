@@ -214,6 +214,22 @@ co-author line to git commits.
     share ONE knee column, so the leaders cannot cross between views. A
     P.NO. no view shows fails the sheet: the table would claim a part the
     drawing does not point at.
+    TWO COLUMNS when one cannot hold them: 26 numbers need about 360 mm
+    of column and the A3-landscape drawing area is 190 mm, so the fan
+    splits, one column each side of the view (draw.balloon_sides). Each
+    balloon goes to the side its own ARROW is nearer — probed through
+    balloon_landing itself — and the ones nearest the centre line move
+    over when a side is full (_rebalance), because a part out at the edge
+    cannot change sides without its leader crossing the view. A split fan
+    starts at the top of the drawing area rather than at the view, packs
+    at the dense pitch, FIXES each landing where the fan was ordered from,
+    and is ordered by the angle each landing subtends at the fan's middle,
+    then settled by exchanging any neighbours that would still cross
+    (draw._uncross). The parts table gives way to it — the rows it cannot
+    keep go to the continuation sheet, which is reported — because a
+    missing balloon fails the sheet while a table row has somewhere else
+    to go. If two columns still cannot hold them, the sheet says so with
+    the counts.
   - `parts_table` {group_by: none|sub_assembly, group_hardware, total}.
     Grouped by sub-assembly it uses the v0.5.0 tree: a heading row per
     sub-assembly carrying its own quantity, then its parts, then a TOTAL
@@ -351,6 +367,26 @@ co-author line to git commits.
   notes block draws bottom-up). /draw prints and records them; /export
   REFUSES to run on any that is not waived by an explicit manifest
   `"value_waivers"` entry.
+- SIDE-BY-SIDE SECTIONS (issue #13): with `projection: right|left` and
+  leaders on BOTH views, each view gets its OWN callout column — the
+  inner view's in the inter-view gap, the outer view's outside the group
+  — each sized to its own callouts (annotation_band_width(views=...)),
+  both reserved by place_views (`band_gap_w` + `band_w`) and the group
+  centred with both. The inner column wraps to the gap, not to the sheet
+  edge (place_callouts `limits`). When the columns genuinely do not fit,
+  the failure names THEM and their widths: the views fit, and the fix is
+  a shorter callout, the other view, or a bigger sheet — not the scale,
+  which is what the old message said.
+- TEMPLATE INTEGRITY (issue #15): a title block's own elements have to be
+  on the sheet. mw.template_elements_off_sheet checks every field and the
+  logo box against the template's extents, AND where the logo really
+  stamps — on a widened paper the box travels with the right edge
+  (SheetContext.fx), so a box already moved by the widening is moved
+  twice and lands off the paper. tools/widen_template.py therefore copies
+  the sidecar box UNMOVED, in the A4 template's own units. A field whose
+  text is wider than the box the template drew for it is recorded per
+  sheet (SheetContext.field_overflow) and /export refuses it, as it
+  refuses a stamp that lands outside the sheet window.
 - Layout quality (hard, enforced in draw.py + qa-checker): view group
   centered horizontally and vertically balanced in the drawing area; ZERO
   overlaps (dim text vs geometry, dim vs dim, leaders vs views) and ZERO

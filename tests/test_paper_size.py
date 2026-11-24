@@ -15,6 +15,7 @@ The A3 title block is the A4 one WIDENED (tools/widen_template.py), so the
 pipeline measures the widening from the file and needs nothing restated.
 """
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -291,6 +292,124 @@ class ExportPaperTest(unittest.TestCase):
                  export.run_musa_plot, export.subprocess.run) = saved
         self.assertEqual(calls, [("A.musa", "A4", "portrait"),
                                  ("B.musa", "A3", "landscape")])
+
+
+class LogoOnAWidenedSheetTest(unittest.TestCase):
+    """The logo box is moved ONCE (issue #15): widen_template.py copies it
+    in the A4 title block's units and SheetContext.logo_stamp moves it
+    with the right edge. Moved at both ends, it printed off the sheet."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fabpipe-logo-")
+        self.dir = Path(self.tmp.name)
+        self.src = self.dir / "t.musa"
+        self.src.write_text(common.TEMPLATE.read_text())
+        # a 100x50 PNG is enough: only its IHDR is read
+        self.png = self.dir / "logo.png"
+        self.png.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            + (100).to_bytes(4, "big") + (50).to_bytes(4, "big"))
+        self.box = [850.969297, 346.0, 912.969297, 408.0]
+        (self.dir / "t.logo.json").write_text(
+            json.dumps({"png": "logo.png", "box": self.box}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def widened(self):
+        dst = self.dir / "t_a3l.musa"
+        widen_template.widen(self.src, dst, "A3", "landscape")
+        return dst
+
+    def test_the_sidecar_box_is_copied_unmoved(self):
+        self.widened()
+        got = json.loads((self.dir / "t_a3l.logo.json").read_text())
+        self.assertEqual([round(v, 6) for v in got["box"]],
+                         [round(v, 6) for v in self.box])
+
+    def test_the_logo_lands_inside_the_wider_sheet(self):
+        dst = self.widened()
+        geom = mw.template_geom(dst)
+        ctx = mw.SheetContext(1, 5, geom=geom, template=dst)
+        st = ctx.logo_stamp()
+        self.assertIsNotNone(st)
+        x, y, w, h = st["rect"]
+        self.assertGreaterEqual(x, 0.0)
+        self.assertLessEqual(x + w, ctx.window[2],
+                             "the logo prints off the sheet")
+        self.assertLessEqual(y + h, ctx.window[3])
+
+    def test_it_sits_where_the_title_block_moved_to(self):
+        dst = self.widened()
+        geom = mw.template_geom(dst)
+        wide = mw.SheetContext(1, 5, geom=geom, template=dst)
+        narrow = mw.SheetContext(1, 5, template=self.src)
+        # the box travels with the right edge, by the widening and no more
+        shift = geom["widen"][0] * wide.t
+        self.assertAlmostEqual(wide.logo_stamp()["rect"][0]
+                               - narrow.logo_stamp()["rect"][0],
+                               shift, places=6)
+
+    def test_the_lock_catches_a_box_given_in_the_wrong_units(self):
+        """The pre-fix state: a sidecar whose box was already moved by the
+        widening. The box still looks like it is on the sheet; it is where
+        it STAMPS that is off the paper."""
+        dst = self.widened()
+        dx = mw.template_geom(dst)["widen"][0]
+        moved = [self.box[0] + dx, self.box[1], self.box[2] + dx,
+                 self.box[3]]
+        (self.dir / "t_a3l.logo.json").write_text(
+            json.dumps({"png": "logo.png", "box": moved}))
+        mw._GEOM_CACHE.clear()
+        bad = " ".join(mw.template_problems(dst))
+        self.assertIn("off the paper", bad)
+        self.assertIn("A4 template's own units", bad)
+
+    def test_every_template_element_must_be_on_the_sheet(self):
+        """The frame's own lines ARE the sheet, so what this catches is a
+        field placed off it — text is not part of the extents."""
+        stray = self.dir / "stray.musa"
+        stray.write_text(common.TEMPLATE.read_text().replace(
+            "END\n",
+            "MTEXT 9000.0 50.0 0.0 12.0 0.0 1.0 1.0 0 0 7 255 255 255 0 25\n"
+            "STRAY FIELD\n\nEND\n"))
+        bad = " ".join(mw.template_problems(stray))
+        self.assertIn("outside the sheet", bad)
+        self.assertIn("MTEXT", bad)
+
+    def test_a_field_wider_than_its_box_is_reported(self):
+        ctx = mw.SheetContext(1, 1, template=self.src)
+        ctx.add_template({"DESCRIPTION: \nCONNECTING CHAMBER":
+                          "DESCRIPTION: \n" + "X" * 120})
+        self.assertTrue(ctx.field_overflow)
+        self.assertIn("in a", ctx.field_overflow[0])
+
+    def test_a_field_that_fits_is_not_reported(self):
+        ctx = mw.SheetContext(1, 1, template=self.src)
+        ctx.add_template({"DESCRIPTION: \nCONNECTING CHAMBER":
+                          "DESCRIPTION: \nHEAD PLUG"})
+        self.assertEqual(ctx.field_overflow, [])
+
+    def test_a_stamp_off_the_sheet_stops_the_export(self):
+        import export
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            musa = tmp / "musa"
+            musa.mkdir()
+            sheet = {"file": str(musa / "A.musa"), "drg_no": "A",
+                     "description": "A", "scale": "1:1",
+                     "window": [0, 0, 100, 100], "kind": "part",
+                     "logo": {"png": str(self.png),
+                              "rect": [500.0, 10.0, 40.0, 20.0]}}
+            Path(sheet["file"]).write_text("MUSACAD 14\nEND\n")
+            common.write_json(musa / "sheets.json", {"sheets": [sheet]})
+            saved = (export.OUTPUT_MUSA_DIR, export.OUTPUT_PDF_DIR)
+            export.OUTPUT_MUSA_DIR, export.OUTPUT_PDF_DIR = musa, tmp / "pdf"
+            try:
+                with self.assertRaises(SystemExit):
+                    export.main()
+            finally:
+                (export.OUTPUT_MUSA_DIR, export.OUTPUT_PDF_DIR) = saved
 
 
 class PlotCommandTest(unittest.TestCase):

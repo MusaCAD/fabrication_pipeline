@@ -65,7 +65,8 @@ printed size on every sheet and all the extra paper going to the drawing.
 - Per assembly: NTS isometric HLR wireframe (or an orthographic view with
   a section, hatched part by part so neighbours can be told apart and
   leaving shafts, screws and pins uncut), enlarged detail views, one
-  circled balloon per part number across the whole sheet, a parts table
+  circled balloon per part number across the whole sheet — in two columns,
+  one each side of the view, when one cannot hold them all — a parts table
   that can be grouped by sub-assembly with quantities per group and in
   total, and build notes. Sub-assemblies are followed to the real parts at
   any depth, so the table counts each part across every sub-assembly that
