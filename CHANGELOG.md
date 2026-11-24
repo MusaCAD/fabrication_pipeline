@@ -5,6 +5,101 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.10.0 — 2026-11-24
+
+Both open layout limits, and a regression of my own from v0.8.0:
+[#13](https://github.com/MusaCAD/fabrication_pipeline/issues/13),
+balloons on both sides of an assembly view, and
+[#15](https://github.com/MusaCAD/fabrication_pipeline/issues/15).
+
+### Fixed
+
+- **A side-by-side section's own callouts had nowhere to land** (#13).
+  With `"projection": "right"` (or `"left"`) and leaders on BOTH views,
+  the front view's callouts opened the inter-view gap and nothing was
+  reserved outside the group, so a callout on the section came out as
+  `callout-<text>` in `unresolved` — and when the gap was capped the
+  sheet died with "views exceed drawing area; pick a smaller scale",
+  though the views fitted. Each view now gets its OWN column: the inner
+  view's in the gap and the outer view's outside the group, each sized
+  to its own callouts (`annotation_band_width(views=...)`), both
+  reserved by `place_views` (`band_gap_w` beside `band_w`), with the
+  group centred on both. The inner column wraps to the gap rather than
+  to the sheet edge. When the columns genuinely do not fit, the message
+  names them and their widths — the fix is a shorter callout, the other
+  view, or a bigger sheet.
+- **The logo printed off a widened sheet** (#15, a regression from
+  v0.8.0). `tools/widen_template.py` wrote the new template's sidecar
+  with the logo box already moved by the widening, and
+  `SheetContext.logo_stamp` moved it again with `fx()`: on A3 landscape
+  made from the A4 template the stamp landed at x ≈ 570 mm on a 420 mm
+  sheet, so the sheet went out with the vector mark in the logo box and
+  no logo image, and nothing noticed. The box is now copied UNMOVED, in
+  the A4 template's own units, and the pipeline moves it exactly once.
+
+### Added
+
+- **Balloons on both sides of an assembly view.** One knee column holds
+  about twenty balloons on a 190 mm drawing area; 26 part numbers need
+  around 360 mm and failed one `balloon-<pid>` at a time. The fan now
+  splits into two columns, one each side of the view
+  (`draw.balloon_sides`), each balloon on the side its own ARROW is
+  nearer — probed through `balloon_landing` itself — with the ones
+  nearest the centre line moving over when a side is full
+  (`_rebalance`), since a part out at the edge cannot change sides
+  without its leader crossing the view. One balloon per P.NO. as before.
+
+  Keeping the leaders from crossing took three things beyond the split: a
+  split fan FIXES each landing where the fan was ordered from (it
+  otherwise slides along the part's own edge as the knee moves), orders
+  by the angle each landing subtends at the fan's MIDDLE (measured at the
+  top, two landings of similar height order on a rounding), and then
+  settles by exchanging any neighbours that would still cross
+  (`_uncross`). A split fan also starts at the top of the drawing area
+  rather than level with the view, and packs at a denser pitch — 2.5 mm
+  between balloons instead of 4.
+
+  The parts table gives way to the fan: the rows it cannot keep go to the
+  continuation sheet, the fallback that was already reported. A missing
+  balloon fails the sheet, while a table row has somewhere else to go. If
+  two columns still cannot hold them, the sheet says so with the counts
+  rather than dropping numbers.
+- **The title block is checked against its own sheet** (#15).
+  `mw.template_elements_off_sheet` checks every field and the logo box
+  against the template's extents, and where the logo really stamps — so
+  the lock catches a box given in the wrong units, with a message that
+  names the fix. A field whose text is wider than the box the template
+  drew for it is recorded per sheet (`SheetContext.field_overflow`), and
+  `/export` refuses it — as it now refuses any stamp that lands outside
+  the sheet window, which is the one failure neither the export nor the
+  value check could see before, because a stamp off the paper is drawn
+  nowhere at all.
+
+### Upgrade steps
+
+1. `git -C <your pipeline clone> fetch --tags && git checkout v0.10.0`
+2. **If you worked around #15 by entering the A3 logo box in the A4
+   template's units, that IS the convention now — but regenerate the
+   template so the two agree:**
+   `python3 tools/widen_template.py <a4>.musa <a3l>.musa --paper A3
+   --landscape`, which copies the sidecar unmoved. If you hand-edited
+   the sidecar, leave it in A4 units; the lock will tell you if it is
+   wrong, and `/export` will stop before a logo prints off the sheet.
+3. Nothing to change for #13 or the balloons: both are in the placement
+   engine. Re-run `/draw`. An assembly sheet with more part numbers than
+   one column can hold will now report `columns: 2` in sheets.json and
+   may move more table rows to the continuation sheet — that is the fan
+   taking the room it needs.
+
+### Compatibility
+
+Every sheet of four real sets — eleven sslxbt part sheets, the TPE
+assembly and its parts, amogha RES-41-LH-01 and
+`samples/out/RES-SAMPLE-01` — redraws byte for byte, and the value check
+(#14) is clean across the live set. A sheet whose balloons fit one column
+keeps the single fan it has always had, and a sheet with leaders on only
+one view of a side-by-side pair keeps its single column.
+
 ## v0.9.0 — 2026-11-24
 
 Two drawing conventions a real set needed, and the check that should have
