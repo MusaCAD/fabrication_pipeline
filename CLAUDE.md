@@ -304,7 +304,14 @@ composition/rework), qa-checker (verify PDFs after every /export).
   then a draft), and its own suggestion only when no manifest exists;
   manifest.py lock re-runs the same check (judge.thin_feature_finding), so
   a scale chosen at /finalise that is still too thin does not lock without
-  a waiver, and one raised far enough needs no waiver at all.
+  a waiver, and one raised far enough needs no waiver at all. A part with
+  `sheet: false` is judged at the scale of the sheet that DOES draw it —
+  the sibling sheet whose DRG NO. it carries, e.g. a kit disc on the kit's
+  2:1 sheet — and one no sheet draws at all (a bought-out item) is not
+  judged for legibility: nothing is drawn, so no scale could clear it.
+  judge.sheet_scales/not_drawn decide both, and the lock calls the same
+  two, so /judge and /finalise never disagree about a part's scale
+  (issue #8).
 - Out of scope (Round 0): 3D-print workflows, CAM/G-code, BOM costing,
   other model folders. GD&T IS in scope (amended at /finalise, Round 0):
   drawings must be vendor-publishable — measurable datum labels + feature

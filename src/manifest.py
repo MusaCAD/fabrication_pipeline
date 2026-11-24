@@ -431,11 +431,13 @@ def thin_feature_problems(m: dict) -> list[str]:
     bodies = {p["file"]: p["bodies"][0] for p in read_json(src).get("parts", [])
               if p.get("bodies")}
     out = []
+    # the scale of the sheet each part is DRAWN on — its own, or, for a
+    # part with no sheet of its own, that of the sibling sheet whose DRG
+    # NO. it carries. /judge resolves it the same way (issue #8).
+    scales = judge.sheet_scales(m.get("parts", []))
     for part in m.get("parts", []):
-        if not part.get("sheet", True):
-            continue
         body = bodies.get(part.get("file"))
-        sc = judge.parse_scale(part.get("scale"))
+        sc = scales.get(part.get("file"))
         if body is None or sc is None:
             continue
         msg = judge.thin_feature_finding(body["bbox_size"], sc, "sheet scale")

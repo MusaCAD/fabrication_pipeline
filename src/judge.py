@@ -60,21 +60,64 @@ def thin_feature_finding(bbox_size, scale, source="") -> str | None:
             f"{scale[0]}:{scale[1]}{where} — check legibility")
 
 
-def manifest_scales(path: Path) -> dict:
-    """part file -> (num, den) from a manifest draft or a locked one."""
-    if not path.exists():
-        return {}
-    out = {}
-    for part in read_json(path).get("parts", []):
+def sheet_scales(parts: list) -> dict:
+    """part file -> (num, den) of the sheet that part is DRAWN on.
+
+    A part with `sheet: false` has no sheet of its own. It is either drawn
+    on a sibling's sheet — one of a kit of discs shown on the kit's sheet,
+    carrying that sheet's DRG NO. — in which case it is judged at THAT
+    sheet's scale, or it is bought out and nothing is drawn for it at all,
+    in which case there is no scale to judge it at and it is left out
+    (issue #8). manifest.py's lock resolves it the same way, so /judge and
+    the lock never disagree about a part's scale.
+    """
+    own = {}
+    for part in parts:
         sc = parse_scale(part.get("scale"))
         if sc and part.get("file") and part.get("sheet", True):
-            out[part["file"]] = sc
+            own[part["file"]] = sc
+    by_drg = {}
+    for part in parts:
+        if part.get("sheet", True) and part.get("drg_no"):
+            by_drg.setdefault(str(part["drg_no"]),
+                              parse_scale(part.get("scale")))
+    out = dict(own)
+    for part in parts:
+        if part.get("sheet", True) or not part.get("file"):
+            continue
+        host = by_drg.get(str(part.get("drg_no") or ""))
+        if host:
+            out[part["file"]] = host
     return out
 
 
-def judge_part(part: dict, generated: str = "", sheet_scale=None) -> dict:
+def not_drawn(parts: list) -> set:
+    """The part files a manifest draws NOWHERE: `sheet: false`, and no
+    other part's sheet carries their DRG NO. (issue #8)."""
+    have = sheet_scales(parts)
+    return {p["file"] for p in parts
+            if p.get("file") and not p.get("sheet", True)
+            and p["file"] not in have}
+
+
+def manifest_parts(path: Path) -> list:
+    """The parts of a manifest draft or a locked one ([] if there is none)."""
+    return read_json(path).get("parts", []) if path.exists() else []
+
+
+def manifest_scales(path: Path) -> dict:
+    """part file -> (num, den) from a manifest draft or a locked one."""
+    return sheet_scales(manifest_parts(path))
+
+
+def judge_part(part: dict, generated: str = "", sheet_scale=None,
+               drawn: bool = True) -> dict:
     """`sheet_scale` is the scale the manifest draws this part at, when a
-    manifest exists; the suggested scale is used only when it does not."""
+    manifest exists; the suggested scale is used only when it does not.
+    `drawn` is False for a part the manifest draws NOWHERE (a bought-out
+    item): legibility is a property of a drawing, and a part that has none
+    gets no thin-feature warning, since no scale could ever clear it
+    (issue #8)."""
     findings, level = [], "PASS"
 
     def flag(sev: str, msg: str):
@@ -123,7 +166,7 @@ def judge_part(part: dict, generated: str = "", sheet_scale=None) -> dict:
         flag("FAIL", f"part {w:g}x{h:g}x{d:g} mm fits no standard scale "
                      f"({', '.join(f'{n}:{dn}' for n, dn in STANDARD_SCALES)})"
                      " — needs sheet split")
-    used = sheet_scale or sc
+    used = sheet_scale or (sc if drawn else None)
     if used is not None:
         msg = thin_feature_finding(
             b["bbox_size"], used,
@@ -218,12 +261,18 @@ def main() -> None:
     asm = a["assembly"]
     # the sheet's own scale beats the suggestion: a locked manifest first,
     # then a draft under review at /finalise (issue #4)
-    scales = manifest_scales(MANIFESTS_DIR / "manifest.json") \
-        or manifest_scales(MANIFESTS_DIR / "manifest_draft.json")
+    mparts = manifest_parts(MANIFESTS_DIR / "manifest.json") \
+        or manifest_parts(MANIFESTS_DIR / "manifest_draft.json")
+    scales = sheet_scales(mparts)
+    undrawn = not_drawn(mparts)
     if scales:
         print(f"judging thin features at the manifest's sheet scales "
-              f"({len(scales)} parts)")
-    parts = [judge_part(p, generated, scales.get(p["file"])) for p in a["parts"]]
+              f"({len(scales)} parts"
+              + (f", {len(undrawn)} drawn on no sheet" if undrawn else "")
+              + ")")
+    parts = [judge_part(p, generated, scales.get(p["file"]),
+                        drawn=p["file"] not in undrawn)
+             for p in a["parts"]]
     asm_findings = assembly_findings(asm)
     overall = "PASS"
     for v in [p["verdict"] for p in parts] + \
