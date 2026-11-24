@@ -199,6 +199,17 @@ co-author line to git commits.
     "SHEET 2 OF 2") — and the one actually used is REPORTED, in the /draw
     log and in sheets.json `assembly_report`. Text is never shrunk below
     musa_writer.PARTS_TEXT_FLOOR; a cell that cannot fit fails the sheet.
+    QUANTITIES come from `part_usage`, ONCE (issue #9): one row per P.NO.
+    whatever the grouping, its QTY the part's own usage count
+    (draw.group_usage counts instance PATHS, so four O-rings in one
+    sub-assembly are one row of four, not four rows); a heading row states
+    the SUB-ASSEMBLY's own quantity (draw.sub_assembly_qty) and carries no
+    item number; a part used under more than one sub-assembly is listed
+    once under COMMON_GROUP and a top-level part under TOP_GROUP, so no
+    row is ever counted twice; a hardware group row lists each P.NO. once
+    and only exists for two or more of a kind; and TOTAL is the sum of the
+    rows. manifest.quantity_problems fails the lock when a manifest qty
+    has drifted from the model's.
   - Defaults are the old sheet exactly: no section, no details, an
     ungrouped table, so an existing assembly sheet redraws unchanged.
 - THREADS: model the REAL helix in the .FCStd (PartDesign::SubtractiveHelix,

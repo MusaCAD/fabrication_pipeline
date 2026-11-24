@@ -57,7 +57,11 @@ composition), `qa-checker` (21-point output verification, render-and-inspect).
   that can be grouped by sub-assembly with quantities per group and in
   total, and build notes. Sub-assemblies are followed to the real parts at
   any depth, so the table counts each part across every sub-assembly that
-  uses it and the balloons find it. A table too long for the sheet groups
+  uses it and the balloons find it. Every quantity comes from the model's
+  own usage count, once: one row per part number, a heading row stating
+  the sub-assembly's own quantity, and a part shared between
+  sub-assemblies listed once in a common section rather than counted in
+  each. A table too long for the sheet groups
   bought-out hardware by kind, then continues on a second sheet — and says
   which fallback it used. Bought-out items (`"sheet": false` in the manifest)
   take a P.NO. row and a balloon but no sheet of their own.

@@ -415,6 +415,29 @@ def assembly_sheet_problems(m: dict) -> list[str]:
     return out
 
 
+def quantity_problems(m: dict) -> list[str]:
+    """Every part's QTY is what the model uses it (issue #9).
+
+    The parts table counts from `part_usage`, so a manifest quantity that
+    has drifted from the model would state one number in the balloon's row
+    and another everywhere else. Reported at the lock, where it can still
+    be put right."""
+    src = REPORTS_DIR / "analysis.json"
+    if not src.exists():
+        return []
+    usage = (read_json(src).get("assembly") or {}).get("part_usage") or {}
+    if not usage:
+        return []
+    out = []
+    for part in m.get("parts", []):
+        used = (usage.get(part.get("file")) or {}).get("qty")
+        if used is not None and part.get("qty") != used:
+            out.append(f"{part.get('file')}: qty {part.get('qty')} but the "
+                       f"assembly uses it {used} time"
+                       f"{'s' if used != 1 else ''}")
+    return out
+
+
 def thin_feature_problems(m: dict) -> list[str]:
     """Re-run the thin-feature check at the scale the manifest actually
     draws each part at (issue #4).
@@ -500,6 +523,7 @@ def lock(draft_path: Path) -> None:
         problems += detail_problems(part)
         problems += gdt_problems(part, str(part.get("file")))
     problems += thin_feature_problems(m)
+    problems += quantity_problems(m)
     problems += assembly_sheet_problems(m)
     if m.get("template"):
         problems += mw.template_problems(m["template"])

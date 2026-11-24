@@ -3633,19 +3633,56 @@ def balloon_plan(m, views, id_by_path):
 TABLE_AREA_FRAC = 0.55      # most of the drawing area a table may occupy
 
 
-def _group_of(part, analysis, m):
-    """The sub-assembly a part belongs to on the sheet: the TOP-LEVEL
-    instance path it is used under, labelled as the tree labels it."""
+COMMON_GROUP = "COMMON TO SUB-ASSEMBLIES"
+TOP_GROUP = "TOP LEVEL"
+
+
+def _top_labels(analysis) -> dict:
+    # an analysis written before v0.5.0 has names, not paths
+    return {(n.get("path") or n.get("name", "")):
+            n.get("label") or n.get("path") or n.get("name", "")
+            for n in fc_tree.flatten(analysis["assembly"].get("instances")
+                                     or [])}
+
+
+def group_usage(part, analysis) -> dict:
+    """{sub-assembly label: how many of this part are used under it}.
+
+    Counted once per INSTANCE PATH, so a part used four times inside one
+    sub-assembly counts four there (not once in four groups, which is how
+    an O-ring with qty 4 came out as qty 16 — issue #9), and the totals
+    add up to part_usage's own qty. "" is the top level."""
     usage = analysis["assembly"].get("part_usage") or {}
     paths = (usage.get(part["file"]) or {}).get("used_in") or []
-    labels = {n["path"]: n.get("label", n["path"])
-              for n in fc_tree.flatten(analysis["assembly"]["instances"])}
-    tops = []
+    if not paths:
+        return {}
+    labels = _top_labels(analysis)
+    out: dict = {}
     for path in paths:
         head = path.split("/")[0]
-        if head != path:                 # inside a sub-assembly
-            tops.append(labels.get(head, head))
-    return tops
+        g = "" if head == path else labels.get(head, head)
+        out[g] = out.get(g, 0) + 1
+    return out
+
+
+def sub_assembly_qty(analysis) -> dict:
+    """{label: how many times that top-level sub-assembly is used} — the
+    quantity a heading row states. It is the sub-assembly's OWN count, not
+    the number of parts or instances under it (issue #9)."""
+    out: dict = {}
+    for n in fc_tree.flatten(analysis["assembly"]["instances"]):
+        path = n.get("path") or n.get("name", "")
+        if "/" in path or n.get("kind") != "assembly":
+            continue
+        label = n.get("label", path)
+        out[label] = out.get(label, 0) + 1
+    return out
+
+
+def _group_of(part, analysis, m):
+    """The sub-assembly labels a part is used under (one entry per use)."""
+    counts = group_usage(part, analysis)
+    return [g for g, n in counts.items() if g for _ in range(n)]
 
 
 def hardware_kind(part):
@@ -3669,34 +3706,64 @@ def parts_table_plan(m, analysis, max_rows, group_by="none",
     """
     parts = list(m["parts"])
     report = {"fallbacks": [], "rows": 0, "sheets": 1}
+    head_qty = sub_assembly_qty(analysis) if group_by == "sub_assembly" \
+        else {}
+
+    def qty_of(part):
+        """How many of this part the ASSEMBLY uses — once, from part_usage,
+        whatever grouping the table ends up with (issue #9). The manifest's
+        own count stands in when the analysis predates part_usage."""
+        counts = group_usage(part, analysis)
+        return sum(counts.values()) if counts else part.get("qty", 1)
+
+    def home_of(part):
+        """The ONE section this part's row belongs in. A part used under
+        several sub-assemblies is listed once, in a common section: a row
+        per (part, sub-assembly) would count it twice over."""
+        if group_by != "sub_assembly":
+            return ""
+        named = [g for g in group_usage(part, analysis) if g]
+        if not named:
+            return TOP_GROUP
+        if len(named) == 1 and len(group_usage(part, analysis)) == 1:
+            return named[0]
+        return COMMON_GROUP
 
     def build(group_hw):
-        rows, used = [], set()
-        groups = {}
-        if group_by == "sub_assembly":
-            for part in parts:
-                for g in _group_of(part, analysis, m) or [""]:
-                    groups.setdefault(g, []).append(part)
-        else:
-            groups[""] = parts
-        for name in sorted(groups, key=lambda g: (g == "", g)):
+        rows = []
+        groups: dict = {}
+        for part in parts:
+            groups.setdefault(home_of(part), []).append(part)
+        # named sub-assemblies first, then the parts no single one owns;
+        # every row sits under a heading that says what it belongs to
+        order = sorted(g for g in groups if g not in ("", COMMON_GROUP,
+                                                      TOP_GROUP))
+        order += [g for g in (COMMON_GROUP, TOP_GROUP, "") if g in groups]
+        for name in order:
             members = groups[name]
-            if name:
+            if name and (len(order) > 1 or name not in (COMMON_GROUP,
+                                                        TOP_GROUP)):
                 rows.append({"kind": "head", "text": name,
-                             "qty": sum(p["qty"] for p in members)})
+                             "qty": head_qty.get(name)})
             hw, rest = [], []
             for part in members:
                 (hw if group_hw and not part.get("sheet", True)
                  else rest).append(part)
             for part in rest:
-                rows.append({"kind": "part", "part": part})
-                used.add(part["part_id"])
-            kinds = {}
+                rows.append({"kind": "part", "part": part,
+                             "qty": qty_of(part)})
+            kinds: dict = {}
             for part in hw:
                 kinds.setdefault(hardware_kind(part), []).append(part)
             for kind, members_hw in kinds.items():
+                if len(members_hw) == 1:
+                    # one P.NO. of a kind is just that part's own row —
+                    # "1 ITEMS" against a single number says nothing
+                    rows.append({"kind": "part", "part": members_hw[0],
+                                 "qty": qty_of(members_hw[0])})
+                    continue
                 rows.append({"kind": "group", "parts": members_hw,
-                             "qty": sum(p["qty"] for p in members_hw)})
+                             "qty": sum(qty_of(p) for p in members_hw)})
         return rows
 
     rows = build(bool(group_hardware))
@@ -3709,8 +3776,12 @@ def parts_table_plan(m, analysis, max_rows, group_by="none",
     # a TOTAL row belongs to a GROUPED table ("quantities per group and in
     # total"); an ungrouped one is the plain list it has always been
     if total or (total is None and any(r["kind"] == "head" for r in rows)):
+        # the sum of the rows, which is the sum of part_usage: counting the
+        # manifest again here is how a grouped table and its TOTAL could
+        # disagree (issue #9)
         rows.append({"kind": "total",
-                     "qty": sum(p["qty"] for p in m["parts"])})
+                     "qty": sum(r.get("qty") or 0 for r in rows
+                                if r["kind"] in ("part", "group"))})
     if len(rows) > max_rows:
         # fallback 2: the rest goes on a continuation sheet
         report["fallbacks"].append(
@@ -3724,25 +3795,40 @@ def parts_table_plan(m, analysis, max_rows, group_by="none",
 def parts_row_cells(row, analysis, m):
     """The eight title-block cells for one planned row."""
     if row["kind"] == "head":
-        return {"pno": "", "description": row["text"], "qty": str(row["qty"]),
+        # a heading carries no item number, and its QTY is the
+        # SUB-ASSEMBLY's own quantity — blank where it has none, as the
+        # common and top-level sections do (issue #9)
+        qty = row.get("qty")
+        return {"pno": "", "description": row["text"],
+                "qty": "" if qty is None else str(qty),
                 "drg_no": "", "material": "", "size": "", "weight": "",
-                "remarks": "SUB-ASSEMBLY"}
+                "remarks": "SUB-ASSEMBLY" if qty is not None else ""}
     if row["kind"] == "total":
         return {"pno": "", "description": "TOTAL", "qty": str(row["qty"]),
                 "drg_no": "", "material": "", "size": "", "weight": "",
                 "remarks": ""}
     if row["kind"] == "group":
-        parts = row["parts"]
-        first = parts[0]
-        return {"pno": ", ".join(disp_no(p["part_id"]) for p in parts),
+        # one entry per P.NO., however many of each the assembly uses:
+        # repeating a number once per instance printed "17, 17, 17, 17"
+        # against a quantity counted twice over (issue #9)
+        seen, nums = set(), []
+        for p in row["parts"]:
+            n = disp_no(p["part_id"])
+            if n not in seen:
+                seen.add(n)
+                nums.append(n)
+        first = row["parts"][0]
+        return {"pno": ", ".join(nums),
                 "description": first["description"], "qty": str(row["qty"]),
                 "drg_no": first["drg_no"], "material": first["material"],
                 "size": "-", "weight": "-",
-                "remarks": f"{len(parts)} ITEMS"}
+                "remarks": f"{len(nums)} ITEMS"}
     part = row["part"]
     wkg = part_weight_kg(analysis, part)
+    qty = row.get("qty")
     return {"pno": disp_no(part["part_id"]),
-            "description": part["description"], "qty": str(part["qty"]),
+            "description": part["description"],
+            "qty": str(part["qty"] if qty is None else qty),
             "drg_no": part["drg_no"], "material": part["material"],
             "size": "-", "weight": weight_label(wkg), "remarks": "-"}
 
@@ -4476,12 +4562,16 @@ def build_assembly_sheet(m, proj):
     if asm.get("balloons", True):
         zones.append((band_x - ctx.mm(2.0), min(z[1] for z in zones),
                       ctx.draw_area[2], max(z[3] for z in zones)))
-    box_recs, stamp_rect = pictorial_box(ctx, layout, shaded_png("assembly"),
-                                         zones=zones)
-    ctx.entities += box_recs
-    ctx._stamp_rect = stamp_rect
+    # the parts table is claimed BEFORE the pictorial box is placed, and
+    # the box is given its floor: otherwise the box slid down the bottom
+    # band and its frame was drawn straight across the table's upper rows
+    # (issue #9), since nothing had claimed them yet
     ax0, ay0, ax1, _ = ctx.draw_area
     layout.claim((ax0, ay0, ax1, ay0 + rows_h), "parts-rows", "reserved")
+    box_recs, stamp_rect = pictorial_box(ctx, layout, shaded_png("assembly"),
+                                         zones=zones, floor=ay0 + rows_h)
+    ctx.entities += box_recs
+    ctx._stamp_rect = stamp_rect
     _claim_view(layout, front, offs["front"], "assembly-view")
     if section is not None:
         _claim_view(layout, section, offs["section"], "assembly-section")

@@ -158,13 +158,39 @@ class PartsTableTest(unittest.TestCase):
         kinds = [(r["kind"], r.get("text") or
                   (r.get("part") or {}).get("part_id") or "") for r in rows]
         self.assertIn(("head", "LEFT HOUSING"), kinds)
-        self.assertIn(("head", "RIGHT HOUSING"), kinds)
         heads = {r["text"]: r["qty"] for r in rows if r["kind"] == "head"}
-        # the plate and one block in the left housing, one block in the right
-        self.assertEqual(heads["LEFT HOUSING"], 3)
-        self.assertEqual(heads["RIGHT HOUSING"], 2)
+        # a heading states the SUB-ASSEMBLY's own quantity — it is used
+        # once — not the number of parts or instances under it (issue #9)
+        self.assertEqual(heads["LEFT HOUSING"], 1)
+        # the block is used by BOTH housings, so it is listed once, in the
+        # common section: a row under each would count it twice. That
+        # leaves the right housing nothing of its own to head.
+        self.assertIn(("head", draw.COMMON_GROUP), kinds)
+        self.assertIn(("part", "02"), kinds)
+        self.assertIsNone(heads[draw.COMMON_GROUP])
+        self.assertEqual([k for k in kinds if k[0] == "part"].count(
+            ("part", "02")), 1)
         total = [r for r in rows if r["kind"] == "total"]
         self.assertEqual(total[0]["qty"], 23)      # 1 + 2 + 8 + 4 + 8
+
+    def test_every_part_number_appears_once(self):
+        rows, _ = self.plan(group_by="sub_assembly")
+        nums = []
+        for r in rows:
+            if r["kind"] == "part":
+                nums.append(r["part"]["part_id"])
+            elif r["kind"] == "group":
+                nums += [p["part_id"] for p in r["parts"]]
+        self.assertEqual(sorted(nums), ["01", "02", "03", "04", "05"])
+
+    def test_quantities_come_from_part_usage_once(self):
+        rows, _ = self.plan(group_by="sub_assembly")
+        qty = {r["part"]["part_id"]: r["qty"] for r in rows
+               if r["kind"] == "part"}
+        usage = self.analysis["assembly"]["part_usage"]
+        for part in self.m["parts"]:
+            self.assertEqual(qty[part["part_id"]],
+                             usage[part["file"]]["qty"])
 
     def test_fallback_one_groups_the_hardware(self):
         # five rows do not fit four, but the two M4 screws are one kind:
@@ -173,8 +199,13 @@ class PartsTableTest(unittest.TestCase):
         self.assertTrue(any("grouped bought-out hardware" in f
                             for f in report["fallbacks"]), report)
         groups = [r for r in rows if r["kind"] == "group"]
-        self.assertEqual(len(groups), 2)           # screws, nuts
-        self.assertEqual(sorted(g["qty"] for g in groups), [8, 12])
+        # the two M4 screws are one kind and share a row; the nut is the
+        # only one of its kind, so it keeps its own row rather than
+        # becoming a group of one reading "1 ITEMS" (issue #9)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["qty"], 12)     # 8 + 4 of one kind
+        self.assertEqual([r["part"]["part_id"] for r in rows
+                          if r["kind"] == "part"], ["01", "02", "05"])
         self.assertEqual(report["sheets"], 1)
 
     def test_fallback_two_is_a_continuation_sheet_and_is_reported(self):
@@ -367,9 +398,15 @@ class RealAssemblySheetTest(unittest.TestCase):
         rows, _ = draw.parts_table_plan(self.m, self.analysis, 50,
                                         group_by="sub_assembly")
         heads = {r["text"]: r["qty"] for r in rows if r["kind"] == "head"}
-        self.assertEqual(heads, {"SUB_A": 3, "SUB_B": 3})
+        # each sub-assembly is used once, so that is what its heading says
+        # (it used to say how many parts were under it — issue #9)
+        self.assertEqual(heads["SUB_A"], 1)
+        self.assertEqual(heads["SUB_B"], 1)
         self.assertEqual([r for r in rows if r["kind"] == "total"][0]["qty"],
                          6)
+        # and the total is the sum of the rows, with nothing counted twice
+        self.assertEqual(sum(r.get("qty") or 0 for r in rows
+                             if r["kind"] in ("part", "group")), 6)
         # the block is one part file used by both sub-assemblies
         self.assertEqual(
             self.analysis["assembly"]["part_usage"][
