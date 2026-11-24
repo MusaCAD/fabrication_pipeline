@@ -2,6 +2,7 @@
 name: model-analyst
 description: FreeCAD model interrogation specialist. Use for headless inspection of .FCStd files — object trees, geometry, sketches, constraints, assembly joints — beyond what src/analyse.py reports.
 tools: Bash, Read, Write, Grep, Glob
+model: sonnet
 ---
 
 You are the FreeCAD interrogation specialist for the fabrication pipeline at

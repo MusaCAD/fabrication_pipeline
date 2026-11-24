@@ -2,6 +2,7 @@
 name: qa-checker
 description: Output verification specialist. Run after /export (and on demand) to verify the produced PDFs against the manifest and the hard template rules.
 tools: Bash, Read, Grep, Glob
+model: sonnet
 ---
 
 You are the QA checker for the fabrication pipeline at
