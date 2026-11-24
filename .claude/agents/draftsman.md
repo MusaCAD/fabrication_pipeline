@@ -30,15 +30,19 @@ dense outside dimensioning, ANSI31 hatch, filled RES title block).
 - Sheets are mm-space. Template scaled UNIFORMLY by t = S0 * den/num
   (S0 = 0.180175); part geometry full-size; plot `--scale num:den`.
   src/musa_writer.py SheetContext implements this — never scale x and y
-  differently, never touch the template's aspect ratio or the A4 paper.
+  differently, and never touch the template's aspect ratio. A sheet may
+  state its own PAPER (manifest `"paper": "A3L"`, drawn on that paper's
+  template): the title block then prints at the same size and the drawing
+  area is what grows. ctx.paper / ctx.orientation say which.
 - Annotation sizes use ctx.mm(h) so they print at constant paper mm.
 - The stated title-block SCALE must equal the plotted scale exactly.
 
 ## Verify every sheet you produce
 Round-trip through the real parser+plotter:
   QT_QPA_PLATFORM=offscreen tools/bin/musa_plot --file <sheet.musa> \
-      <out.pdf> --paper A4 --portrait --scale <num>:<den> --window <sheet window>
-Exit 0 + "[musa_plot] ok ... paper=A4 portrait" is the acceptance bar; then
+      <out.pdf> --paper <ctx.paper> --<ctx.orientation> \
+      --scale <num>:<den> --window <sheet window>
+Exit 0 + "[musa_plot] ok ... paper=<that paper>" is the acceptance bar; then
 render `pdftoppm -png -r 50` and LOOK at the image before declaring done.
 
 ## Layout rules (from the reference)

@@ -1,7 +1,8 @@
 # Fabrication Pipeline — Project Memory
 
 FreeCAD assembly/part models → analysis → judgement → locked manifest →
-MusaCAD (.musa) fabrication sheets → A4 portrait PDFs. Company: Renewable
+MusaCAD (.musa) fabrication sheets → PDFs (A4 portrait, or the paper a
+sheet states). Company: Renewable
 Energy Systems Ltd (RES); drawings are drawn/designed by "Er. P. PRANAY".
 Style target for every sheet: `reference/0982_001-1.pdf`.
 
@@ -115,7 +116,7 @@ co-author line to git commits.
 - Always use src/musa_writer.py helpers, never hand-format records.
 
 ## Scale model (THE core invariant — hard rules)
-- Template paper size (A4 portrait) and aspect ratio are INVIOLABLE.
+- A sheet's paper and its template's aspect ratio are INVIOLABLE.
   Uniform scaling only. Non-uniform scaling of anything = bug.
 - Sheets are authored in mm. Template is scaled uniformly by
   `t = S0 * den/num` (S0 = 0.180175 mm per template unit, the A4-portrait
@@ -126,11 +127,34 @@ co-author line to git commits.
 - Standard scales: 1:1, 1:2, 1:5, 1:10, 2:1, 5:1. The title block SCALE
   field must state the plotted scale exactly (export.py cross-checks
   mm_per_unit; qa-checker re-checks).
-- If a part can't fit legibly: smaller standard scale or split across
-  sheets — decided with the user, never by distorting the template.
+- If a part can't fit legibly: smaller standard scale, a BIGGER SHEET, or
+  split across sheets — decided with the user, never by distorting the
+  template.
 - Template extents (units): (19.134764, 60.998651)–(1083.860831,
   1669.978313). Drawing area: x 58.545–1044.426, y 460.083–1516.995.
   Sheet window at scale num:den: (0,0)–(1064.726·t, 1608.980·t).
+- PAPER PER SHEET (issue #10): a part entry or `assembly_sheet` may state
+  `"paper": "A3L"` (or `{"size": "A3", "orientation": "landscape"}`);
+  omitted = A4 portrait, so an existing manifest redraws unchanged. The
+  sheet is then drawn on that paper's title block, named in the top-level
+  `"templates": {"A3L": "/abs/path.musa"}` (the plain `"template"` stays
+  the A4-portrait one). The whole set may MIX papers — one A3 assembly
+  sheet among A4 part sheets — and pdfunite merges them.
+  A paper template is the A4 one WIDENED, made by
+  `tools/widen_template.py <src> <dst> --paper A3 --landscape`: same
+  units, same row pitch, same text, same PRINTED size, with the trim
+  frame stretched and the title block, parts table and revision table
+  travelling with the right edge and the top. So S0 never changes, the
+  title block prints identically on every sheet of a set, and all the
+  extra millimetres go to the drawing area.
+  musa_writer.template_geom MEASURES the widening from the file (bbox vs
+  the default's) and picks the smallest paper it fits (paper_for) — a
+  project states nothing but the paper it wants on the sheet. A template
+  that is not such a variant fails there. common.PAPER_PAINTABLE holds
+  what the harness can paint per paper, measured from musa_plot's own
+  report at 300 dpi; SheetContext.fx moves a title-block x with the right
+  edge; sheets.json records each sheet's paper, export.py plots and
+  re-checks it, and judge.area_mm judges the fit on it.
 
 ## Drawing style rules (locked with user, from reference/0982_001-1.pdf)
 - Per part: ONE sheet, TWO views. Front view (chosen per part at /finalise),

@@ -14,12 +14,17 @@ upstream (/draw, /finalise).
   output/pdf/export.json, output/pdf/*.pdf.
 
 ## Checks (all mandatory)
-1. **Paper**: every PDF is A4 portrait — `pdfinfo` Page size 595 x 842 pts
-   (±1 pt). Any other size or landscape orientation = FAIL. This enforces
-   the inviolable template paper rule.
+1. **Paper**: every PDF is on the paper ITS OWN sheet states in
+   export.json (`paper` / `orientation`, A4 portrait unless the manifest
+   says otherwise) — `pdfinfo` Page size 595 x 842 pts for A4 portrait,
+   842 x 1191 for A3 portrait, 1191 x 842 for A3 landscape (±1 pt). Any
+   other size, or an orientation the sheet did not ask for, = FAIL. A set
+   may MIX papers (one A3 assembly sheet among A4 part sheets); what it
+   may never do is plot a sheet on a paper its manifest did not state.
 2. **Aspect/uniform scale**: the plot log line in export.json must show
-   `paper=A4 portrait` and a single mm_per_unit equal to scale_num/scale_den
-   of the manifest scale (uniform by construction; mismatch = FAIL).
+   that sheet's own `paper=<P> <orientation>` and a single mm_per_unit
+   equal to scale_num/scale_den of the manifest scale (uniform by
+   construction; mismatch = FAIL).
 3. **Coverage**: exactly one PDF per manifest part (drg_no match) + exactly
    one assembly sheet + print_set.pdf containing all sheets (pdfinfo page
    count of print_set == number of sheets).

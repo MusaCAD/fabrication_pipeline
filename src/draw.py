@@ -23,7 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (MANIFESTS_DIR, OUTPUT_MUSA_DIR, SCRATCH_DIR, die,
-                    png_size, read_json, run_freecad, today, write_json)
+                    paper_key, png_size, read_json, run_freecad, today,
+                    write_json)
 import fc_tree
 import musa_writer as mw
 from manifest import VIEW_DIRS
@@ -42,6 +43,71 @@ def parse_scale(s: str) -> tuple[int, int]:
 
 
 # ------------------------------------------------------------ projection
+
+def table_band(ctx, rows_h):
+    """The parts-table band along the bottom of the drawing area, across
+    the TABLE's own columns: on a wider sheet the title block travels with
+    the right edge, so the left of the drawing area is free (issue #10)."""
+    x0 = max(ctx.draw_area[0], ctx.tx(ctx.fx(mw.PARTS_COLS[0][1])))
+    return (x0, ctx.draw_area[1], ctx.draw_area[2],
+            ctx.draw_area[1] + rows_h)
+
+
+def sheet_paper(spec: dict):
+    """The paper one sheet asks for: `"paper": "A3"` (portrait unless the
+    name says otherwise, e.g. "A3L"), or the long form
+    `{"size": "A3", "orientation": "landscape"}`. None = the set's own
+    default, whatever the manifest's template is drawn on."""
+    p = (spec or {}).get("paper")
+    if not p:
+        return None
+    if isinstance(p, dict):
+        return (str(p.get("size", "A4")).upper(),
+                str(p.get("orientation", "portrait")))
+    s = str(p).upper().replace(" ", "")
+    if s.endswith(("P", "L")) and s[:-1] in ("A4", "A3", "A2"):
+        return (s[:-1], "landscape" if s.endswith("L") else "portrait")
+    return (s, "portrait")
+
+
+def sheet_template(m: dict, spec: dict):
+    """The title block one sheet draws on: the manifest's `templates` entry
+    for the paper it asks for (keyed "A3L", "A4P", ...), else the set's
+    default `template`. Returns (path or None, problem or None)."""
+    want = sheet_paper(spec)
+    default = m.get("template")
+    if want is None:
+        return default, None
+    key = paper_key(*want)
+    table = {str(k).upper(): v for k, v in (m.get("templates") or {}).items()}
+    if key in table:
+        return table[key], None
+    # the set's own template may already be that paper
+    if default is not None:
+        try:
+            geom = mw.template_geom(mw.resolve_template(default))
+        except Exception:                               # reported elsewhere
+            geom = None
+        if geom and (geom["paper"], geom["orientation"]) == want:
+            return default, None
+    if want == mw.DEFAULT_PAPER and default is None:
+        return None, None                                # the pipeline's own
+    return None, (f"no template for {key}: add it to the manifest's "
+                  f"\"templates\" ({key}: /abs/path/template_{key.lower()}"
+                  ".musa)")
+
+
+def sheet_context(m: dict, spec: dict, num, den):
+    """A SheetContext on the paper this sheet asks for, with the title
+    block that belongs to it (issue #10). Fails loudly: a sheet drawn on
+    the wrong template is a sheet with somebody else's frame."""
+    path, problem = sheet_template(m, spec)
+    if problem:
+        die(f"{spec.get('drg_no', spec.get('file', '?'))}: {problem}")
+    tpl = mw.resolve_template(path) if path else None
+    geom = mw.template_geom(tpl) if tpl else mw.template_geom()
+    return mw.SheetContext(num, den, geom=geom, template=tpl)
+
 
 def sheet_parts(m: dict) -> list[dict]:
     """Parts that get their own sheet. A bought-out item ("sheet": false —
@@ -3872,10 +3938,13 @@ REV_COLS = (80.72697303959285, 281.445892556294, 557.502500627168,
 REV_ROW_YS = (1587.9783693373156, 1559.5849982286345, 1531.1916271199552)
 
 
-def rev_row_positional(m=None, sheet=None):
+def rev_row_positional(m=None, sheet=None, ctx=None):
     """Fill revision-table rows from the sheet's "revisions" (falling back
-    to the manifest-level list); default: one INITIAL RELEASE row."""
+    to the manifest-level list); default: one INITIAL RELEASE row. The
+    revision table hugs the sheet's right edge, so on a wider paper its
+    columns travel with it (SheetContext.fx)."""
     from common import today
+    fx = ctx.fx if ctx is not None else (lambda x: x)
     revs = ((sheet or {}).get("revisions")
             or (m or {}).get("revisions")) or [
         {"rev": "00", "desc": "INITIAL RELEASE", "by": "Er. P. PRANAY",
@@ -3886,7 +3955,7 @@ def rev_row_positional(m=None, sheet=None):
                 rv.get("by", "Er. P. PRANAY"), rv.get("approved", "-"),
                 rv.get("date") or today())
         for x, val in zip(REV_COLS, vals):
-            out.append({"content": "-", "x": x, "y": row_y, "new": val})
+            out.append({"content": "-", "x": fx(x), "y": row_y, "new": val})
     return out
 
 
@@ -4134,7 +4203,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
     Returns (ctx, replaced, layout) — the live Layout, so the caller can
     measure the balance."""
     num, den = parse_scale(part["scale"])
-    ctx = mw.SheetContext(num, den)
+    ctx = sheet_context(m, part, num, den)
     front = proj[f"{part['part_id']}:front"]
     section = proj.get(f"{part['part_id']}:section") \
         if part["section"]["enabled"] else None
@@ -4189,7 +4258,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
     layout = Layout(ctx)
     rows_h = mw.PARTS_ROW_H * ctx.t
     ax0, ay0, ax1, _ = ctx.draw_area
-    layout.claim((ax0, ay0, ax1, ay0 + rows_h), "parts-rows", "reserved")
+    layout.claim(table_band(ctx, rows_h), "parts-rows", "reserved")
     zones = [view_zone(ctx, part, v, j,
                        offs[v if v in offs else "section"])
              for v, j in view_jobs.items()]
@@ -4225,7 +4294,8 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
                 lfacs["detail"] = 1.0 / detail_factor(part, dspec)
 
     replaced = ctx.add_template(titleblock_replacements(m, part),
-                                positional=rev_row_positional(m, part))
+                                positional=rev_row_positional(m, part,
+                                                              ctx))
     wkg = part_weight_kg(read_json(Path(m["_analysis_path"])), part)
     ctx.entities += mw.parts_row_records(ctx, 0, {
         "pno": disp_no(part["part_id"]), "description": part["description"],
@@ -4487,12 +4557,12 @@ def continuation_sheet(m, asm, rows, analysis, sheet_of):
     Same DRG NO., "SHEET 2 OF 2" (CLAUDE.md: i OF n only within one DRG
     NO.), title block and table — no views: it exists to carry rows."""
     num, den = parse_scale(asm["scale"])
-    ctx = mw.SheetContext(num, den)
+    ctx = sheet_context(m, asm, num, den)
     ctx.dimstyles = sheet_dimstyles(ctx)
     layout = Layout(ctx)
     sheet = dict(asm, sheet_of=sheet_of)
     replaced = ctx.add_template(titleblock_replacements(m, sheet),
-                                positional=rev_row_positional(m, asm))
+                                positional=rev_row_positional(m, asm, ctx))
     overflow = []
     for idx, row in enumerate(rows):
         ctx.entities += mw.parts_row_records(
@@ -4516,7 +4586,7 @@ def build_assembly_sheet(m, proj):
     only when the table needs a continuation."""
     asm = m["assembly_sheet"]
     num, den = parse_scale(asm["scale"])
-    ctx = mw.SheetContext(num, den)
+    ctx = sheet_context(m, asm, num, den)
     analysis = read_json(Path(m["_analysis_path"]))
     front = proj["assembly:front"]
     sec_spec = asm.get("section") or {}
@@ -4567,7 +4637,7 @@ def build_assembly_sheet(m, proj):
     # band and its frame was drawn straight across the table's upper rows
     # (issue #9), since nothing had claimed them yet
     ax0, ay0, ax1, _ = ctx.draw_area
-    layout.claim((ax0, ay0, ax1, ay0 + rows_h), "parts-rows", "reserved")
+    layout.claim(table_band(ctx, rows_h), "parts-rows", "reserved")
     box_recs, stamp_rect = pictorial_box(ctx, layout, shaded_png("assembly"),
                                          zones=zones, floor=ay0 + rows_h)
     ctx.entities += box_recs
@@ -4601,7 +4671,7 @@ def build_assembly_sheet(m, proj):
     replaced = ctx.add_template(titleblock_replacements(
         m, dict(asm, sheet_of=asm.get("sheet_of",
                                       [1, table_report["sheets"]]))),
-        positional=rev_row_positional(m, asm))
+        positional=rev_row_positional(m, asm, ctx))
     overflow = []
     for idx, row in enumerate(here_rows):
         ctx.entities += mw.parts_row_records(
@@ -4729,6 +4799,7 @@ def main() -> None:
         sheets.append({"file": str(out), "drg_no": part["drg_no"],
                        "description": part["description"],
                        "scale": part["scale"], "window": ctx.window,
+                       "paper": ctx.paper, "orientation": ctx.orientation,
                        "kind": "part", "section": part["section"]["enabled"],
                        "projection": part["section"].get("projection",
                                                          "below"),
@@ -4740,8 +4811,10 @@ def main() -> None:
         if lay["unresolved"]:
             problems.append(f"{part['drg_no']}: {lay['unresolved']}")
         print(f"sheet {idx}/{total}: {out.name}  scale {part['scale']}  "
-              f"(nudges={lay['nudges']}, unresolved="
-              f"{len(lay['unresolved'])})")
+              + (f"{ctx.paper} {ctx.orientation}  "
+                 if (ctx.paper, ctx.orientation) != mw.DEFAULT_PAPER else "")
+              + f"(nudges={lay['nudges']}, unresolved="
+                f"{len(lay['unresolved'])})")
     if m.get("assembly_sheet") and m["assembly_sheet"].get("enabled", True):
         asm = m["assembly_sheet"]
         built = build_assembly_sheet(m, proj)
@@ -4754,6 +4827,7 @@ def main() -> None:
             entry = {"file": str(asm_out), "drg_no": drg,
                      "description": asm["description"],
                      "scale": asm["scale"], "window": ctx.window,
+                     "paper": ctx.paper, "orientation": ctx.orientation,
                      "kind": "assembly",
                      "section": bool(meta.get("section")),
                      "replaced_fields": replaced, "layout": lay,

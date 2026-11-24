@@ -415,6 +415,35 @@ def assembly_sheet_problems(m: dict) -> list[str]:
     return out
 
 
+def paper_problems(m: dict) -> list[str]:
+    """Per-sheet paper (issue #10): the paper must be one the harness is
+    measured for, and the manifest must name a template for it — a sheet
+    drawn on another paper's title block is a sheet with the wrong frame.
+    """
+    import draw
+    out = []
+    for key, path in (m.get("templates") or {}).items():
+        out += [f"templates.{key}: {p}" for p in mw.template_problems(path)]
+    sheets = [(p.get("file") or p.get("part_id"), p) for p in m.get("parts", [])
+              if p.get("sheet", True)]
+    asm = m.get("assembly_sheet") or {}
+    if asm and asm.get("enabled", True):
+        sheets.append(("assembly_sheet", asm))
+    for who, spec in sheets:
+        want = draw.sheet_paper(spec)
+        if want is None:
+            continue
+        if want not in mw.PAPER_PAINTABLE:
+            out.append(f"{who}: paper {spec.get('paper')!r} is not one the "
+                       "harness is measured for (A4/A3/A2, portrait or "
+                       "landscape)")
+            continue
+        _, problem = draw.sheet_template(m, spec)
+        if problem:
+            out.append(f"{who}: {problem}")
+    return out
+
+
 def quantity_problems(m: dict) -> list[str]:
     """Every part's QTY is what the model uses it (issue #9).
 
@@ -524,6 +553,7 @@ def lock(draft_path: Path) -> None:
         problems += gdt_problems(part, str(part.get("file")))
     problems += thin_feature_problems(m)
     problems += quantity_problems(m)
+    problems += paper_problems(m)
     problems += assembly_sheet_problems(m)
     if m.get("template"):
         problems += mw.template_problems(m["template"])

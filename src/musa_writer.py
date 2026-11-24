@@ -14,8 +14,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from common import (DRAWING_AREA, S0, TEMPLATE, TEMPLATE_EXT_MAX,
-                    TEMPLATE_EXT_MIN)
+from common import (DEFAULT_PAPER, DRAWING_AREA, PAPER_PAINTABLE, S0,
+                    SHEET_GEOM_A4P, TEMPLATE, TEMPLATE_EXT_MAX,
+                    TEMPLATE_EXT_MIN, paper_key, sheet_geom)
 
 P = "0 7 255 255 255 0 25"  # default 7-int property tail: layer 0, ByLayer
 # annotation tail: explicit MAGENTA (flags 6 = linetype+lineweight ByLayer,
@@ -243,6 +244,125 @@ def template_logo(path: Path | None = None) -> dict | None:
     return {"png": png, "box": (x0, y0, x1, y1), "px": png_size(png)}
 
 
+def template_bbox(path: Path | None = None) -> tuple:
+    """A template's FURNITURE bounds (lines, arcs, circles, polylines) in
+    template units — text is left out, since a glyph's extent depends on
+    the font. For the shipped template this is exactly the surveyed
+    TEMPLATE_EXT_MIN/MAX, which is what makes it a sound way to measure a
+    variant against it."""
+    lo = [float("inf"), float("inf")]
+    hi = [float("-inf"), float("-inf")]
+    for r in parse_template(path):
+        if r.kind == "LINE":
+            pts = [(r.nums[0], r.nums[1]), (r.nums[2], r.nums[3])]
+        elif r.kind in ("CIRCLE", "ARC"):
+            cx, cy, rad = r.nums[0], r.nums[1], r.nums[2]
+            pts = [(cx - rad, cy - rad), (cx + rad, cy + rad)]
+        elif r.kind == "POLYLINE":
+            pts = [(r.nums[i], r.nums[i + 1])
+                   for i in range(0, len(r.nums), 2)]
+        else:
+            continue
+        for x, y in pts:
+            lo[0], lo[1] = min(lo[0], x), min(lo[1], y)
+            hi[0], hi[1] = max(hi[0], x), max(hi[1], y)
+    return tuple(lo), tuple(hi)
+
+
+def paper_for(w_mm: float, h_mm: float):
+    """The smallest paper and orientation a w x h mm sheet fits on.
+
+    A title block prints at the same size on every sheet of a set — that
+    is the scale model's first rule — so a variant for a bigger sheet
+    keeps the unit size S0 and simply covers more millimetres. Its paper
+    therefore follows from its own size and does not have to be stated.
+    """
+    best = None
+    for (paper, orient), (pw, ph) in PAPER_PAINTABLE.items():
+        if w_mm <= pw + 0.01 and h_mm <= ph + 0.01:
+            score = (pw * ph, (paper, orient) != DEFAULT_PAPER, paper, orient)
+            if best is None or score < best[0]:
+                best = (score, (paper, orient))
+    return best[1] if best else None
+
+
+def template_sheet_spec(path: Path) -> dict | None:
+    """An explicit paper for a template, from the optional sidecar
+    `<stem>.sheet.json`: {"paper": "A3", "orientation": "landscape"}.
+
+    Only needed to ask for a BIGGER sheet than the title block needs (an
+    A2 print of an A3 title block); without it the paper follows from the
+    template's own size."""
+    side = Path(path).with_name(Path(path).stem + ".sheet.json")
+    if not side.exists():
+        return None
+    import json
+    d = json.loads(side.read_text())
+    paper = str(d.get("paper", "A4")).upper()
+    orient = str(d.get("orientation", "portrait"))
+    if (paper, orient) not in PAPER_PAINTABLE:
+        raise ValueError(
+            f"{side.name}: the harness has no measured paintable area for "
+            f"{paper} {orient} (have: "
+            f"{', '.join(f'{p} {o}' for p, o in sorted(PAPER_PAINTABLE))})")
+    return {"paper": paper, "orientation": orient}
+
+
+_GEOM_CACHE: dict = {}
+
+
+def template_geom(path: Path | None = None) -> dict:
+    """The sheet geometry a template draws on, measured from the file.
+
+    A company template for another paper is the default sheet WIDENED:
+    the same title block, the same row pitch, the same text, at the same
+    unit size, with the furniture that hugs the right edge and the top
+    moved out with them (templates/template.musa is the A4-portrait one).
+    So the difference between the two furniture bounds is the widening,
+    the paper is the smallest one the result fits on, and a project has
+    nothing to restate by hand. A template that is not such a variant
+    fails here rather than drawing a sheet whose title block sits in the
+    wrong place or runs off the paper.
+    """
+    path = Path(path) if path is not None else ACTIVE_TEMPLATE
+    key = str(path)
+    if key in _GEOM_CACHE:
+        return _GEOM_CACHE[key]
+    lo, hi = template_bbox(path)
+    base_lo, base_hi = TEMPLATE_EXT_MIN, TEMPLATE_EXT_MAX
+    if max(abs(lo[0] - base_lo[0]), abs(lo[1] - base_lo[1])) > 0.01:
+        raise ValueError(
+            f"{path.name}: its frame starts at ({lo[0]:.3f}, {lo[1]:.3f}), "
+            f"not at ({base_lo[0]:.3f}, {base_lo[1]:.3f}) like "
+            "templates/template.musa — a variant for another paper is the "
+            "same sheet widened, not moved")
+    dx, dy = hi[0] - base_hi[0], hi[1] - base_hi[1]
+    if dx < -0.01 or dy < -0.01:
+        raise ValueError(
+            f"{path.name}: it is SMALLER than templates/template.musa "
+            f"({dx:+.1f}, {dy:+.1f} units) — a paper variant only widens")
+    w = (base_hi[0] + dx - base_lo[0]) * S0
+    h = (base_hi[1] + dy - base_lo[1]) * S0
+    spec = template_sheet_spec(path)
+    if spec is None:
+        fit = paper_for(w, h)
+        if fit is None:
+            raise ValueError(
+                f"{path.name}: {w:.1f} x {h:.1f} mm fits no paper the "
+                "harness is measured for (A4/A3/A2)")
+        paper, orient = fit
+    else:
+        paper, orient = spec["paper"], spec["orientation"]
+        pw, ph = PAPER_PAINTABLE[(paper, orient)]
+        if w > pw + 0.01 or h > ph + 0.01:
+            raise ValueError(
+                f"{path.name}: {w:.1f} x {h:.1f} mm does not fit "
+                f"{paper} {orient} ({pw} x {ph} mm)")
+    geom = sheet_geom(paper=paper, orientation=orient, widen=(dx, dy), s0=S0)
+    _GEOM_CACHE[key] = geom
+    return geom
+
+
 def parse_template(path: Path | None = None) -> list[TemplateRecord]:
     """Minimal .musa reader for the records our template actually contains."""
     path = Path(path) if path is not None else ACTIVE_TEMPLATE
@@ -290,19 +410,29 @@ def parse_template(path: Path | None = None) -> list[TemplateRecord]:
 
 
 class SheetContext:
-    """One drawing sheet: template scaled by t = S0*den/num into mm space,
-    part geometry placed full-size (real mm), plotted at --scale num:den."""
+    """One drawing sheet: template scaled by t = s0*den/num into mm space,
+    part geometry placed full-size (real mm), plotted at --scale num:den.
 
-    def __init__(self, scale_num: float, scale_den: float):
+    `geom` is the sheet geometry — paper, template extents, drawing area
+    and the fit factor s0 — which is A4 portrait unless the sheet's own
+    template says otherwise (template_geom). `template` is the title block
+    this sheet draws, so one print set can mix papers."""
+
+    def __init__(self, scale_num: float, scale_den: float, geom=None,
+                 template=None):
         self.num = scale_num
         self.den = scale_den
-        self.t = S0 * scale_den / scale_num
-        ox, oy = TEMPLATE_EXT_MIN
+        self.geom = dict(geom or SHEET_GEOM_A4P)
+        self.template = Path(template) if template else None
+        self.paper = self.geom["paper"]
+        self.orientation = self.geom["orientation"]
+        self.t = self.geom["s0"] * scale_den / scale_num
+        ox, oy = self.geom["ext_min"]
         self._off = (ox, oy)
-        w = TEMPLATE_EXT_MAX[0] - TEMPLATE_EXT_MIN[0]
-        h = TEMPLATE_EXT_MAX[1] - TEMPLATE_EXT_MIN[1]
+        w = self.geom["ext_max"][0] - ox
+        h = self.geom["ext_max"][1] - oy
         self.window = (0.0, 0.0, w * self.t, h * self.t)
-        da = DRAWING_AREA
+        da = self.geom["drawing_area"]
         self.draw_area = (self.tx(da[0]), self.ty(da[1]),
                           self.tx(da[2]), self.ty(da[3]))
         self.entities: list[str] = []
@@ -322,6 +452,12 @@ class SheetContext:
     def tpt(self, p) -> tuple[float, float]:
         return (self.tx(p[0]), self.ty(p[1]))
 
+    def fx(self, x: float) -> float:
+        """A title-block x in TEMPLATE units: the title block, parts table
+        and revision table hug the sheet's right edge, so on a wider paper
+        they travel with it (common.sheet_geom's `widen`)."""
+        return x + self.geom["widen"][0]
+
     # printed-mm -> sheet units (for annotation sizes that must print at a
     # constant paper size regardless of sheet scale)
     def mm(self, v: float) -> float:
@@ -335,10 +471,11 @@ class SheetContext:
         path, "rect": [x, y, w, h]} in sheet units, the largest rect of the
         image's aspect centred in the template's logo box. None if the
         template has no logo."""
-        lg = template_logo()
+        lg = template_logo(self.template)
         if lg is None:
             return None
         x0, y0, x1, y1 = lg["box"]
+        x0, x1 = self.fx(x0), self.fx(x1)
         bw, bh = (x1 - x0) * self.t, (y1 - y0) * self.t
         pw, ph = lg["px"]
         k = min(bw / pw, bh / ph)
@@ -353,7 +490,7 @@ class SheetContext:
         MTEXT's exact original content -> new content ('' keeps a field's
         original text). Returns the list of replaced keys for QA."""
         used: list[str] = []
-        for r in parse_template():
+        for r in parse_template(self.template):
             pr = r.props
             if r.kind == "LINE":
                 a = (self.tx(r.nums[0]), self.ty(r.nums[1]))
@@ -512,12 +649,12 @@ def parts_row_records(ctx: SheetContext, row_idx: int,
     """
     y0 = PARTS_ROW_BASE_Y + row_idx * PARTS_ROW_H
     y1 = y0 + PARTS_ROW_H
-    out = [line(ctx.tpt((PARTS_COLS[0][1], y1)),
-                ctx.tpt((PARTS_COLS[-1][2], y1)))]
-    xs = [PARTS_COLS[0][1]] + [c[2] for c in PARTS_COLS]
+    cols = [(k, ctx.fx(xl), ctx.fx(xr)) for k, xl, xr in PARTS_COLS]
+    out = [line(ctx.tpt((cols[0][1], y1)), ctx.tpt((cols[-1][2], y1)))]
+    xs = [cols[0][1]] + [c[2] for c in cols]
     for x in xs:
         out.append(line(ctx.tpt((x, y0)), ctx.tpt((x, y1))))
-    for key, xl, xr in PARTS_COLS:
+    for key, xl, xr in cols:
         v = values.get(key, "-")
         lines, h = fit_cell_text(v, xr - xl, PARTS_ROW_H)
         if h < TB_TEXT_H * PARTS_TEXT_FLOOR:
@@ -530,7 +667,7 @@ def parts_row_records(ctx: SheetContext, row_idx: int,
 
 
 def date_records(ctx: SheetContext, date_str: str) -> list[str]:
-    return [mtext(ctx.tpt((TB_DATE_X, y)), date_str, TB_TEXT_H * ctx.t,
+    return [mtext(ctx.tpt((ctx.fx(TB_DATE_X), y)), date_str, TB_TEXT_H * ctx.t,
                   attach=0)
             for y in TB_ROWS_Y.values()]
 

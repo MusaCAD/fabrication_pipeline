@@ -15,8 +15,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fc_tree
-from common import (DRAWING_AREA, MANIFESTS_DIR, REPORTS_DIR, S0,
-                    STANDARD_SCALES, die, read_json, write_json)
+from common import (DEFAULT_PAPER, DRAWING_AREA, MANIFESTS_DIR,
+                    PAPER_PAINTABLE, REPORTS_DIR, S0, STANDARD_SCALES, die,
+                    read_json, write_json)
 
 # Drawing-area size in printed mm (constant for every sheet scale).
 AREA_W_MM = (DRAWING_AREA[2] - DRAWING_AREA[0]) * S0
@@ -24,12 +25,26 @@ AREA_H_MM = (DRAWING_AREA[3] - DRAWING_AREA[1]) * S0
 MIN_FEATURE_PRINT_MM = 1.0   # smallest legible printed feature
 
 
-def best_scale(w: float, h: float) -> tuple[int, int] | None:
+def area_mm(paper="A4", orientation="portrait") -> tuple[float, float]:
+    """The drawing area in printed mm on this paper. A bigger sheet keeps
+    the title block's own size and gives the extra millimetres to the
+    drawing, so the area grows by exactly the paper's growth (issue #10).
+    """
+    if (str(paper).upper(), str(orientation)) == DEFAULT_PAPER:
+        return AREA_W_MM, AREA_H_MM
+    pw, ph = PAPER_PAINTABLE[(str(paper).upper(), str(orientation))]
+    base_w, base_h = PAPER_PAINTABLE[DEFAULT_PAPER]
+    return AREA_W_MM + (pw - base_w), AREA_H_MM + (ph - base_h)
+
+
+def best_scale(w: float, h: float, paper="A4",
+               orientation="portrait") -> tuple[int, int] | None:
     """Largest standard scale at which a w x h (mm) view pair fits the
     drawing area with margins (two stacked views, per drawing style)."""
+    area_w, area_h = area_mm(paper, orientation)
     for num, den in STANDARD_SCALES:
         f = num / den
-        if w * f <= AREA_W_MM * 0.85 and 2.2 * h * f <= AREA_H_MM * 0.80:
+        if w * f <= area_w * 0.85 and 2.2 * h * f <= area_h * 0.80:
             return (num, den)
     return None
 
@@ -91,6 +106,39 @@ def sheet_scales(parts: list) -> dict:
     return out
 
 
+def sheet_papers(parts: list) -> dict:
+    """part file -> (paper, orientation) of the sheet it is drawn on, for
+    the parts whose manifest entry asks for one that is not the default
+    (issue #10). A part drawn on a sibling's sheet is judged on THAT
+    sheet's paper, exactly as it is judged at its scale."""
+    def paper_of(part):
+        p = part.get("paper")
+        if not p:
+            return None
+        if isinstance(p, dict):
+            return (str(p.get("size", "A4")).upper(),
+                    str(p.get("orientation", "portrait")))
+        s = str(p).upper().replace(" ", "")
+        if s.endswith(("P", "L")) and s[:-1] in ("A4", "A3", "A2"):
+            return (s[:-1], "landscape" if s.endswith("L") else "portrait")
+        return (s, "portrait")
+
+    out, by_drg = {}, {}
+    for part in parts:
+        pp = paper_of(part)
+        if part.get("sheet", True) and part.get("drg_no"):
+            by_drg.setdefault(str(part["drg_no"]), pp)
+        if pp and part.get("file") and part.get("sheet", True):
+            out[part["file"]] = pp
+    for part in parts:
+        if part.get("sheet", True) or not part.get("file"):
+            continue
+        host = by_drg.get(str(part.get("drg_no") or ""))
+        if host:
+            out[part["file"]] = host
+    return out
+
+
 def not_drawn(parts: list) -> set:
     """The part files a manifest draws NOWHERE: `sheet: false`, and no
     other part's sheet carries their DRG NO. (issue #8)."""
@@ -111,7 +159,7 @@ def manifest_scales(path: Path) -> dict:
 
 
 def judge_part(part: dict, generated: str = "", sheet_scale=None,
-               drawn: bool = True) -> dict:
+               drawn: bool = True, paper=DEFAULT_PAPER) -> dict:
     """`sheet_scale` is the scale the manifest draws this part at, when a
     manifest exists; the suggested scale is used only when it does not.
     `drawn` is False for a part the manifest draws NOWHERE (a bought-out
@@ -161,11 +209,12 @@ def judge_part(part: dict, generated: str = "", sheet_scale=None,
             flag("FAIL", f"sketch {s['label']} does not solve")
     w, h, d = b["bbox_size"]
     dims_sorted = sorted((w, h, d))
-    sc = best_scale(max(w, h, d), sorted((w, h, d))[1])
+    sc = best_scale(max(w, h, d), sorted((w, h, d))[1], *paper)
     if sc is None:
         flag("FAIL", f"part {w:g}x{h:g}x{d:g} mm fits no standard scale "
                      f"({', '.join(f'{n}:{dn}' for n, dn in STANDARD_SCALES)})"
-                     " — needs sheet split")
+                     f" on {paper[0]} {paper[1]} — needs a bigger sheet or a "
+                     "sheet split")
     used = sheet_scale or (sc if drawn else None)
     if used is not None:
         msg = thin_feature_finding(
@@ -270,8 +319,10 @@ def main() -> None:
               f"({len(scales)} parts"
               + (f", {len(undrawn)} drawn on no sheet" if undrawn else "")
               + ")")
+    papers = sheet_papers(mparts)
     parts = [judge_part(p, generated, scales.get(p["file"]),
-                        drawn=p["file"] not in undrawn)
+                        drawn=p["file"] not in undrawn,
+                        paper=papers.get(p["file"], DEFAULT_PAPER))
              for p in a["parts"]]
     asm_findings = assembly_findings(asm)
     overall = "PASS"

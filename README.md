@@ -4,7 +4,7 @@
 
 A repeatable, headless pipeline that takes **FreeCAD** assembly/part models,
 analyses and validates them, and produces print-ready, vendor-complete
-**A4 fabrication drawings (PDF)** on the project's own title-block template using the
+**Fabrication drawings (PDF)** on the project's own title-block template using the
 [MusaCAD](https://github.com/MusaCAD/MusaCAD) native `.musa` format and its
 real plot pipeline.
 
@@ -20,7 +20,7 @@ decision-by-decision finalisation step.
         ⏸ user approval
 /finalise              conversational elicitation -> locked manifests/manifest.json
 /draw                  HLR views + sections + GD&T + dims -> output/musa/*.musa
-/export                plot to A4 PDFs + merged print set -> output/pdf/
+/export                plot each sheet on its paper + print set -> output/pdf/
 /pipeline <model_dir>  all stages, pausing after /judge
 ```
 
@@ -28,6 +28,14 @@ Subagents: `model-analyst` (FreeCAD interrogation), `draftsman` (.musa
 composition), `qa-checker` (21-point output verification, render-and-inspect).
 
 ## What the drawings contain
+
+Sheets are A4 portrait unless one says otherwise: a part entry or the
+assembly sheet may state `"paper": "A3L"`, drawn on that paper's title
+block (`"templates": {"A3L": "/abs/path.musa"}`, made from the A4 one with
+`tools/widen_template.py`). One set may mix them — an A3-landscape
+assembly sheet among A4 part sheets — with the title block the same
+printed size on every sheet and all the extra paper going to the drawing.
+
 
 - Per part: front view + full section (or an agreed alternative view),
   true-value dimensions (geometry authored full-size; the template is scaled
@@ -91,7 +99,8 @@ tests/        unittest suite (stdlib only; builds throwaway FreeCAD
 samples/      sample_sheet.py: a sample sheet through the real composer
               (no model, no FreeCAD) + the PDF it produces
 tools/        musa_plot: headless .musa -> PDF harness (paper, scale,
-              window, raster stamps) derived from MusaCAD's plot_check
+              window, raster stamps) derived from MusaCAD's plot_check;
+              widen_template.py: an A3/A2 title block from the A4 one
 templates/    default title-block template (.musa v14); company
               title blocks and logos live in each project's folder
 .claude/      slash commands + subagents (the operator interface)

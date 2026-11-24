@@ -4,9 +4,10 @@
 
     python3 src/export.py
 
-Reads output/musa/sheets.json (from /draw). Each sheet is plotted A4
-portrait at its manifest scale via tools/bin/musa_plot; the stated scale is
-cross-checked against the harness's effective mm_per_unit. Merges all sheets
+Reads output/musa/sheets.json (from /draw). Each sheet is plotted at its
+manifest scale on its OWN paper via tools/bin/musa_plot (A4 portrait unless
+that sheet says otherwise); the stated scale is cross-checked against the
+harness's effective mm_per_unit, and the paper against its own report. Merges all sheets
 into output/pdf/print_set.pdf (pdfunite). Writes output/pdf/export.json for
 qa-checker.
 """
@@ -50,18 +51,22 @@ def main() -> None:
             if not Path(lg["png"]).exists():
                 die(f"{sheet['drg_no']}: title block logo missing: {lg['png']}")
             extra.append((lg["png"], *lg["rect"]))
+        paper = sheet.get("paper", "A4")
+        orient = sheet.get("orientation", "portrait")
         info = run_musa_plot(Path(sheet["file"]), pdf,
                              scale=(num, den), window=tuple(sheet["window"]),
-                             stamp=stamp, stamps=extra)
+                             stamp=stamp, stamps=extra, paper=paper,
+                             orientation=orient)
         eff = float(info["mm_per_unit"])
         want = num / den
         if abs(eff - want) > 1e-6:
             die(f"{pdf.name}: effective scale {eff} != stated {want}")
-        if info.get("paper") != "A4" or "portrait" not in info["raw"]:
-            die(f"{pdf.name}: not A4 portrait ({info['raw']})")
-        exported.append({**sheet, "pdf": str(pdf),
+        if info.get("paper") != paper or orient not in info["raw"]:
+            die(f"{pdf.name}: not {paper} {orient} ({info['raw']})")
+        exported.append({**sheet, "pdf": str(pdf), "paper": paper,
+                         "orientation": orient,
                          "mm_per_unit": eff, "plot": info["raw"]})
-        print(f"exported {pdf.name}  ({sheet['scale']}, A4 portrait)")
+        print(f"exported {pdf.name}  ({sheet['scale']}, {paper} {orient})")
 
     merged = OUTPUT_PDF_DIR / "print_set.pdf"
     cmd = ["pdfunite"] + [s["pdf"] for s in exported] + [str(merged)]

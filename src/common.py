@@ -45,6 +45,70 @@ S0 = 0.180175
 DRAWING_AREA = (58.544651860946026, 460.0832555520592,
                 1044.425593134758, 1516.9949415656047)
 
+# What the harness can actually paint on, per paper and orientation, in mm
+# at 300 dpi — musa_plot's OWN numbers (its summary line prints
+# "paintable=WxH"), not paper size minus a guessed margin. A sheet's fit
+# factor is min(paintable / template extents), so this is what decides how
+# big one template unit prints.
+PAPER_PAINTABLE = {
+    ("A4", "portrait"): (202.78, 289.90),
+    ("A4", "landscape"): (289.90, 202.78),
+    ("A3", "portrait"): (289.90, 413.09),
+    ("A3", "landscape"): (413.09, 289.90),
+    ("A2", "portrait"): (413.09, 586.99),
+    ("A2", "landscape"): (586.99, 413.09),
+}
+DEFAULT_PAPER = ("A4", "portrait")
+
+
+def paper_key(paper: str, orientation: str) -> str:
+    """"A3" + "landscape" -> "A3L" — how a manifest names a template for a
+    paper in its `templates` map."""
+    return f"{str(paper).upper()}{str(orientation)[:1].upper()}"
+
+
+def fit_factor(ext_w: float, ext_h: float, paper="A4",
+               orientation="portrait") -> float:
+    """Template units -> printed mm for a template of this size on this
+    paper: the largest uniform factor that still fits (the scale model
+    allows no other kind). The default A4-portrait sheet keeps the
+    measured S0 to the digit, so every sheet drawn before paper sizes
+    existed redraws byte for byte — the computed value agrees with it to
+    2e-6."""
+    pw, ph = PAPER_PAINTABLE[(str(paper).upper(), str(orientation))]
+    return min(pw / ext_w, ph / ext_h)
+
+
+def sheet_geom(ext_min=None, ext_max=None, drawing_area=None, paper="A4",
+               orientation="portrait", s0=None, widen=(0.0, 0.0)) -> dict:
+    """One sheet's geometry in TEMPLATE UNITS plus its paper.
+
+    `widen` is how much bigger than the default template this one is: the
+    sheet grows to the right and the top, and the furniture that hugs
+    those edges (the title block, the parts table, the revision table)
+    travels with them, which is exactly how an A3-landscape variant of an
+    A4-portrait title block is built. Everything else — the row pitch, the
+    text sizes, the left border — is untouched, so both papers print the
+    same title block at the same size.
+    """
+    dx, dy = widen
+    ext_min = tuple(ext_min or TEMPLATE_EXT_MIN)
+    ext_max = tuple(ext_max or (TEMPLATE_EXT_MAX[0] + dx,
+                                TEMPLATE_EXT_MAX[1] + dy))
+    da = tuple(drawing_area or (DRAWING_AREA[0], DRAWING_AREA[1],
+                                DRAWING_AREA[2] + dx, DRAWING_AREA[3] + dy))
+    paper, orientation = str(paper).upper(), str(orientation)
+    if s0 is None:
+        s0 = (S0 if (paper, orientation) == DEFAULT_PAPER and not dx and not dy
+              else fit_factor(ext_max[0] - ext_min[0],
+                              ext_max[1] - ext_min[1], paper, orientation))
+    return {"paper": paper, "orientation": orientation, "s0": s0,
+            "ext_min": ext_min, "ext_max": ext_max, "drawing_area": da,
+            "widen": (dx, dy)}
+
+
+SHEET_GEOM_A4P = sheet_geom()
+
 # Standard drawing scales to choose from, as (num, den): paper mm : real mm.
 STANDARD_SCALES = [(1, 1), (1, 2), (1, 5), (1, 10), (2, 1), (5, 1)]
 
@@ -80,11 +144,13 @@ def run_freecad(script: Path, *args: str, timeout: int = 300) -> str:
 
 def musa_plot_cmd(musa_file: Path, pdf_out: Path, *, scale: tuple[float, float],
                   window: tuple[float, float, float, float],
-                  stamps: list | None = None) -> list[str]:
+                  stamps: list | None = None, paper: str = "A4",
+                  orientation: str = "portrait") -> list[str]:
     """The harness command line. stamps: (png_path, x, y, w, h) tuples in
     sheet units — the shaded pictorial and the title block's logo."""
     cmd = [str(MUSA_PLOT), "--file", str(musa_file), str(pdf_out),
-           "--paper", "A4", "--portrait",
+           "--paper", str(paper).upper(),
+           "--landscape" if str(orientation) == "landscape" else "--portrait",
            "--scale", f"{scale[0]}:{scale[1]}",
            "--window", ",".join(f"{v:.6f}" for v in window)]
     for st in stamps or []:
@@ -99,16 +165,18 @@ def musa_plot_cmd(musa_file: Path, pdf_out: Path, *, scale: tuple[float, float],
 def run_musa_plot(musa_file: Path, pdf_out: Path, *, scale: tuple[float, float],
                   window: tuple[float, float, float, float],
                   stamp: tuple | None = None,
-                  stamps: list | None = None) -> dict:
-    """Plot a sheet .musa to A4 portrait PDF at a fixed scale; parse the
-    summary line into a dict (paper, mm_per_unit, scale, ...) for QA.
+                  stamps: list | None = None, paper: str = "A4",
+                  orientation: str = "portrait") -> dict:
+    """Plot a sheet .musa to PDF on its own paper at a fixed scale; parse
+    the summary line into a dict (paper, mm_per_unit, scale, ...) for QA.
     stamp = (png_path, x, y, w, h) in sheet units (shaded pictorial);
     stamps = several of them (the pictorial and the title block's logo)."""
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
     all_stamps = ([stamp] if stamp is not None else []) + list(stamps or [])
     cmd = musa_plot_cmd(musa_file, pdf_out, scale=scale, window=window,
-                        stamps=all_stamps)
+                        stamps=all_stamps, paper=paper,
+                        orientation=orientation)
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     line = next((l for l in proc.stdout.splitlines()
                  if l.startswith("[musa_plot] ok")), None)
