@@ -45,7 +45,11 @@ printed size on every sheet and all the extra paper going to the drawing.
   circled region of a view redrawn at its own scale, dimensioned in true
   millimetres), ISO 6410 thread convention
   (models carry the real helix; views project the thread blank via
-  `project_feature` and draw the root line), GD&T datum flags — on a face,
+  `project_feature` and draw the root line; a tapped hole is drawn from
+  its tap drill out to the major diameter, with the thread-end line and a
+  three-quarter arc in the end view), tabulated drawings (one sheet for a
+  family that differs in one size: a letter dimension and a table of
+  variants), GD&T datum flags — on a face,
   or on a feature of size, where the triangle goes on that feature's own
   size callout even when the views show it only edge-on, as a turned part
   does — and feature control frames (flatness, position, perpendicularity,
@@ -120,6 +124,14 @@ style contract.
   `tools/`, `.claude/`, `templates/` — keep `CLAUDE.md` in sync.
 
 ### Tests
+
+Every sheet is checked against its own manifest before it can be
+exported: /draw compares every value the manifest states — callout and
+note text, tolerances, datum letters, the title block, the value each
+location dimension must measure — with what the sheet actually prints,
+and /export refuses to run on a difference nobody waived. A dropped fit
+class or a model coordinate printed as a dimension is named, with the
+sheet it is on.
 
 ```
 python3 -m unittest discover -s tests -v

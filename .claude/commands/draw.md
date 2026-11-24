@@ -30,3 +30,9 @@ Run pipeline stage 4 (drawing generation):
 5. Report per sheet: drg_no, scale, entity/dim/hatch counts, and any parts
    the script flagged. Delegate style/layout iteration to the draftsman
    subagent when substantial rework is needed.
+
+The run ends with the VALUE CHECK: every value the manifest states is
+compared with what the sheet prints (src/verify.py), and the differences
+are printed and recorded in sheets.json. /export will refuse them, so
+fix the manifest or the sheet — or waive one deliberately in the
+manifest's "value_waivers" — and re-run.

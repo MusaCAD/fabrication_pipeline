@@ -22,11 +22,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (MANIFESTS_DIR, OUTPUT_MUSA_DIR, SCRATCH_DIR, die,
-                    paper_key, png_size, read_json, run_freecad, today,
-                    write_json)
+from common import (MANIFESTS_DIR, MUSA_PLOT, OUTPUT_MUSA_DIR,
+                    SCRATCH_DIR, die, dump_dims, paper_key, png_size,
+                    read_json, run_freecad, today, write_json)
 import fc_tree
 import musa_writer as mw
+import verify
 from manifest import VIEW_DIRS
 
 FC_PROJECT = Path(__file__).resolve().parent / "fc_project.py"
@@ -355,20 +356,39 @@ def thread_lines(ctx, threads, view_jobs, offs):
     thread-end line across the major dia where the thread stops in open
     material (omitted where a diameter step already draws that edge).
 
+    A TAPPED hole is the other way round (`"kind": "internal"`, issue #12).
+    It is modelled as its tap drill, so the solid's own edge is the MINOR
+    diameter and what has to be drawn is the MAJOR one: a thin continuous
+    line each side over the threaded length, the thread-end line where the
+    usable thread stops — short of the drill depth — and, in a view that
+    shows the hole as a circle, a three-quarter thin arc at the major
+    diameter, open in the upper-right quadrant.
+
     Specs are in the view's own coordinates, like location_dims:
+      kind   - "external" (default) or "internal" (a tapped hole)
       views  - which views to draw it in ("front", "section", "aux")
       orient - "v" if the thread axis runs up the view, "h" across it
       axis   - the axis coordinate across the thread (view x when "v")
       span   - [start, end] along the axis: the threaded length
-      major / minor - crest and root diameters (M2.5 x 0.45: 2.5 / 2.013)
-      end_line - draw the thread-end line at span[0] (default false: a
-                 diameter step already puts an edge there)
-    External threads in section keep their hatch out to the crest, so the
-    root lines simply overlay it (ISO 6410 6.2) — no hatch clipping needed.
+      major / minor - crest and root diameters (M2.5 x 0.45: 2.5 / 2.013;
+               a tapped M6 x 1: 6 major, 5 tap drill)
+      end_line - draw the thread-end line at span[0] (default false for an
+               external thread, where a diameter step already puts an edge
+               there; default TRUE for an internal one, whose thread ends
+               inside the drilled hole with nothing else to mark it)
+      circles - [{"view": v, "center": [x, y]}] for an internal thread:
+               where the hole is drawn as a circle, so the 3/4 arc goes on
+    Threads in section keep their hatch where the solid put it — out to
+    the crest for an external thread, to the drill wall for a tapped hole
+    (ISO 6410 6.2) — so these lines simply overlay it.
     """
     recs = []
     for t in threads:
         rmin, rmaj = t["minor"] / 2.0, t["major"] / 2.0
+        internal = str(t.get("kind", "external")) == "internal"
+        # the line that is DRAWN is the one the solid does not already
+        # carry: an external thread's root, a tapped hole's major dia
+        rline = rmaj if internal else rmin
         a, b = sorted(t["span"])
         vert = t.get("orient", "v") == "v"
         for view in t.get("views", ["front"]):
@@ -378,12 +398,12 @@ def thread_lines(ctx, threads, view_jobs, offs):
             ox, oy = offs["section" if view in ("section", "aux") else view]
             for s in (-1, 1):
                 if vert:
-                    x = t["axis"] + s * rmin + ox
+                    x = t["axis"] + s * rline + ox
                     recs.append(mw.line((x, a + oy), (x, b + oy)))
                 else:
-                    y = t["axis"] + s * rmin + oy
+                    y = t["axis"] + s * rline + oy
                     recs.append(mw.line((a + ox, y), (b + ox, y)))
-            if t.get("end_line"):
+            if t.get("end_line", internal):
                 if vert:
                     recs.append(mw.line((t["axis"] - rmaj + ox, a + oy),
                                         (t["axis"] + rmaj + ox, a + oy),
@@ -392,6 +412,15 @@ def thread_lines(ctx, threads, view_jobs, offs):
                     recs.append(mw.line((a + ox, t["axis"] - rmaj + oy),
                                         (a + ox, t["axis"] + rmaj + oy),
                                         P_THICK))
+        for spec in (t.get("circles") or []) if internal else ():
+            view = spec.get("view", "front")
+            if view not in view_jobs:
+                continue
+            ox, oy = offs["section" if view in ("section", "aux") else view]
+            cx, cy = spec.get("center", [t["axis"], 0.0])
+            # three quarters of a circle, open in the upper-right quadrant
+            recs.append(mw.arc((cx + ox, cy + oy), rmaj,
+                               math.pi / 2, 2.0 * math.pi))
     return recs
 
 
@@ -3047,6 +3076,96 @@ NOTES_LIMITS = (46, 54, 66, 80, 34, 26, 20, 16)
 NOTES_HEIGHTS = (3.0, 2.5)
 
 
+def dim_arrowhead(tip, along, size):
+    """A filled dimension arrowhead with MUSACAD's own proportions
+    (core/dimension.cpp append_arrowhead, ArrowType::Filled: base one
+    `size` back along the line, 0.18*size each side).
+
+    A lettered dimension draws its own arrowheads, so they have to match
+    the DIM entities beside it exactly — a drawing with two kinds of arrow
+    on one sheet reads as two drawings."""
+    ux, uy = along
+    ln = math.hypot(ux, uy) or 1.0
+    ux, uy = ux / ln, uy / ln
+    px, py = -uy, ux
+    base = (tip[0] + ux * size, tip[1] + uy * size)
+    return mw.hatch([[tip,
+                      (base[0] + px * size * 0.18, base[1] + py * size * 0.18),
+                      (base[0] - px * size * 0.18, base[1] - py * size * 0.18)]],
+                    "SOLID", props=mw.P_ANNO)
+
+
+def place_letter_dim(ctx, layout, part, view_jobs, offs, geom=(), soft=()):
+    """The LETTER dimension of a tabulated drawing (issue #11).
+
+    A family that differs in one size is drawn once, with that size shown
+    as a letter and its values listed in the variants table. A DIM entity
+    always prints the distance between its own def points — MusaCAD
+    composes prefix + measurement + suffix, with nothing that replaces the
+    middle — so the modelled variant's own thickness would print as a
+    number and read as the size of every variant. This draws the
+    dimension itself instead: the same extension lines, dimension line and
+    filled arrowheads MusaCAD would draw for that style, with the letter
+    where the value goes. It is placed and collision-checked exactly like
+    any other dimension, through the same candidate ladder.
+    """
+    spec = (part.get("variants") or {}).get("dim")
+    if not spec:
+        return []
+    letter = str((part.get("variants") or {}).get("letter", "T"))
+    view = spec.get("view", "front")
+    if view not in view_jobs:
+        layout.unresolved.append(f"letter-dim-{letter}-noview-{view}")
+        return []
+    ox, oy = offs[view if view in offs else "section"]
+    a = (spec["a"][0] + ox, spec["a"][1] + oy)
+    b = (spec["b"][0] + ox, spec["b"][1] + oy)
+    orient = spec.get("orient", "h")
+    h = ctx.mm(3.0)
+    vmn, vmx = view_jobs[view]["bounds"]
+    k = 0 if orient == "v" else 1
+    lo_edge = (vmn[0] + ox) if k == 0 else (vmn[1] + oy)
+    hi_edge = (vmx[0] + ox) if k == 0 else (vmx[1] + oy)
+    side = spec.get("side", "right" if k == 0 else "top")
+    want_hi = side in ("right", "top")
+    edge = hi_edge if want_hi else lo_edge
+    # the def points are projected onto the view edge the dim is placed
+    # against, as every location dim is
+    a = (edge, a[1]) if k == 0 else (a[0], edge)
+    b = (edge, b[1]) if k == 0 else (b[0], edge)
+    sign = 1 if want_hi else -1
+    cands = []
+    for d in LOCDIM_STANDOFFS:
+        off = edge + sign * ctx.mm(d)
+        lp = (off, (a[1] + b[1]) / 2) if orient == "v" \
+            else ((a[0] + b[0]) / 2, off)
+        exts, dline = dim_segments(a, b, lp, orient, ctx.mm(EXT_OFFSET),
+                                   ctx.mm(EXT_EXTENSION))
+        worst, cross = dim_ink_conflict(ctx, geom, exts + [dline], soft)
+        if worst > COLLINEAR_OK or cross:
+            continue
+        cands.append((lp, dim_label_rect(a, b, lp, orient, letter, h),
+                      dim_line_band(ctx, a, b, lp, orient)))
+    if not cands:
+        layout.unresolved.append(f"letter-dim-{letter}-noclearplace")
+        return []
+    lp, _, placed = _place_dim(ctx, layout, cands, f"letter-dim-{letter}")
+    if lp is None:
+        return []
+    exts, (fa, fb) = dim_segments(a, b, lp, orient, ctx.mm(EXT_OFFSET),
+                                  ctx.mm(EXT_EXTENSION))
+    recs = [mw.line(e0, e1, mw.P_ANNO) for e0, e1 in exts]
+    recs.append(mw.line(fa, fb, mw.P_ANNO))
+    arrow = ctx.mm(2.5)                      # the house dimstyle's arrow
+    recs.append(dim_arrowhead(fa, (fb[0] - fa[0], fb[1] - fa[1]), arrow))
+    recs.append(dim_arrowhead(fb, (fa[0] - fb[0], fa[1] - fb[1]), arrow))
+    recs.append(mw.cell_text(((placed[0] + placed[2]) / 2.0,
+                              (placed[1] + placed[3]) / 2.0), letter, h,
+                             props=mw.P_ANNO))
+    _claim_dim_ink(ctx, layout, a, b, lp, orient, letter)
+    return recs
+
+
 def place_notes(ctx, layout, notes, rows_h):
     """Numbered NOTES block (word-wrapped). Nothing here may ever be dropped
     — the block is placed by searching the drawing area for a free rectangle
@@ -3137,28 +3256,27 @@ def bend_rows(part):
     return rows
 
 
-def place_bend_table(ctx, layout, part, rows_h):
-    """BEND TABLE for a sheet-metal sheet, as a real ruled grid.
+def place_table(ctx, layout, title, headers, rows, rows_h, label,
+                heights=BEND_TABLE_HEIGHTS):
+    """A ruled table in the sheet's leftover space.
 
-    The numbers are the model's own bend inputs, not measurements off the
-    folded solid, so the table states what was designed. Placed by the same
-    lowest-free-band search the notes block uses, because the two blocks
-    compete for the same leftover sheet.
+    Placed by the same lowest-free-band search the notes block uses,
+    because the two blocks compete for the same leftover sheet, and shrunk
+    through `heights` until it fits — never below the smallest, which is
+    the legibility floor, so a table that cannot fit FAILS the sheet
+    instead of printing text nobody can read.
     """
-    rows = bend_rows(part)
     if not rows:
         return []
     ax0, ay0, ax1, ay1 = ctx.draw_area
     y_floor = ay0 + rows_h + ctx.mm(2.0)
-    # the blank size is dimensioned on the view and the thickness is in the
-    # title block, so the caption stays short and the table stays narrow
-    title = "BEND TABLE"
-    for hmm in BEND_TABLE_HEIGHTS:
+    ncol = len(headers)
+    for hmm in heights:
         h = ctx.mm(hmm)
         pad = 0.5 * h
-        body = [BEND_HEADERS] + rows
+        body = [headers] + rows
         cols = [max(mw.glyph_ink_w(r[c], h) for r in body) + 2 * pad
-                for c in range(len(BEND_HEADERS))]
+                for c in range(ncol)]
         width = max(sum(cols), mw.glyph_ink_w(title, h) + 2 * pad)
         rh = h + 2 * pad
         cols[-1] += width - sum(cols)
@@ -3168,7 +3286,7 @@ def place_bend_table(ctx, layout, part, rows_h):
         spot = _lowest_free(ctx, layout, width, height, y_floor)
         if spot is None:
             continue
-        layout.claim(spot, "bend-table")
+        layout.claim(spot, label)
         x0, y0 = spot[0], spot[1]
         out = [mw.mtext((x0, y0 + height - 1.7 * h), title, h, attach=6)]
         top = y0 + rh * (len(rows) + 1)
@@ -3187,8 +3305,39 @@ def place_bend_table(ctx, layout, part, rows_h):
                 out.append(mw.cell_text((xx + w / 2, cy), row[c], h))
                 xx += w
         return out
-    layout.unresolved.append("bend-table")
+    layout.unresolved.append(label)
     return []
+
+
+def place_bend_table(ctx, layout, part, rows_h):
+    """BEND TABLE for a sheet-metal sheet, as a real ruled grid.
+
+    The numbers are the model's own bend inputs, not measurements off the
+    folded solid, so the table states what was designed.
+    """
+    # the blank size is dimensioned on the view and the thickness is in the
+    # title block, so the caption stays short and the table stays narrow
+    return place_table(ctx, layout, "BEND TABLE", BEND_HEADERS,
+                       bend_rows(part), rows_h, "bend-table")
+
+
+def variant_rows(part) -> tuple:
+    """(title, headers, rows) of a tabulated drawing's variants table."""
+    spec = part.get("variants") or {}
+    cols = [str(c) for c in spec.get("columns") or []]
+    rows = [[str(v) for v in row] for row in spec.get("rows") or []]
+    return (str(spec.get("title", "VARIANTS")), tuple(cols), rows)
+
+
+def place_variants_table(ctx, layout, part, rows_h):
+    """The table of a TABULATED drawing (issue #11): one row per variant,
+    giving the letter dimension's value for each, with its own mark and
+    quantity. One sheet then covers a family that differs in one size."""
+    title, headers, rows = variant_rows(part)
+    if not rows:
+        return []
+    return place_table(ctx, layout, title, headers, rows, rows_h,
+                       "variants-table")
 
 
 def _lowest_free(ctx, layout, width, height, y_floor):
@@ -4365,6 +4514,10 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
         ctx, layout, loc_specs, view_jobs, offs, geom,
         cut_arrows, lfacs=lfacs)
     ctx.entities += loc_recs
+    # a tabulated drawing's letter dimension goes down with the location
+    # dims: it is a dimension, and it competes for the same gutters
+    ctx.entities += place_letter_dim(ctx, layout, part, view_jobs, offs,
+                                     geom, cut_arrows)
     # angular references sit INSIDE the view, so they claim their labels
     # before the leader callouts route around them
     ctx.entities += place_angle_refs(ctx, layout, part.get("angle_refs"),
@@ -4468,6 +4621,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
     layout.release("slot")       # the GD&T is placed; free what it left
     if flat:
         ctx.entities += place_bend_table(ctx, layout, part, rows_h)
+    ctx.entities += place_variants_table(ctx, layout, part, rows_h)
     notes = part.get("fab_notes", []) + part.get("extra_notes", [])
     ctx.entities += place_notes(ctx, layout, notes, rows_h)
     return ctx, replaced, layout
@@ -4791,12 +4945,28 @@ def main() -> None:
         if not part.get("sheet", True):
             print(f"bought-out: {part['description']} "
                   f"({part['drg_no']}) — parts-table row only, no sheet")
+    bboxes = {p["file"]: p["bodies"][0]["bbox_size"]
+              for p in analysis.get("parts", []) if p.get("bodies")}
+    tpl_texts = [r.content.replace("\\n", "\n")
+                 for r in mw.parse_template() if r.kind == "MTEXT"]
+    value_findings = []
     for idx, part in enumerate(drawn, start=1):
         ctx, replaced, lay = build_part_sheet(m, part, proj)
         stamp_rects[part["drg_no"]] = ctx._stamp_rect
         out = OUTPUT_MUSA_DIR / f"{part['drg_no']}.musa"
         out.write_text(ctx.render())
-        sheets.append({"file": str(out), "drg_no": part["drg_no"],
+        # the value check (issue #14): what the manifest states must be
+        # what the sheet prints. /export refuses to run on a difference
+        # that is not waived.
+        values = verify.check_sheet(
+            m, part, out.read_text(),
+            dump_dims(out) if MUSA_PLOT.exists() else [],
+            bboxes.get(part["file"]), tpl_texts)
+        live, done = verify.waived(values, part.get("value_waivers"))
+        value_findings += [f"{part['drg_no']}: {ln}"
+                           for ln in verify.report(live)]
+        sheets.append({"values": live, "values_waived": done,
+                       "file": str(out), "drg_no": part["drg_no"],
                        "description": part["description"],
                        "scale": part["scale"], "window": ctx.window,
                        "paper": ctx.paper, "orientation": ctx.orientation,
@@ -4858,8 +5028,35 @@ def main() -> None:
             # the table did not fit as asked: say which fallback was used
             print(f"  parts table ({tbl['rows']} rows): "
                   + "; ".join(tbl["fallbacks"]))
+    asm_sheets = [s for s in sheets if s["kind"] == "assembly"]
+    if asm_sheets:
+        asm = m["assembly_sheet"]
+        text = "\n".join(Path(s["file"]).read_text() for s in asm_sheets)
+        dims = []
+        if MUSA_PLOT.exists():
+            for s in asm_sheets:
+                dims += dump_dims(Path(s["file"]))
+        bb = analysis["assembly"].get("bbox_max")
+        lo = analysis["assembly"].get("bbox_min")
+        size = [hi - l for hi, l in zip(bb, lo)] if bb and lo else None
+        values = verify.check_assembly(m, asm, text, dims, size, tpl_texts)
+        live, done = verify.waived(values, asm.get("value_waivers"))
+        asm_sheets[0]["values"] = live
+        asm_sheets[0]["values_waived"] = done
+        value_findings += [f"{asm['drg_no']}: {ln}"
+                           for ln in verify.report(live)]
+    if value_findings:
+        print(f"values: {len(value_findings)} difference(s) between the "
+              "manifest and the sheets:")
+        for line in value_findings:
+            print(f"  {line}")
+        print("  (/export will refuse these; waive one in the manifest's "
+              '"value_waivers" if it is deliberate)')
+    else:
+        print("values: every value the manifest states is on its sheet")
     write_json(OUTPUT_MUSA_DIR / "sheets.json",
                {"manifest": str(man_path), "sheets": sheets,
+                "values_ok": not value_findings,
                 "deliver_to": m.get("deliver_to")})
     print(f"wrote {len(sheets)} sheets + output/musa/sheets.json")
     if problems:

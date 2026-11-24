@@ -415,6 +415,94 @@ def assembly_sheet_problems(m: dict) -> list[str]:
     return out
 
 
+def variants_problems(part: dict, who: str) -> list[str]:
+    """A tabulated drawing the sheet can draw (issue #11): one letter, one
+    dimension carrying it, a column for it in the table, and every row
+    filled. A letter nobody can look up, or a row missing its value, is a
+    sheet the vendor cannot build from."""
+    spec = part.get("variants") or {}
+    if not spec:
+        return []
+    out = []
+    letter = str(spec.get("letter", ""))
+    if len(letter) != 1 or not letter.isalpha():
+        out.append(f"{who}: variants.letter {letter!r} must be one letter")
+    dim = spec.get("dim")
+    if not isinstance(dim, dict):
+        out.append(f"{who}: variants needs a dim {{view, orient, a, b}} — "
+                   "the dimension the letter stands on")
+    else:
+        for key in ("a", "b"):
+            pt = dim.get(key)
+            if not (isinstance(pt, (list, tuple)) and len(pt) == 2
+                    and all(isinstance(v, (int, float)) for v in pt)):
+                out.append(f"{who}: variants.dim.{key} must be [x, y] in "
+                           "the view's own coordinates")
+        if dim.get("orient", "h") not in ("h", "v"):
+            out.append(f"{who}: variants.dim.orient "
+                       f"{dim.get('orient')!r} (want h or v)")
+        if dim.get("side") is not None and \
+                dim["side"] not in ("top", "bottom", "left", "right"):
+            out.append(f"{who}: variants.dim.side {dim['side']!r}")
+    cols = [str(c) for c in spec.get("columns") or []]
+    rows = spec.get("rows") or []
+    if not cols:
+        out.append(f"{who}: variants.columns is empty — the table has to "
+                   f"say what its values are (e.g. MARK, {letter or 'T'}, "
+                   "QTY)")
+    elif letter and letter not in cols:
+        out.append(f"{who}: the table has no {letter!r} column, so nothing "
+                   f"gives {letter!r} a value (columns: {', '.join(cols)})")
+    if not rows:
+        out.append(f"{who}: variants.rows is empty — a tabulated drawing "
+                   "with no variants is a plain sheet")
+    for i, row in enumerate(rows, start=1):
+        if not isinstance(row, (list, tuple)) or len(row) != len(cols):
+            out.append(f"{who}: variants row {i} has {len(row)} values for "
+                       f"{len(cols)} columns")
+    return out
+
+
+def thread_problems(part: dict, who: str, bbox=None) -> list[str]:
+    """A thread the sheet can draw (issue #12): the crest must be bigger
+    than the root — for a tapped hole that means the thread is wider than
+    its tap drill — and the threaded length must be a real span inside the
+    part, not a stray coordinate."""
+    out = []
+    for t in part.get("threads") or []:
+        kind = str(t.get("kind", "external"))
+        if kind not in ("external", "internal"):
+            out.append(f"{who}: thread kind {kind!r} (want external or "
+                       "internal)")
+        try:
+            major, minor = float(t["major"]), float(t["minor"])
+            a, b = sorted(float(v) for v in t["span"])
+        except (KeyError, TypeError, ValueError):
+            out.append(f"{who}: a thread needs major, minor and "
+                       "span [start, end]")
+            continue
+        if not minor > 0 or not major > minor:
+            what = ("tap drill" if kind == "internal" else "root")
+            out.append(f"{who}: thread major {major:g} must be bigger than "
+                       f"its {what} {minor:g}")
+        if b - a <= 0:
+            out.append(f"{who}: thread span {t['span']} has no length")
+        elif bbox is not None:
+            # the span is along the axis in the view's own coordinates, so
+            # it can only be as long as the part is
+            longest = max(bbox)
+            if b - a > longest + 0.001:
+                out.append(f"{who}: thread span {t['span']} is longer "
+                           f"({b - a:g}) than the part ({longest:g})")
+        if kind == "internal":
+            for spec in t.get("circles") or []:
+                cen = spec.get("center")
+                if not (isinstance(cen, (list, tuple)) and len(cen) == 2):
+                    out.append(f"{who}: thread circles need a "
+                               "center [x, y] in the view's coordinates")
+    return out
+
+
 def paper_problems(m: dict) -> list[str]:
     """Per-sheet paper (issue #10): the paper must be one the harness is
     measured for, and the manifest must name a template for it — a sheet
@@ -503,6 +591,10 @@ def thin_feature_problems(m: dict) -> list[str]:
 def lock(draft_path: Path) -> None:
     m = read_json(draft_path)
     problems = []
+    src = REPORTS_DIR / "analysis.json"
+    bboxes = {p["file"]: p["bodies"][0]["bbox_size"]
+              for p in (read_json(src).get("parts", []) if src.exists()
+                        else []) if p.get("bodies")}
     if m.get("drg_no_prefix") in (None, "", "TBD"):
         problems.append("drg_no_prefix undecided")
     if m.get("project") in (None, "", "TBD"):
@@ -551,6 +643,9 @@ def lock(draft_path: Path) -> None:
                             f"{part.get('scale')!r} (want N:D)")
         problems += detail_problems(part)
         problems += gdt_problems(part, str(part.get("file")))
+        problems += thread_problems(part, str(part.get("file")),
+                                    bboxes.get(part.get("file")))
+        problems += variants_problems(part, str(part.get("file")))
     problems += thin_feature_problems(m)
     problems += quantity_problems(m)
     problems += paper_problems(m)

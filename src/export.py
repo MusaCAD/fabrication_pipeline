@@ -30,6 +30,24 @@ def main() -> None:
     meta = read_json(meta_path)
     OUTPUT_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
+    # the value check (issue #14): /draw compared every value the manifest
+    # states with what the sheet prints. A difference nobody waived stops
+    # the export — a dropped tolerance reaches the vendor otherwise.
+    bad = []
+    for sheet in meta["sheets"]:
+        for f in sheet.get("values") or []:
+            bad.append(f"{sheet['drg_no']}: {f['kind'].upper()}: {f['what']}"
+                       + (f" — the sheet prints {f['found']!r}"
+                          if f.get("found") else ""))
+    if bad:
+        die("the sheets do not say what the manifest states:\n  "
+            + "\n  ".join(bad)
+            + "\n  fix the manifest or the sheet and re-run /draw, or waive "
+              "it in the manifest's \"value_waivers\"")
+    waived = sum(len(s.get("values_waived") or []) for s in meta["sheets"])
+    if waived:
+        print(f"values: {waived} difference(s) waived in the manifest")
+
     exported = []
     for sheet in meta["sheets"]:
         num, den = (int(x) for x in sheet["scale"].split(":"))

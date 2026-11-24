@@ -248,6 +248,32 @@ co-author line to git commits.
   root lines simply overlay it. At M2.5/1:1 the 0.24 mm crest-root gap is
   under the 0.30 mm stroke floor and prints as one heavier band: normal for
   small threads — the DESIGNATION carries the spec, not the line-work.
+  A TAPPED HOLE is the other way round (`"kind": "internal"`, issue #12):
+  it is modelled as its tap drill, so the solid's own edge is the MINOR
+  dia and what has to be drawn is the MAJOR one — a thin continuous line
+  each side over the threaded span, the thread-end line where the usable
+  thread stops (short of the drill depth; on by default, since nothing
+  else marks it), and, in a view that shows the hole as a circle, a
+  three-quarter thin arc at the major dia open in the upper-right quadrant
+  (manifest `"circles": [{"view", "center"}]`). The hatch stops at the
+  drill wall, where the solid ends, and the thread lines overlay it. The
+  lock checks the thread is wider than its tap drill and its span is a
+  real length inside the part (manifest.thread_problems).
+- TABULATED DRAWINGS (issue #11): a family that differs in ONE size is
+  drawn once. Manifest part `"variants"` {letter, title, dim {view,
+  orient, a, b, side}, columns, rows}: the varying size is dimensioned
+  with the LETTER and the table gives its value per variant, with each
+  one's mark and quantity. A DIM always prints the distance between its
+  own def points — MusaCAD composes prefix + measurement + suffix, and
+  nothing replaces the middle — so draw.place_letter_dim draws the
+  dimension itself (the same extension lines, dimension line and filled
+  arrowheads, dim_arrowhead matching core/dimension.cpp's own
+  proportions) with the letter where the value goes, placed and
+  collision-checked through the same ladder as any location dim. The
+  table goes in free space like the bend table (both through
+  draw.place_table) and fails the sheet rather than shrinking below the
+  legibility floor. The lock checks the table has a column for the letter
+  and every row is filled (manifest.variants_problems).
 - BOUGHT-OUT items (standard fasteners etc.): manifest part `"sheet": false`
   — the part keeps its P.NO. row and assembly balloon but gets no sheet of
   its own, and its DRG NO. carries the standard (e.g. "IS 1364-3"). Nobody
@@ -306,6 +332,25 @@ co-author line to git commits.
   and fabrication notes are per-part USER DECISIONS at /finalise, elicited
   ONE question at a time conversationally (never batch-blocked) —
   src/manifest.py only proposes defaults.
+- THE VALUE CHECK (issue #14, src/verify.py, run inside /draw): what the
+  manifest STATES must be what the sheet PRINTS. The layout engine only
+  guarantees that what it places does not overlap and the qa-checker reads
+  the PDF against the template rules, so neither caught a dropped
+  tolerance or a model coordinate printed as a dimension — while the
+  report said "every number kept". stated = callout and note text, GD&T
+  tolerances and datum letters, thread designations, the variants table,
+  the title block, and the VALUE each location dim must measure; printed =
+  every MTEXT/TEXT/LEADER content in the .musa plus every DIM label as
+  MusaCAD composes it (dump_dims, so DIMLFAC and precision are applied).
+  Four kinds of finding — missing, changed (it names the words that are
+  not there: "the sheet is missing: f7"), extra (a printed VALUE the
+  manifest does not account for; the pipeline's own furniture and the
+  template's text are known) and impossible (a dim bigger than the part,
+  which is what a model coordinate looks like). Wrapped text still matches
+  because the sheet is read as one running string both ways round (the
+  notes block draws bottom-up). /draw prints and records them; /export
+  REFUSES to run on any that is not waived by an explicit manifest
+  `"value_waivers"` entry.
 - Layout quality (hard, enforced in draw.py + qa-checker): view group
   centered horizontally and vertically balanced in the drawing area; ZERO
   overlaps (dim text vs geometry, dim vs dim, leaders vs views) and ZERO
@@ -320,6 +365,7 @@ co-author line to git commits.
 | 2 judge | /judge | src/judge.py | reports/judgement.json+.md |
 | 3 finalise | /finalise | src/manifest.py propose/lock (interactive) | manifests/manifest.json (locked) |
 | 4 draw | /draw | src/draw.py (+fc_project.py in FreeCAD) | output/musa/*.musa + sheets.json |
+| 4b values | (inside /draw) | src/verify.py | sheets.json "values" per sheet |
 | 5 export | /export | src/export.py → tools/bin/musa_plot, pdfunite | output/pdf/*.pdf + print_set.pdf |
 | all | /pipeline <dir> | stages 1–5 with MANDATORY pause after /judge | — |
 
