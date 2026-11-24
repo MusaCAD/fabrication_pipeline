@@ -5,6 +5,105 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.12.0 — 2026-11-24
+
+What the checks were still missing, and what a model file shows when you
+open it:
+[#20](https://github.com/MusaCAD/fabrication_pipeline/issues/20),
+[#21](https://github.com/MusaCAD/fabrication_pipeline/issues/21) and
+[#23](https://github.com/MusaCAD/fabrication_pipeline/issues/23).
+
+### Fixed
+
+- **The value check read the parts table as unexplained values** (#21).
+  `stated_assembly_values` counted only each part's description and
+  drawing number as stated, so the MATERIAL cells — `SS 316`, `NBR 70`,
+  `PA66`: numbers in their names — came out as `EXTRA`, along with the
+  continuation sheet's own `PARTS TABLE CONTINUED FROM SHEET 1.` The only
+  way through was a waiver for the drawing's own words. The table is now
+  read AS PLANNED, cell by cell (`draw.parts_row_cells`, carried in the
+  sheet's meta), which is what the sheet really prints: grouping
+  bought-out hardware replaces several parts' rows with one of its own
+  and a continuation sheet carries the rest. Material, size, remarks and
+  the quantity from `part_usage` are stated values like the rest, so a
+  material the table does NOT print now reads as MISSING, and the
+  continuation note is furniture. On the real two-sheet assembly the
+  value check goes from eleven findings to none.
+- **A balloon leader could cross another view to reach its part** (#20).
+  A split fan starts at the top of the drawing area and runs down past
+  the section, so the balloons at the bottom of the column reached their
+  parts in the FRONT view straight across the section's outline and
+  hatch — pointing at a part through a view that says nothing about it.
+  `_uncross` kept the leaders off each other; nothing kept them off
+  another view. Every knee is now tested against the other views' ink
+  (`draw.crosses_other_view`), and a balloon the section was in the way
+  of is RE-PLANNED into the section when the section shows that part —
+  the whole fan is then placed again, because every knee below it moves
+  up. A `balloon_in` the manifest states is kept whatever it costs, and
+  the layout check reports what is left. On the real 26-balloon sheet
+  five part numbers move into the section, every number is still
+  ballooned, and no leader crosses a view again.
+- **Two details on a continuation sheet sat side by side**, sharing one
+  balloon column, so every balloon of the far one reached it across the
+  near one. They stack one above the other now, and the sheet's own
+  balloons are kept off the detail outlines as the part sheets' leaders
+  are.
+
+### Added
+
+- **The layout check reads leader-versus-view** (#20): `leader-across-view`
+  reports a leader that reaches its feature through ink that is not its
+  own view's. The views are found by clustering the sheet's own geometry
+  — a sheet does not say which ink is which view and does not have to,
+  since the views are drawn at least MIN_VIEW_GAP apart — and the
+  parts-table band and the pictorial box are the pipeline's furniture
+  rather than the drawing's ink.
+- **/analyse reports what each FILE shows when it is opened** (#23), and
+  /judge fails one that shows nothing. A model built by script can be
+  saved with everything hidden: the geometry is all there, every check
+  passes, and the only hint that something is wrong is an empty 3D view —
+  the user has to expand each body to its last feature and unhide it by
+  hand before they can see the part. `analysis["visibility"]` now carries
+  one entry per file:
+  - a PART file: each Body visible, and the Tip feature it ends on (the
+    features and sketches behind the tip are hidden in the ordinary way
+    and are not a finding);
+  - an ASSEMBLY or sub-assembly: every instance link visible, with each
+    sub-assembly read in its own document too — that is how its parts are
+    seen when somebody opens that file.
+
+  `Visibility` is an App property, so it reads the same headless as it
+  does in the GUI, and `fc_tree` records it per instance. A file that
+  opens with NOTHING visible is a FAIL at /judge; anything else hidden is
+  a WARN, since the rest of the file is there to look at.
+
+### Upgrade steps
+
+1. `git -C <your pipeline clone> fetch --tags && git checkout v0.12.0`
+2. **Re-run `/analyse` before `/judge`**: the visibility report comes from
+   the FreeCAD side, so a judgement run against an older analysis.json
+   simply says nothing about it (no false findings, no check either).
+3. **Expect the visibility FAIL on script-built models.** A body whose
+   tip feature is hidden shows nothing: unhide it (select in the tree,
+   Space) and save, or set `Visibility` on the body and its tip in the
+   generator before it saves.
+4. **Drop any `value_waivers` you added for parts-table materials or the
+   continuation note** (#21) — they are stated values and furniture now,
+   and a stale waiver would hide a real difference.
+5. Nothing to change for #20: it is in the placement engine. Re-run
+   `/draw`; an assembly whose balloons had to cross a view will report
+   different `ballooned` views in sheets.json, with the moved part
+   numbers now in the view that shows them.
+
+### Compatibility
+
+Every sheet of the four real sets — eleven sslxbt part sheets, the TPE
+assembly and its parts, amogha RES-41-LH-01 and
+`samples/out/RES-SAMPLE-01` — redraws byte for byte. The sslxbt assembly
+sheet changes only where it had the fault: five balloons move into the
+section, and with both details on sheet 2 the set now passes both checks
+with nothing left over.
+
 ## v0.11.0 — 2026-11-24
 
 Three faults a real set carried past every check the pipeline had, the

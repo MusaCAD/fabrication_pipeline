@@ -16,6 +16,7 @@ decision-by-decision finalisation step.
 
 ```
 /analyse <model_dir>   headless FreeCAD extraction -> reports/analysis.json
+                       (including what each file SHOWS when it is opened)
 /judge                 fabrication-readiness verdict (report-only)
         ⏸ user approval
 /finalise              conversational elicitation -> locked manifests/manifest.json
@@ -69,7 +70,8 @@ printed size on every sheet and all the extra paper going to the drawing.
   a section, hatched part by part so neighbours can be told apart and
   leaving shafts, screws and pins uncut), enlarged detail views, one
   circled balloon per part number across the whole sheet — in two columns,
-  one each side of the view, when one cannot hold them all, and on the
+  one each side of the view, when one cannot hold them all; in the view
+  its own leader can reach without crossing another; and on the
   continuation sheet with the detail that shows the part when the
   manifest puts that detail there — a parts table
   that can be grouped by sub-assembly with quantities per group and in
@@ -83,6 +85,11 @@ printed size on every sheet and all the extra paper going to the drawing.
   bought-out hardware by kind, then continues on a second sheet — and says
   which fallback it used. Bought-out items (`"sheet": false` in the manifest)
   take a P.NO. row and a balloon but no sheet of their own.
+- Models are checked for what they SHOW, not only for what they contain:
+  a part file whose bodies (or the tip features they end on) are hidden,
+  or an assembly whose links are, opens with an empty 3D view however
+  complete the geometry is. /analyse reports it per file and /judge fails
+  a file that shows nothing.
 - A collision-driven layout engine places every annotation (dimension text
   modelled to MusaCAD's exact rendering geometry, line bands, extension
   corridors, leaders, frames, notes) with auto-nudge and a hard
@@ -145,9 +152,10 @@ dropped fit class or a model coordinate printed as a dimension is named,
 with the sheet it is on.
 
 The LAYOUT check reads how the sheet looks: leaders crossing each other,
-a leader running along the outline it points at, a symbol or balloon
-lying on text, text outside the drawing area, and — as a warning — two
-leaders running together closer than 2 mm.
+a leader running along the outline it points at or reaching its feature
+through another view, a symbol or balloon lying on text, text outside the
+drawing area, and — as a warning — two leaders running together closer
+than 2 mm.
 
 /export refuses to run on anything either of them finds that the manifest
 does not waive (`"value_waivers"`, `"layout_waivers"`).

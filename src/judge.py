@@ -295,6 +295,38 @@ def assembly_findings(asm: dict) -> list:
     return out
 
 
+def visibility_findings(analysis: dict) -> list:
+    """What each file SHOWS when it is opened (issue #23).
+
+    A model built by script can be saved with everything hidden: the user
+    then has to expand each body to its last feature and unhide it before
+    they can see the part at all, and a drawing run gives no hint that
+    anything is wrong — the geometry is there, it is only invisible. A
+    file that opens with nothing visible is a FAIL; one with something
+    hidden that should not be is a WARN, since the rest of it is there to
+    look at.
+    """
+    out = []
+    for v in analysis.get("visibility") or []:
+        where = Path(v.get("file") or "").name or v.get("document") or "?"
+        kind = v.get("kind", "file")
+        if v.get("nothing_visible"):
+            what = "; ".join(v.get("hidden") or []) or (
+                "every body in it is hidden" if kind == "part"
+                else "every link in it is hidden")
+            out.append({"severity": "FAIL",
+                        "message": f"{where} opens with nothing visible — "
+                                   f"{what}. Unhide it (select in the tree, "
+                                   "Space) and save; a model built by "
+                                   "script sets Visibility on the body and "
+                                   "its tip feature before it saves"})
+        elif v.get("hidden"):
+            out.append({"severity": "WARN",
+                        "message": f"{where} ({kind}): "
+                                   + "; ".join(v["hidden"])})
+    return out
+
+
 def main() -> None:
     # --generated <source>: these models are built by a script, named here so
     # the report says which one. It changes the sketch-constraint findings
@@ -324,7 +356,7 @@ def main() -> None:
                         drawn=p["file"] not in undrawn,
                         paper=papers.get(p["file"], DEFAULT_PAPER))
              for p in a["parts"]]
-    asm_findings = assembly_findings(asm)
+    asm_findings = assembly_findings(asm) + visibility_findings(a)
     overall = "PASS"
     for v in [p["verdict"] for p in parts] + \
              [f["severity"] for f in asm_findings]:

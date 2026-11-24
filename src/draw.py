@@ -1153,6 +1153,25 @@ class Layout:
     def claim(self, r, label, kind="anno"):
         self.claims.append((r[0], r[1], r[2], r[3], label, kind))
 
+    def snapshot(self):
+        """Everything this layout has decided so far, to put back when a
+        TRIAL placement is not the one that is kept (issue #20: the
+        balloons are placed once to see which of them would have to cross
+        a view, and then again with those moved to the view that shows
+        them)."""
+        return (list(self.claims), list(self.unresolved),
+                list(self.leaders), list(self.flips), list(self.faults),
+                self.nudges)
+
+    def restore(self, snap) -> None:
+        (claims, unresolved, leaders, flips, faults, nudges) = snap
+        self.claims = list(claims)
+        self.unresolved = list(unresolved)
+        self.leaders = list(leaders)
+        self.flips = list(flips)
+        self.faults = list(faults)
+        self.nudges = nudges
+
     def release(self, kind) -> int:
         """Drop every claim of one kind. The GD&T slots (place_callouts'
         `reserve`) exist to keep a callout's column free while the frames
@@ -4240,8 +4259,37 @@ def _uncross(order, tip_of, kx, start, pitch, rounds=8):
     return order
 
 
+def view_ink(views):
+    """[(name, job, segments)] for the views a leader must not cross —
+    their drawn ink in sheet coordinates, measured once."""
+    return [(name, job, prim_segments(job["visible"], off))
+            for name, job, off in views]
+
+
+def crosses_other_view(tip, knee, inks, own_job):
+    """The name of a view this leader would cross on its way, other than
+    the one it points into (issue #20).
+
+    A balloon that reaches its part across the section points at it
+    through a view that says nothing about it, and the reader has to
+    follow a line over the hatch to see where it lands."""
+    lo = (min(tip[0], knee[0]), min(tip[1], knee[1]),
+          max(tip[0], knee[0]), max(tip[1], knee[1]))
+    for name, job, segs in inks:
+        if job is own_job:
+            continue
+        for a, b in segs:
+            if max(a[0], b[0]) < lo[0] or min(a[0], b[0]) > lo[2] \
+                    or max(a[1], b[1]) < lo[1] or min(a[1], b[1]) > lo[3]:
+                continue
+            if _segs_cross(tip, knee, a, b, 0.0):
+                return name
+    return None
+
+
 def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
-                 knee_x=None, side="right", dense=False):
+                 knee_x=None, side="right", dense=False, inks=(),
+                 in_the_way=None):
     """P.NO. leader callouts fanned into a band through the collision
     layout. Each arrow lands on an edge that belongs to that instance
     alone (balloon_landing).
@@ -4257,7 +4305,14 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
     and `knee_x` pins the column. `side` puts that column left of the
     view instead, for the other half of a split fan (balloon_sides) — the
     balloon then sits left of its knee, so the leader still meets it from
-    the view."""
+    the view.
+
+    `inks` is every view's drawn ink (view_ink): a knee whose leader would
+    cross a view the balloon does not point into is passed over for the
+    next one down the column, and when none is left the balloon says
+    which view is in the way and records it in `in_the_way`, so the
+    caller can balloon that part in THAT view instead (issue #20)."""
+    in_the_way = {} if in_the_way is None else in_the_way
     if asm_job is None:
         ents = [(j, o, k, pid) for j, o, k, pid in items]
     else:
@@ -4319,9 +4374,22 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
     for rank, i in enumerate(ys):
         job, o, k, pid = ents[i]
         placed = None
+        blocked = None
         for dy in [4.0 * step for step in range(0, 25)]:
             ky = next_y - ctx.mm(dy)
             tip = fixed.get(i) or balloon_landing(ctx, job, o, k, (kx, ky))
+            across = crosses_other_view(tip, (kx, ky), inks, job) \
+                if inks else None
+            if across:
+                # this knee would reach the part across another view
+                blocked = across
+                continue
+            if inks and leader_runs_along(
+                    ctx, [sg for _n, _j, sgs in inks for sg in sgs],
+                    tip, (kx, ky)) > COLLINEAR_OK:
+                # ... or lie along the outline it lands on, where the
+                # arrow cannot be told from the part (issue #18)
+                continue
             r = layout.place([(kx if sgn > 0 else kx - 2 * brad,
                                ky - brad)], 2 * brad, 2 * brad,
                              f"balloon-{pid}-{rank}")
@@ -4341,7 +4409,15 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
                 placed = r
                 break
         if placed is None:
-            layout.unresolved.append(f"balloon-{pid}-{rank}")
+            layout.unresolved.append(
+                f"balloon-{pid}-{rank}" + (
+                    f": every knee left on this column would cross the "
+                    f"{blocked} view to reach the part (issue #20) — "
+                    "balloon it in that view instead (`balloon_in`), or "
+                    "give the sheet a column its leader can reach"
+                    if blocked else ""))
+            if blocked:
+                in_the_way[pid] = blocked
     return recs, next_y
 
 
@@ -4442,16 +4518,21 @@ def balloon_plan(m, views, id_by_path):
         want = forced.get(pid) or in_detail.get(pid)
         order = ([want] if want else []) + ["front", "section"]
         for view in order:
-            job = views.get(view)
-            if job is None:
-                continue
-            for k, inst in enumerate(job.get("instances", [])):
-                if id_by_path.get(inst["name"]) == part["part_id"]:
-                    plan.setdefault(pid, (view, k))
-                    break
-            if pid in plan:
+            k = instance_index(views.get(view), part["part_id"], id_by_path)
+            if k is not None:
+                plan.setdefault(pid, (view, k))
                 break
     return plan
+
+
+def instance_index(job, part_id, id_by_path):
+    """Which instance of a view is this part number, or None."""
+    if job is None:
+        return None
+    for k, inst in enumerate(job.get("instances", [])):
+        if id_by_path.get(inst["name"]) == part_id:
+            return k
+    return None
 
 
 # -------------------------------------------------------- parts table
@@ -4876,6 +4957,9 @@ def pictorial_box(ctx, layout, png=None, zones=(), floor=None):
     layout.claim((x0 - ctx.mm(1.0), y0 - ctx.mm(1.0),
                   x1 + ctx.mm(1.0), y1 + ctx.mm(1.0)),
                  "pictorial-box", "reserved")
+    # the check reads the finished sheet and would otherwise take this
+    # frame for a view of its own (issue #20)
+    ctx._pictorial_box = (x0, y0, x1, y1)
     recs = [mw.polyline([(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
                         closed=True)]
     inset = ctx.mm(1.0)
@@ -5445,6 +5529,14 @@ def continuation_sheet(m, asm, rows, analysis, sheet_of, details=(),
         if djob is None:
             continue
         djob["instances"] = job.get("instances", [])
+        # the next detail goes ABOVE or BELOW this one, not beside it:
+        # two details side by side share one balloon column, and every
+        # balloon of the far one would reach it across the near one
+        # (issue #20)
+        rk = (djob["bounds"][1][1] - djob["bounds"][0][1]) / 2.0
+        pad = ctx.mm(DETAIL_ASSEMBLY_PAD_MM)
+        fan_zone.append((ctx.draw_area[0], off[1] - rk - pad,
+                         ctx.draw_area[2], off[1] + rk + pad))
         ctx.entities += recs
         emit_prims(ctx, djob["visible"], off)
         emit_prims(ctx, djob["hidden"], off, P_HIDDEN)
@@ -5457,7 +5549,10 @@ def continuation_sheet(m, asm, rows, analysis, sheet_of, details=(),
     if items:
         recs, _ = balloons_fan(ctx, layout, None, None, items,
                                start_y=ctx.draw_area[3] - brad,
-                               knee_x=knee_x, dense=True)
+                               knee_x=knee_x, dense=True,
+                               inks=view_ink([(f"detail {label}", dj, off)
+                                              for label, dj, off
+                                              in placed_details]))
         ctx.entities += recs
     if rows:
         ctx.entities += place_notes(
@@ -5686,11 +5781,6 @@ def build_assembly_sheet(m, proj):
         # a balloon on a detail that is drawn on sheet 2 is drawn THERE
         elsewhere = {f"detail:{str(sp.get('label', 'B'))}"
                      for sp, _of, _p, _j in later}
-        by_view: dict = {}
-        for pid, (view, k) in plan.items():
-            if view in elsewhere:
-                continue
-            by_view.setdefault(view, []).append((k, disp_no(pid)))
         # ONE column while it holds them all; otherwise one each side of
         # the view, every balloon on the side its own part sits on. 26
         # numbers need about 360 mm of column and A3 landscape has 290.
@@ -5704,43 +5794,93 @@ def build_assembly_sheet(m, proj):
         left_x = min(j["bounds"][0][0] + offs[v][0]
                      for v, j in views.items()) - ctx.mm(16.0) - left_dim
         columns = {"right": band_x, "left": left_x}
-        sides = balloon_sides(ctx, all_views, all_offs, by_view,
-                              balloon_capacity(ctx, top, floor), columns)
-        if sides:                       # a split fan packs closer
-            sides = balloon_sides(ctx, all_views, all_offs, by_view, cap,
+        inks = view_ink([(v, j, offs[v]) for v, j in views.items()])
+
+        def run_fans(plan):
+            """Place every balloon of this plan and say which of them had
+            to be left out because a view was in the way (issue #20)."""
+            by_view: dict = {}
+            for pid, (view, k) in plan.items():
+                if view in elsewhere:
+                    continue
+                by_view.setdefault(view, []).append((k, disp_no(pid)))
+            sides = balloon_sides(ctx, all_views, all_offs, by_view,
+                                  balloon_capacity(ctx, top, floor),
                                   columns)
-        if sides:
-            per = {"left": 0, "right": 0}
-            for sd in sides.values():
-                per[sd] += 1
-            if max(per.values()) > cap:
-                full = max(per, key=lambda k: per[k])
-                layout.unresolved.append(
-                    f"balloons: the {full} column has {per[full]} numbers "
-                    f"and room for {cap} — even with both sides in use "
-                    f"{sum(per.values())} balloons need more column than "
-                    "this sheet has; use a bigger sheet or balloon fewer "
-                    "part numbers per view")
-        # a single column keeps starting level with the view (every sheet
-        # drawn so far); a split one starts at the top of the area, where
-        # the room it needs is
-        next_y = {"left": top, "right": top} if sides \
-            else {"left": None, "right": None}
-        for sd in ("right", "left"):
-            # every view's balloons on this side are ONE fan: ordered in
-            # two runs, one view after the other, their leaders cross
-            # between the views (issue #18)
-            items = [(all_views[view], all_offs[view], k, pid)
-                     for view in sorted(by_view,
-                                        key=lambda v: (v != "front", v))
-                     for (k, pid) in by_view[view]
-                     if sides.get((view, k), "right") == sd]
-            if not items:
+            if sides:                   # a split fan packs closer
+                sides = balloon_sides(ctx, all_views, all_offs, by_view,
+                                      cap, columns)
+            full = None
+            if sides:
+                per = {"left": 0, "right": 0}
+                for sd in sides.values():
+                    per[sd] += 1
+                if max(per.values()) > cap:
+                    full = (max(per, key=lambda kk: per[kk]), per)
+            # a single column keeps starting level with the view (every
+            # sheet drawn so far); a split one starts at the top of the
+            # area, where the room it needs is
+            next_y = {"left": top, "right": top} if sides \
+                else {"left": None, "right": None}
+            recs, blocked = [], {}
+            for sd in ("right", "left"):
+                # every view's balloons on this side are ONE fan: ordered
+                # in two runs, one view after the other, their leaders
+                # cross between the views (issue #18)
+                items = [(all_views[view], all_offs[view], k, pid)
+                         for view in sorted(by_view,
+                                            key=lambda v: (v != "front", v))
+                         for (k, pid) in by_view[view]
+                         if sides.get((view, k), "right") == sd]
+                if not items:
+                    continue
+                got, next_y[sd] = balloons_fan(
+                    ctx, layout, None, None, items, start_y=next_y[sd],
+                    knee_x=columns[sd], side=sd, dense=bool(sides),
+                    inks=inks, in_the_way=blocked)
+                recs += got
+            return recs, blocked, sides, full
+
+        snap = layout.snapshot()
+        recs, blocked, sides, full = run_fans(plan)
+        # A balloon the section was in the way of belongs in the section,
+        # when the section shows that part at all: moving it is better
+        # than a leader over the hatch, and better than no balloon
+        # (issue #20). The whole fan is placed again, because every knee
+        # below it moves up.
+        pid_of = {disp_no(pid): pid for pid in plan}
+        forced = {str(k) for k in (asm.get("balloon_in") or {})}
+        moved = {}
+        for shown, view in blocked.items():
+            pid = pid_of.get(shown)
+            if pid in forced:
+                continue        # the manifest said where this one goes
+            part = next((p for p in m["parts"]
+                         if str(p["part_id"]) == pid), None)
+            if part is None or view not in all_views:
                 continue
-            recs, next_y[sd] = balloons_fan(
-                ctx, layout, None, None, items, start_y=next_y[sd],
-                knee_x=columns[sd], side=sd, dense=bool(sides))
-            ctx.entities += recs
+            k = instance_index(all_views[view], part["part_id"], id_by_path)
+            if k is not None:
+                moved[pid] = (view, k)
+        if moved:
+            layout.restore(snap)
+            trial_plan = dict(plan, **moved)
+            trial = run_fans(trial_plan)
+            if len(trial[1]) < len(blocked):
+                plan = trial_plan
+                recs, blocked, sides, full = trial
+            else:
+                layout.restore(snap)
+                recs, blocked, sides, full = run_fans(plan)
+        ctx.entities += recs
+        if full:
+            side_name, per = full
+            layout.unresolved.append(
+                f"balloons: the {side_name} column has {per[side_name]} "
+                f"numbers and room for {cap} — even with both sides in "
+                f"use {sum(per.values())} balloons need more column than "
+                "this sheet has; use a bigger sheet or balloon fewer "
+                "part numbers per view")
         later_balloons.update({v: [] for v in elsewhere})
         for pid, (view, k) in plan.items():
             if view in elsewhere:
@@ -5757,6 +5897,10 @@ def build_assembly_sheet(m, proj):
             layout.unresolved.append(f"balloon-{pid}-no-view-shows-it")
     ctx.entities += place_notes(ctx, layout, asm.get("fab_notes", []), rows_h)
     layout.unresolved.extend(overflow)
+    # what the table was planned to print, cell by cell: the value check
+    # reads the printed table against THIS, since grouping and the
+    # continuation sheet decide which rows a part's own values reach
+    table_report["cells"] = [parts_row_cells(r, analysis, m) for r in rows]
     meta = {"parts_table": table_report, "hatch": hatch_report,
             "balloons": balloon_report,
             "details": [str(s.get("label", "B")) for s in detail_specs_list],
@@ -5776,9 +5920,11 @@ def build_assembly_sheet(m, proj):
 def sheet_layout_check(ctx, path: Path, waivers=None):
     """Read a finished sheet back and report what it LOOKS like (issue
     #22). Returns (live faults, waived, warnings)."""
+    box = getattr(ctx, "_pictorial_box", None)
     found = layout_check.check_sheet(
         path.read_text(), ctx.draw_area, ctx.num / ctx.den,
-        table_band=getattr(ctx, "_table_band", None))
+        table_band=getattr(ctx, "_table_band", None),
+        boxes=[box] if box else ())
     live, waived_ = verify.waived(layout_check.faults(found), waivers)
     return live, waived_, layout_check.warnings(found)
 
@@ -5936,7 +6082,10 @@ def main() -> None:
         bb = analysis["assembly"].get("bbox_max")
         lo = analysis["assembly"].get("bbox_min")
         size = [hi - l for hi, l in zip(bb, lo)] if bb and lo else None
-        values = verify.check_assembly(m, asm, text, dims, size, tpl_texts)
+        cells = ((asm_sheets[0].get("assembly_report") or {})
+                 .get("parts_table") or {}).get("cells")
+        values = verify.check_assembly(m, asm, text, dims, size, tpl_texts,
+                                       rows=cells)
         live, done = verify.waived(values, asm.get("value_waivers"))
         asm_sheets[0]["values"] = live
         asm_sheets[0]["values_waived"] = done

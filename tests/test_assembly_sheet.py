@@ -491,6 +491,35 @@ class RealAssemblySheetTest(unittest.TestCase):
         n_two = sum(1 for l in two.splitlines() if l.startswith("LEADER "))
         self.assertEqual((n_one, n_two), (4, 1))
 
+    def test_two_details_on_sheet_2_do_not_leader_across_each_other(self):
+        """Issue #20: side by side they share one balloon column, and
+        every balloon of the far one reaches it across the near one."""
+        import layout_check as lc
+        m = json.loads(json.dumps(self.m))
+        m["_analysis_path"] = self.m["_analysis_path"]
+        base = self.m["assembly_sheet"]["detail_views"][0]
+        sec = self.proj["assembly:section"]
+        rod = next(i for i in sec["instances"] if i["name"] == "ROD")
+        m["assembly_sheet"]["detail_views"] = [
+            dict(base, sheet=2),
+            {"label": "C", "scale": "2:1", "of": "section", "sheet": 2,
+             "center": [(rod["bbox"][0] + rod["bbox"][2]) / 2,
+                        (rod["bbox"][1] + rod["bbox"][3]) / 2],
+             "radius": 6.0, "balloons": ["04"]}]
+        built = draw.build_assembly_sheet(m, proj=self.proj)
+        self.assertEqual(len(built), 2)
+        ctx, _r, lay, meta = built[1]
+        self.assertEqual(lay["unresolved"], [])
+        self.assertEqual(sorted(meta["details"]), ["B", "C"])
+        box = getattr(ctx, "_pictorial_box", None)
+        found = lc.check_sheet(ctx.render(), ctx.draw_area,
+                               ctx.num / ctx.den,
+                               table_band=getattr(ctx, "_table_band", None),
+                               boxes=[box] if box else ())
+        self.assertEqual([f for f in found
+                          if f["kind"] in ("leader-across-view",
+                                           "leader-crossing")], [])
+
     def test_the_detail_still_fails_loudly_when_it_cannot_be_drawn(self):
         m = json.loads(json.dumps(self.m))
         m["_analysis_path"] = self.m["_analysis_path"]

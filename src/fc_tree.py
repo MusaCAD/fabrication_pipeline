@@ -138,7 +138,8 @@ def walk(doc, issues=None):
       name, label, path ("SUB1/SPLATE" — the instance identity used
       everywhere, so the report and the sheet agree), kind ("part" |
       "assembly"), target_file (the real part file, or the sub-assembly's
-      file), broken, children, plus two private keys the caller consumes
+      file), broken, visible (is this instance shown at all?), children,
+      plus two private keys the caller consumes
       and must strip before JSON: `_placement` (the GLOBAL placement) and
       `_shape` (the shape in top-assembly coordinates, or None).
 
@@ -158,7 +159,11 @@ def _walk(links, issues, path="", parent_placement=None, seen_files=()):
         label = getattr(obj, "Label", name)
         here = f"{path}{name}"
         deep = deep_target(obj)
-        node = {"name": name, "label": label, "path": here}
+        # whether this instance is SHOWN in the document that holds it: a
+        # model built by script can open with everything hidden, and the
+        # only way to see the part is to unhide it feature by feature
+        node = {"name": name, "label": label, "path": here,
+                "visible": bool(getattr(obj, "Visibility", True))}
         if deep is None:
             issues.append(f"broken link: {name} ({label})"
                           + (f" in {path.rstrip('/')}" if path else ""))

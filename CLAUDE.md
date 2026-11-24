@@ -220,6 +220,16 @@ co-author line to git commits.
     share ONE knee column, so the leaders cannot cross between views. A
     P.NO. no view shows fails the sheet: the table would claim a part the
     drawing does not point at.
+    A balloon leader never crosses a view it does not point into
+    (issue #20): every knee is tested against the other views' ink
+    (draw.crosses_other_view), and a balloon the section was in the way
+    of is RE-PLANNED into the section when the section shows that part —
+    the whole fan is then placed again, because every knee below it
+    moves up. A `balloon_in` the manifest states is kept whatever it
+    costs, and the layout check reports what is left. On a continuation
+    sheet the details stack one ABOVE the other for the same reason:
+    side by side they share one column, and the far one's balloons would
+    reach it across the near one.
     TWO COLUMNS when one cannot hold them: 26 numbers need about 360 mm
     of column and the A3-landscape drawing area is 190 mm, so the fan
     splits, one column each side of the view (draw.balloon_sides). Each
@@ -315,6 +325,20 @@ co-author line to git commits.
   thickness_mm, blank_mm, bends}. A flat pattern with no bend features is
   rejected at /finalise — a blank with no bend table is just a flat part,
   which takes a plain two-view sheet.
+- VISIBILITY (issue #23): a model built by script can be saved with
+  everything hidden — the geometry is all there, every check passes, and
+  the file opens showing nothing, so the user has to expand each body to
+  its last feature and unhide it by hand. fc_analyse reports, per FILE,
+  what it shows (`analysis["visibility"]`: one entry for the top
+  assembly, one per sub-assembly document and one per part): a part's
+  every Body and the Tip feature it ends on must be visible (the
+  features and sketches behind the tip are hidden in the ordinary way
+  and are not a finding), an assembly's every instance link must be, and
+  a sub-assembly is read in ITS OWN document too, which is how its parts
+  are seen when that file is opened. `Visibility` is an App property, so
+  it reads the same headless as in the GUI; fc_tree records it per
+  instance. judge.visibility_findings turns a file that opens with
+  NOTHING visible into a FAIL and anything else hidden into a WARN.
 - STANDALONE PARTS: `/analyse <dir> --no-assembly` (and `--parts <files>`)
   analyses a part pack with no assembly document; the analysis carries an
   empty assembly stub and /judge skips every assembly-level check.
@@ -366,7 +390,13 @@ co-author line to git commits.
   tolerance or a model coordinate printed as a dimension — while the
   report said "every number kept". stated = callout and note text, GD&T
   tolerances and datum letters, thread designations, the variants table,
-  the title block, and the VALUE each location dim must measure; printed =
+  the title block, the VALUE each location dim must measure, and — on an
+  assembly sheet — every cell of the parts table AS PLANNED
+  (draw.parts_row_cells, carried in the sheet's meta): grouping
+  bought-out hardware replaces several parts' rows with one of its own
+  and a continuation sheet carries the rest, so reading the manifest's
+  parts list instead reported a material with a number in its name as an
+  EXTRA nobody asked for (issue #21); printed =
   every MTEXT/TEXT/LEADER content in the .musa plus every DIM label as
   MusaCAD composes it (dump_dims, so DIMLFAC and precision are applied).
   Four kinds of finding — missing, changed (it names the words that are
@@ -403,13 +433,17 @@ co-author line to git commits.
   how the sheet LOOKS, off the finished .musa, because the engine only
   ever tests the boxes it placed against each other. It reports leaders
   that cross, a leader running along drawn geometry (within 0.5 mm for
-  more than 3 printed mm), a symbol / triangle / frame / balloon lying on
-  text, annotation text outside the drawing area, and — as a WARNING —
-  two leaders running together closer than 2 mm. /draw prints them and
-  records them per sheet; /export refuses everything but the warning
-  unless a manifest `"layout_waivers"` entry names it. Tolerances are in
-  PRINTED millimetres at any scale; the parts-table band is the
-  template's furniture, not the drawing's ink.
+  more than 3 printed mm), a leader that reaches its feature THROUGH
+  another view (issue #20 — the views are found by clustering the
+  sheet's own ink, since a sheet does not say which ink is which view
+  and does not have to: the views are drawn MIN_VIEW_GAP apart), a
+  symbol / triangle / frame / balloon lying on text, annotation text
+  outside the drawing area, and — as a WARNING — two leaders running
+  together closer than 2 mm. /draw prints them and records them per
+  sheet; /export refuses everything but the warning unless a manifest
+  `"layout_waivers"` entry names it. Tolerances are in PRINTED
+  millimetres at any scale; the parts-table band and the pictorial box
+  are the pipeline's own furniture, not the drawing's ink.
 - SIDE-BY-SIDE SECTIONS (issue #13): with `projection: right|left` and
   leaders on BOTH views, each view gets its OWN callout column — the
   inner view's in the inter-view gap, the outer view's outside the group

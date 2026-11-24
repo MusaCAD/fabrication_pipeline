@@ -18,6 +18,9 @@ Run pipeline stage 2 (judgement):
 Checks performed by the script: missing/Default materials, sketches not
 fully constrained or not solving, bodies with no or multiple solids, parts
 with zero dimensional constraints, broken assembly links, ungrounded or
-unjointed instances, and parts that fit no standard scale
+unjointed instances, files that open with nothing VISIBLE (issue #23 — a
+model built by script can be saved with every body hidden; that is a
+FAIL, and anything else hidden is a WARN), and parts that fit no standard
+scale
 (1:1, 1:2, 1:5, 1:10, 2:1, 5:1) on the paper that part's sheet states
 (A4 portrait unless the manifest says otherwise).

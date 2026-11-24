@@ -27,6 +27,12 @@ and, for sub-assemblies (issue #3):
   cyc_a.FCStd, cyc_b.FCStd -- each contains the other. FreeCAD saves this
                          happily and then SEGFAULTS when asked for the
                          link's Shape, so the walk has to refuse it.
+and, for the VISIBILITY check (issue #23) — the real failure: a model
+built by script and saved with everything hidden, which opens showing
+nothing at all:
+  hidden_part.FCStd   -- a PartDesign body whose body AND tip are hidden
+  hidden_tip.FCStd    -- the body is shown, its tip feature is not
+  hidden_asm.FCStd    -- an assembly whose every instance link is hidden
 and, for assembly SHEETS (issue #5):
   rod.FCStd, screw.FCStd   -- turned parts, which a section does not cut
                          along their length (ISO 128-50)
@@ -78,6 +84,51 @@ def make_part(out_dir, name, dx, dy, dz):
     doc.recompute()
     path = os.path.join(out_dir, name + ".FCStd")
     doc.saveAs(path)
+    return path
+
+
+def hide(obj):
+    """Hide an object the way a script that never touched Visibility
+    leaves it — or the way a user hides something and saves."""
+    obj.Visibility = False
+    return obj
+
+
+def make_hidden_part(out_dir, name, dx, dy, dz, body=False, tip=False):
+    """A part saved with its body and/or its tip feature hidden. Opened on
+    its own it shows nothing, and the geometry is all there: the only hint
+    is that the 3D view is empty (issue #23)."""
+    doc = FreeCAD.newDocument(name)
+    b = doc.addObject("PartDesign::Body", "Body")
+    box = doc.addObject("PartDesign::AdditiveBox", "Box")
+    b.addObject(box)
+    box.Length, box.Width, box.Height = dx, dy, dz
+    doc.recompute()
+    if body:
+        hide(b)
+    if tip:
+        hide(b.Tip)
+    path = os.path.join(out_dir, name + ".FCStd")
+    doc.saveAs(path)
+    return path
+
+
+def make_hidden_assembly(out_dir, name, members):
+    """An assembly whose instance links are all hidden."""
+    doc = FreeCAD.newDocument(name)
+    asm = doc.addObject("Assembly::AssemblyObject", "Assembly")
+    path = os.path.join(out_dir, name + ".FCStd")
+    doc.saveAs(path)
+    group = doc.addObject("App::DocumentObjectGroup", "Joints")
+    asm.addObject(group)
+    links = [add_link(doc, asm, os.path.join(out_dir, part + ".FCStd"),
+                      label, pos) for part, label, pos in members]
+    doc.recompute()
+    ground(doc, group, links[0])
+    for link in links:
+        hide(link)
+    doc.recompute()
+    doc.save()
     return path
 
 
@@ -306,6 +357,12 @@ def main():
            joints=[("Fixed", "SUB_A.LPLATE.Vertex1", "SUB_B.RBLOCK.Vertex1"),
                    ("Fixed", "SUB_A.LPLATE.Vertex1", "ROD.Vertex1"),
                    ("Fixed", "SUB_A.LPLATE.Vertex1", "SCREW.Vertex1")])
+    # --- visibility (issue #23) ------------------------------------
+    make_hidden_part(out_dir, "hidden_part", 30, 20, 5, body=True, tip=True)
+    make_hidden_part(out_dir, "hidden_tip", 30, 20, 5, tip=True)
+    make_hidden_assembly(out_dir, "hidden_asm",
+                         [("plate", "HPLATE", (0, 0, 0)),
+                          ("block", "HBLOCK", (0, 0, 10))])
     cyclic_pair(out_dir)
     nested(out_dir, "asm_plainlink",
            [(sub1, "SUB1", (100, 0, 0), True)],

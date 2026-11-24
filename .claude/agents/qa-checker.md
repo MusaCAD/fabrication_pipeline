@@ -87,12 +87,12 @@ upstream (/draw, /finalise).
     fully inside the box frame, white background, nothing intruding into
     other content.
 
-17. **Leaders**: no leader crosses another, and none runs along the
-    outline it points at — /draw's layout check (issue #22) reads the
-    .musa for both, so look for what a raster shows and it cannot: a
-    leader arrowhead lost in the part's own line, a leader through a
-    dimension's text, a balloon leader crossing a view it does not point
-    into (issue #20, still open).
+17. **Leaders**: no leader crosses another, none runs along the outline
+    it points at, and none reaches its feature through another view —
+    /draw's layout check (issues #22 and #20) reads the .musa for all
+    three, so look for what a raster shows and it cannot: a leader
+    arrowhead lost in the part's own line, a leader through a
+    dimension's own text, an arrow that lands on the wrong edge.
 
 ## Verdict format
 Present the FULL checklist (items 1-8) with per-sheet PASS/FAIL and

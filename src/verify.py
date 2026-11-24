@@ -52,6 +52,7 @@ FURNITURE = tuple(re.compile(p) for p in (
     r"^(\d+\s*,\s*)+\d+$",                  # a P.NO. list in one cell
     r"^\d+ ITEMS$",
     r"^(NOTES:|BEND TABLE|TOTAL|SUB-ASSEMBLY|TYP|REF|NTS|ISOMETRIC VIEW)$",
+    r"^PARTS TABLE CONTINUED FROM SHEET \d+\.$",
     r"^\d+%%d REF$",
     r"^%%c[\d.]+$",                         # a bare diameter dim value
     r"^[\d.]+ (kg|g)$",                      # the weight, computed here
@@ -141,10 +142,19 @@ def stated_values(m: dict, part: dict) -> list[dict]:
     return out
 
 
-def stated_assembly_values(m: dict, asm: dict) -> list[dict]:
+def stated_assembly_values(m: dict, asm: dict, rows=None) -> list[dict]:
     """Every value the assembly sheet is supposed to carry: its own notes
     and title block, and the row each part number brings to the parts
-    table. A dropped row is a part the drawing no longer orders."""
+    table. A dropped row is a part the drawing no longer orders.
+
+    `rows` is the table as it was PLANNED — one cell dict per row, from
+    draw.parts_row_cells — which is what the sheet really prints: grouping
+    bought-out hardware replaces several parts' rows with one of its own,
+    and a continuation sheet carries the rest. Every cell the manifest
+    fills is then a stated value, material and size and remarks included,
+    so a missing material reads as MISSING instead of the material reading
+    as an EXTRA nobody asked for (issue #21). Without them the reading
+    falls back to each part's own description and drawing number."""
     out = []
 
     def add(kind, text, where=""):
@@ -160,9 +170,18 @@ def stated_assembly_values(m: dict, asm: dict) -> list[dict]:
         add("title block", f"SCALE : {asm['scale']}", "scale")
     if m.get("drawn_by"):
         add("title block", m["drawn_by"], "drawn_by")
-    for part in m.get("parts") or []:
-        for key in ("description", "drg_no"):
-            add("parts table", part.get(key), f"P.NO. {part.get('part_id')}")
+    if rows is None:
+        for part in m.get("parts") or []:
+            for key in ("description", "drg_no"):
+                add("parts table", part.get(key),
+                    f"P.NO. {part.get('part_id')}")
+        return out
+    for cells in rows:
+        where = f"P.NO. {cells.get('pno')}" if cells.get("pno") else \
+            norm(cells.get("description"))
+        for key in ("description", "drg_no", "material", "size", "remarks"):
+            add("parts table", cells.get(key), where)
+        add("parts table qty", cells.get("qty"), where)
     return out
 
 
@@ -194,11 +213,11 @@ def _blobs(printed: list[str]) -> tuple[str, str]:
 
 
 def check_assembly(m: dict, asm: dict, musa_text: str, dims=(), bbox=None,
-                   template_texts=()) -> list[dict]:
+                   template_texts=(), rows=None) -> list[dict]:
     """Compare the assembly sheet (or its sheets, concatenated, when the
     table runs onto a continuation) with what the manifest states."""
     return check_sheet(m, {}, musa_text, dims, bbox, template_texts,
-                       claims=stated_assembly_values(m, asm))
+                       claims=stated_assembly_values(m, asm, rows))
 
 
 def check_sheet(m: dict, part: dict, musa_text: str, dims=(), bbox=None,

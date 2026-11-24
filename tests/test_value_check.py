@@ -218,6 +218,84 @@ class WaiverTest(unittest.TestCase):
         self.assertEqual(done, [])
 
 
+class PartsTableCellsTest(unittest.TestCase):
+    """The parts table is manifest content (issue #21).
+
+    The real failure: an assembly table split over two sheets reported
+    `EXTRA: printed 'SS 316'`, `'NBR 70'`, `'PA66'` — the MATERIAL cells,
+    which have numbers in their names — and `EXTRA: printed 'PARTS TABLE
+    CONTINUED FROM SHEET 1.'`, a note the pipeline writes itself. The
+    only way through was a waiver for the drawing's own words."""
+
+    ROWS = [{"pno": "12", "description": "TAIL PLUG", "qty": "1",
+             "drg_no": "WQ-TF07A-12", "material": "SS 316", "size": "-",
+             "weight": "0.21 kg", "remarks": "-"},
+            {"pno": "17", "description": "O-RING 2-146", "qty": "4",
+             "drg_no": "AS568-146", "material": "NBR 70", "size": "-",
+             "weight": "2 g", "remarks": "-"},
+            {"pno": "20", "description": "LOGGER CRADLE", "qty": "1",
+             "drg_no": "WQ-TF07A-20", "material": "PA66", "size": "-",
+             "weight": "0.04 kg", "remarks": "-"}]
+
+    def manifest(self):
+        return {"parts": [{"part_id": r["pno"], "description":
+                           r["description"], "drg_no": r["drg_no"],
+                           "material": r["material"]} for r in self.ROWS]}
+
+    def printed(self, rows=None):
+        texts = []
+        for r in (rows if rows is not None else self.ROWS):
+            texts += [r["pno"], r["description"], r["qty"], r["drg_no"],
+                      r["material"], r["size"], r["weight"], r["remarks"]]
+        texts.append("PARTS TABLE CONTINUED FROM SHEET 1.")
+        return sheet_of(texts)
+
+    def test_a_material_with_a_number_in_it_is_not_extra(self):
+        found = verify.check_assembly(self.manifest(), {},
+                                      self.printed(), rows=self.ROWS)
+        self.assertEqual(found, [])
+
+    def test_the_continuation_note_is_the_pipeline_s_own_furniture(self):
+        found = verify.check_sheet({}, part_with(),
+                                   sheet_of(["PARTS TABLE CONTINUED FROM "
+                                             "SHEET 1."]))
+        self.assertEqual(found, [])
+
+    def test_a_material_the_table_does_not_print_is_missing(self):
+        short = [dict(r) for r in self.ROWS]
+        short[1]["material"] = ""          # the cell was dropped
+        found = verify.check_assembly(self.manifest(), {},
+                                      self.printed(short), rows=self.ROWS)
+        self.assertEqual([f["kind"] for f in found], ["missing"])
+        self.assertIn("NBR 70", found[0]["what"])
+        self.assertIn("P.NO. 17", found[0]["what"])
+
+    def test_a_quantity_is_a_stated_value_too(self):
+        stated = verify.stated_assembly_values(self.manifest(), {},
+                                               rows=self.ROWS)
+        kinds_ = {c["kind"] for c in stated}
+        self.assertIn("parts table qty", kinds_)
+        self.assertIn("4", [c["text"] for c in stated
+                            if c["kind"] == "parts table qty"])
+
+    def test_without_the_planned_rows_it_reads_the_manifest_as_before(self):
+        stated = verify.stated_assembly_values(self.manifest(), {})
+        texts = [c["text"] for c in stated]
+        self.assertIn("TAIL PLUG", texts)
+        self.assertIn("WQ-TF07A-12", texts)
+        self.assertNotIn("SS 316", texts)
+
+    def test_a_grouped_row_states_what_it_really_prints(self):
+        # bought-out hardware grouped into one row: the members' own
+        # descriptions are NOT printed, so they are not claimed either
+        rows = [{"pno": "22, 23", "description": "HEX SCREW M5 x 8",
+                 "qty": "6", "drg_no": "IS 1364-3", "material": "SS 316",
+                 "size": "-", "weight": "-", "remarks": "2 ITEMS"}]
+        found = verify.check_assembly(self.manifest(), {},
+                                      self.printed(rows), rows=rows)
+        self.assertEqual([f["kind"] for f in found], [])
+
+
 class SheetMarkedDetailTest(unittest.TestCase):
     """A detail drawn on the continuation sheet marks its region "B
     (SH 2)" on the view it comes from (issue #19). That is the

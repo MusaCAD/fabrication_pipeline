@@ -37,7 +37,8 @@ def to_markdown(a: dict) -> str:
                  f"- model dir: `{a['model_dir']}`",
                  f"- FreeCAD: {a['freecad_version']}  |  no assembly document",
                  ""]
-        return "\n".join(lines + part_markdown(a)) + "\n"
+        return "\n".join(lines + part_markdown(a)
+                          + visibility_markdown(a)) + "\n"
     lines = [f"# Analysis — {Path(asm['file']).name}",
              f"- model dir: `{a['model_dir']}`",
              f"- FreeCAD: {a['freecad_version']}  |  workbench: {asm['workbench']}",
@@ -62,6 +63,7 @@ def to_markdown(a: dict) -> str:
         lines.append(f"- {j['label']}: {j['type']} on {on}{where}"
                      + (" *(suppressed)*" if j.get("suppressed") else ""))
     lines += part_markdown(a)
+    lines += visibility_markdown(a)
     if asm["issues"]:
         lines += ["", "## Assembly issues"]
         lines += [f"- {i}" for i in asm["issues"]]
@@ -80,6 +82,27 @@ def instance_markdown(nodes: list, depth: int = 0) -> list:
                      + (" **BROKEN LINK**" if i.get("broken") else "")
                      + (" **CYCLIC**" if i.get("cyclic") else ""))
         lines += instance_markdown(i.get("children", []), depth + 1)
+    return lines
+
+
+def visibility_markdown(a: dict) -> list:
+    """What each file shows when it is opened (issue #23). Silent when
+    every file opens showing its part, which is the ordinary case."""
+    vis = a.get("visibility") or []
+    bad = [v for v in vis if v.get("nothing_visible") or v.get("hidden")]
+    if not bad:
+        return ["", f"## Visibility", "",
+                f"- all {len(vis)} file(s) open showing their geometry"] \
+            if vis else []
+    lines = ["", "## Visibility", ""]
+    for v in bad:
+        where = Path(v.get("file") or "").name or v.get("document") or "?"
+        if v.get("nothing_visible"):
+            lines.append(f"- **{where}** ({v.get('kind')}): opens with "
+                         "NOTHING visible")
+        else:
+            lines.append(f"- {where} ({v.get('kind')}): "
+                         + "; ".join(v.get("hidden") or []))
     return lines
 
 

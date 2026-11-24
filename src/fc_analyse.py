@@ -76,6 +76,95 @@ def body_info(obj):
     }
 
 
+def shown(obj) -> bool:
+    """Is this object visible in its own document? Visibility is an App
+    property, so it reads the same headless as it does in the GUI."""
+    return bool(getattr(obj, "Visibility", True))
+
+
+def part_visibility(doc, tip):
+    """What a PART file shows when it is opened on its own (issue #23).
+
+    A model built by script can be saved with everything hidden: the user
+    then has to expand each body to its last feature and unhide it before
+    they can see the part at all. What has to be visible is each Body and
+    the Tip feature it ends on; the features and sketches behind the tip
+    are hidden in the ordinary way and are not a finding.
+    """
+    objs, hidden = [], []
+    bodies = [o for o in doc.Objects if o.TypeId == "PartDesign::Body"]
+    for b in bodies:
+        t = getattr(b, "Tip", None)
+        entry = {"object": b.Name, "label": b.Label, "visible": shown(b),
+                 "tip": getattr(t, "Name", None),
+                 "tip_label": getattr(t, "Label", None),
+                 "tip_visible": shown(t) if t is not None else None}
+        objs.append(entry)
+        if not entry["visible"]:
+            hidden.append(f"body {b.Label} is hidden")
+        if t is not None and not entry["tip_visible"]:
+            hidden.append(f"body {b.Label}: its tip feature "
+                          f"{t.Label} is hidden")
+    if not bodies and tip is not None:
+        # a SheetMetal chain or a plain solid: the part IS the tip object
+        objs.append({"object": tip.Name, "label": tip.Label,
+                     "visible": shown(tip), "tip": None,
+                     "tip_label": None, "tip_visible": None})
+        if not shown(tip):
+            hidden.append(f"{tip.Label} is hidden")
+    nothing = bool(objs) and not any(
+        o["visible"] and (o["tip_visible"] is not False) for o in objs)
+    return {"file": doc.FileName, "document": doc.Name, "kind": "part",
+            "objects": objs, "hidden": hidden, "nothing_visible": nothing}
+
+
+def links_visibility(doc, kind):
+    """What an ASSEMBLY file shows when it is opened on its own: every
+    instance link in it (issue #23). A sub-assembly is checked in its own
+    document too, because that is how its parts are seen when somebody
+    opens that file."""
+    links = fc_tree.top_instances(doc)
+    hidden = [f"{o.Label} ({o.Name}) is hidden" for o in links
+              if not shown(o)]
+    return {"file": getattr(doc, "FileName", ""), "document": doc.Name,
+            "kind": kind, "links": len(links), "hidden": hidden,
+            "nothing_visible": bool(links) and len(hidden) == len(links)}
+
+
+def assembly_visibility(doc, nodes):
+    """What the top assembly shows: its own instance links, and every
+    instance under them. A sub-assembly's parts are mirrored into this
+    document as links of their own, so one of them hidden here leaves a
+    hole in the assembly even though the file it comes from is fine."""
+    vis = links_visibility(doc, "assembly")
+    flat = fc_tree.flatten(nodes)
+    # one line per instance, by PATH, so a mirror deep in a sub-assembly
+    # is named where it lives rather than twice over
+    vis["hidden"] = sorted(f"{n['path']} is hidden" for n in flat
+                           if not n.get("visible", True))
+    vis["instances"] = len(flat)
+    return vis
+
+
+def sub_assembly_visibility(nodes):
+    """One entry per sub-assembly DOCUMENT, read once however many
+    instances of it the assembly uses."""
+    out, seen = [], set()
+    for node in fc_tree.flatten(nodes):
+        if node.get("kind") != "assembly" or node.get("cyclic"):
+            continue
+        name = node.get("sub_document")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            sub = FreeCAD.getDocument(name)
+        except Exception:
+            continue
+        out.append(links_visibility(sub, "sub-assembly"))
+    return out
+
+
 def analyse_part(path):
     doc = FreeCAD.openDocument(path)
     sketches, issues = [], []
@@ -87,7 +176,8 @@ def analyse_part(path):
     if tip is None:
         issues.append("no solid found in this document")
     out = {"file": path, "document": doc.Name, "bodies": bodies,
-           "sketches": sketches, "issues": issues}
+           "sketches": sketches, "issues": issues,
+           "visibility": part_visibility(doc, tip)}
     if flat is not None:
         # a sheet-metal part: the vendor cuts the blank and bends it, so the
         # drawing needs the developed shape and the bends, not a section
@@ -235,6 +325,9 @@ def analyse_assembly(path):
     usage = fc_tree.part_usage(nodes)
     return {"file": path, "document": doc.Name, "workbench": wb,
             "instances": nodes, "joints": joints, "issues": issues,
+            # what this file shows when it is opened (issue #23)
+            "visibility": assembly_visibility(doc, nodes),
+            "sub_assembly_visibility": sub_assembly_visibility(nodes),
             # the real parts: analysed once, counted per instance
             "part_usage": {f: u for f, u in sorted(usage.items())},
             "sub_assembly_files": sorted(
@@ -260,6 +353,11 @@ def main():
     part_files = sorted(asm.get("part_usage", {}))
     part_files += [f for f in extra_parts if f not in part_files]
     result["parts"] = [analyse_part(f) for f in part_files]
+    # every file this run opened, and what it shows (issue #23)
+    result["visibility"] = (
+        ([asm["visibility"]] if asm.get("visibility") else [])
+        + list(asm.get("sub_assembly_visibility") or [])
+        + [p["visibility"] for p in result["parts"] if p.get("visibility")])
     fcv = FreeCAD.Version()
     result["freecad_version"] = ".".join(fcv[:3])
     with open(out_path, "w") as f:

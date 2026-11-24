@@ -22,6 +22,9 @@ the engine's opinion of the sheet does not come into it. What it reports:
   ink-on-text       a symbol, datum triangle, frame or balloon lies on
                     text — the covered glyph is usually the one that
                     carries the meaning;
+  leader-across-view a leader reaches its feature THROUGH another view,
+                    so it points at the part across ink that says nothing
+                    about it;
   text-off-sheet    text outside the drawing area altogether;
   leaders-parallel  two leaders closer than 2 mm and running together (a
                     WARNING: it reads badly but says nothing false).
@@ -47,6 +50,8 @@ import musa_writer as mw
 P_ANNO = mw.P_ANNO
 
 # printed millimetres
+VIEW_GAP = 6.0          # ink further apart than this is another view
+VIEW_MIN = 5.0          # ... and a view is bigger than this each way
 ALONG_GAP = 0.5         # closer than this, two near-parallel lines merge
 ALONG_MM = 3.0          # ... and running together this far is "along"
 PARALLEL_GAP = 2.0      # leaders closer than this read as one bundle
@@ -266,14 +271,15 @@ SYMBOL_KINDS = ("POLYLINE", "CIRCLE", "ARC", "HATCH")
 
 
 def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
-                where="") -> list[dict]:
+                where="", boxes=()) -> list[dict]:
     """Every layout fault this sheet carries.
 
     `draw_area` is the sheet's own drawing area and `unit_mm` how many
     printed millimetres one sheet unit is (num/den), so every tolerance
     here is in PRINTED millimetres whatever the scale. `table_band` is the
-    parts table's rows, which are the template's furniture rather than the
-    drawing's ink."""
+    parts table's rows and `boxes` the pictorial box: both are the
+    pipeline's own furniture rather than the drawing's ink, and a frame
+    the pipeline drew is not a view of the part."""
     recs = parse(musa_text)
     u = lambda mm: mm / unit_mm if unit_mm else mm        # noqa: E731
 
@@ -281,8 +287,14 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
         return rect is not None and overlaps(rect, draw_area)
 
     def furniture(rect):
-        return table_band is not None and rect is not None \
-            and overlaps(rect, table_band)
+        if rect is None:
+            return False
+        if table_band is not None and overlaps(rect, table_band):
+            return True
+        pad = u(1.5)
+        return any(b[0] - pad <= rect[0] and rect[2] <= b[2] + pad
+                   and b[1] - pad <= rect[1] and rect[3] <= b[3] + pad
+                   for b in boxes)
 
     texts = []
     for r in recs:
@@ -366,7 +378,23 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                     f"{unescape(tr.content).strip()[:28]!r}")
                 break
 
-    # 4. text outside the drawing area
+    # 4. a leader that reaches its feature through ANOTHER view
+    views = view_clusters(geom, u(VIEW_GAP), u(VIEW_MIN))
+    for t, k, lab in leaders:
+        own = _own_view(views, t, u(2.0))
+        for i, (bb, segs) in enumerate(views):
+            if i == own:
+                continue
+            if any(segs_cross(t, k, a, b, 0.0) for a, b in segs):
+                add("leader-across-view",
+                    f"the leader of {lab!r} reaches its feature through "
+                    f"the view at ({bb[0] * unit_mm:.0f}, "
+                    f"{bb[1] * unit_mm:.0f}) mm, which says nothing about "
+                    "the part it points at — balloon or call it out in "
+                    "the view that does")
+                break
+
+    # 5. text outside the drawing area
     for r, ink in ((r, text_ink(r)) for r in recs if r.kind in TEXT_KINDS):
         if ink is None or not r.anno:
             continue
@@ -377,7 +405,7 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                 f"{unescape(r.content).strip()[:28]!r} is outside the "
                 "drawing area")
 
-    # 5. leaders running parallel and close (a warning: nothing is wrong,
+    # 6. leaders running parallel and close (a warning: nothing is wrong,
     #    it only reads as one line with two arrows)
     for i, (t1, k1, l1) in enumerate(leaders):
         for t2, k2, l2 in leaders[i + 1:]:
@@ -388,6 +416,88 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                     f"{run * unit_mm:.1f} mm closer than {PARALLEL_GAP} mm",
                     severity="warn")
     return out
+
+
+def _sample(a, b, step):
+    """Points along a segment, no further apart than `step`."""
+    n = max(1, int(math.dist(a, b) / step) + 1)
+    return [(a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n)
+            for i in range(n + 1)]
+
+
+def view_clusters(geom, gap, min_side):
+    """The sheet's drawn geometry grouped into VIEWS.
+
+    A sheet does not say which ink belongs to which view, and it does not
+    have to: the views are drawn apart (MIN_VIEW_GAP is 16 mm), so ink
+    that is connected within `gap` is one view. Clusters too small or too
+    thin to be a view — the frame's own rules, a stray centre mark — are
+    left out. Returns [(bbox, segments)], biggest first."""
+    cells: dict = {}
+    for i, (a, b) in enumerate(geom):
+        for p in _sample(a, b, gap / 2.0):
+            cells.setdefault((int(p[0] // gap), int(p[1] // gap)),
+                             []).append(i)
+    parent = list(range(len(geom)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        a, b = find(i), find(j)
+        if a != b:
+            parent[a] = b
+
+    for (cx, cy), members in cells.items():
+        for i in members[1:]:
+            union(members[0], i)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                near = cells.get((cx + dx, cy + dy))
+                if near:
+                    union(members[0], near[0])
+    groups: dict = {}
+    for i in range(len(geom)):
+        groups.setdefault(find(i), []).append(i)
+    out = []
+    for idx in groups.values():
+        xs = [c for i in idx for c in (geom[i][0][0], geom[i][1][0])]
+        ys = [c for i in idx for c in (geom[i][0][1], geom[i][1][1])]
+        bb = (min(xs), min(ys), max(xs), max(ys))
+        if len(idx) < 4 or bb[2] - bb[0] < min_side \
+                or bb[3] - bb[1] < min_side:
+            continue
+        out.append((bb, [geom[i] for i in idx]))
+    return sorted(out, key=lambda v: -len(v[1]))
+
+
+def _own_view(views, tip, pad):
+    """Which view a leader points into: the one whose box holds its arrow
+    (the smallest, where a detail sits inside another), else the nearest
+    — an arrow may land just off the ink it names."""
+    inside = [i for i, (bb, _s) in enumerate(views)
+              if bb[0] - pad <= tip[0] <= bb[2] + pad
+              and bb[1] - pad <= tip[1] <= bb[3] + pad]
+    if inside:
+        return min(inside, key=lambda i: ((views[i][0][2] - views[i][0][0])
+                                          * (views[i][0][3]
+                                             - views[i][0][1])))
+    if not views:
+        return None
+    return min(range(len(views)),
+               key=lambda i: min(_seg_dist(a, b, tip)
+                                 for a, b in views[i][1]))
+
+
+def _seg_dist(a, b, p):
+    vx, vy = b[0] - a[0], b[1] - a[1]
+    L2 = vx * vx + vy * vy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * vx
+                                               + (p[1] - a[1]) * vy) / L2))
+    return math.dist(p, (a[0] + t * vx, a[1] + t * vy))
 
 
 def _name(r: Rec, filled: bool) -> str:
