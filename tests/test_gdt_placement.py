@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import draw  # noqa: E402
 import manifest as mf  # noqa: E402
+import layout_check as lc  # noqa: E402
 import musa_writer as mw  # noqa: E402
 
 from test_gdt_edge_on import seg, solid_triangles  # noqa: E402
@@ -498,6 +499,133 @@ class ShoulderLeaderTest(unittest.TestCase):
         clear = ((self.off[0] - 20.0, self.off[1] + OD),
                  (self.off[0] + TUBE_L, self.off[1] + OD))
         self.assertFalse(draw.crosses_polys(self.ctx, polys, *clear))
+
+
+class DatumTriangleClearsTheTextTest(unittest.TestCase):
+    """The triangle on a callout's shoulder (issue #17).
+
+    The real failure: the tip sat exactly on the knee, where the leader's
+    own label starts 0.4 x arrow further on, so the filled triangle
+    covered the lower left of the first glyph — on a size callout that is
+    the DIAMETER SIGN, the one glyph a vendor cannot afford to read
+    wrong. The sheet's own checks saw nothing: the datum BOX was
+    collision-checked, the triangle was not."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        m, part = tube_manifest(Path(self.tmp.name), {
+            "datums": [{"label": "A", "view": "section",
+                        "target": "bore_r35.75@head"}], "frames": []})
+        proj = {"01:front": tube_front(), "01:section": tube_section()}
+        self.ctx, _r, self.lay = draw.build_part_sheet(m, part, proj)
+        self.text = self.ctx.render()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _overlap(a, b):
+        return not (a[2] <= b[0] or b[2] <= a[0]
+                    or a[3] <= b[1] or b[3] <= a[1])
+
+    def _tri_rects(self):
+        out = []
+        for tri in solid_triangles(self.text):
+            xs = [p[0] for p in tri]
+            ys = [p[1] for p in tri]
+            out.append((min(xs), min(ys), max(xs), max(ys)))
+        return out
+
+    def test_the_sheet_places_the_datum(self):
+        self.assertEqual(self.lay["unresolved"], [])
+        self.assertTrue(solid_triangles(self.text))
+
+    def test_no_triangle_lies_on_a_callout_s_own_label(self):
+        h = self.ctx.mm(3.2)
+        lines_ = self.text.splitlines()
+        for i, line in enumerate(lines_):
+            if not line.startswith("LEADER "):
+                continue
+            t = line.split()
+            label = lines_[i + 1]
+            if not label:
+                continue
+            ink = mw.leader_text_ink((float(t[3]), float(t[4])), label, h,
+                                     self.ctx.mm(2.5))
+            for rect in self._tri_rects():
+                self.assertFalse(
+                    self._overlap(rect, ink),
+                    f"a datum triangle lies on {label!r}")
+
+    def test_no_triangle_lies_on_the_letter_in_its_own_box(self):
+        h = self.ctx.mm(3.2)
+        lines_ = self.text.splitlines()
+        for i, line in enumerate(lines_):
+            if not line.startswith("MTEXT ") or lines_[i + 1] != "A":
+                continue
+            t = line.split()
+            cx, cy = float(t[1]), float(t[2])
+            w = mw.glyph_ink_w("A", h)
+            ink = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+            for rect in self._tri_rects():
+                self.assertFalse(self._overlap(rect, ink),
+                                 "a datum triangle lies on its own letter")
+
+    def test_the_triangle_stays_on_its_leader(self):
+        """Set back ALONG the leader, not parked beside it: a triangle
+        off the leader points at no feature."""
+        bores = [l for l in self.text.splitlines() if l.startswith("LEADER ")]
+        self.assertTrue(bores)
+        tips = [t[0] for t in solid_triangles(self.text)]
+        ok = False
+        for line in bores:
+            t = [float(v) for v in line.split()[1:5]]
+            tip, knee = (t[0], t[1]), (t[2], t[3])
+            dx, dy = knee[0] - tip[0], knee[1] - tip[1]
+            ln = math.hypot(dx, dy) or 1.0
+            for p in tips:
+                off = abs((p[0] - tip[0]) * -dy / ln
+                          + (p[1] - tip[1]) * dx / ln)
+                along = ((p[0] - tip[0]) * dx + (p[1] - tip[1]) * dy) / ln
+                if off < 0.01 and 0.0 < along <= ln + 0.01:
+                    ok = True
+                # or in line with the landing, past the text (ISO 1101 5.3)
+                if abs(p[1] - knee[1]) < 1e-6 and p[0] >= knee[0]:
+                    ok = True
+        self.assertTrue(ok, "the datum triangle is not on any leader")
+
+    def test_a_short_stem_does_not_bury_the_letter(self):
+        """The box hangs 1.2 mm off the shoulder, and the triangle is
+        2.9 mm long: with the text far enough away that nothing else
+        pushes the tip back, the triangle reaches INTO its own box and
+        over the letter in it. It has to step back for that too."""
+        ctx = mw.SheetContext(1, 1)
+        ctx.dimstyles = draw.sheet_dimstyles(ctx)
+        layout = draw.Layout(ctx)
+        land = ((120.0, 250.0), (124.0, 250.0), (60.0, 262.0))
+        stack = (200.0, 248.0, 260.0, 252.0)
+        recs, rect = draw.datum_on_landing(ctx, layout, "A", land,
+                                           stack=stack)
+        self.assertIsNotNone(rect)
+        h = ctx.mm(3.2)
+        w = mw.glyph_ink_w("A", h)
+        cx = (rect[0] + rect[2]) / 2.0
+        cy = (rect[1] + rect[3]) / 2.0
+        ink = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+        for tri in solid_triangles("\n".join(recs)):
+            xs = [q[0] for q in tri]
+            ys = [q[1] for q in tri]
+            self.assertFalse(
+                self._overlap((min(xs), min(ys), max(xs), max(ys)), ink),
+                "the triangle lies on the letter in its own box")
+
+    def test_the_layout_check_agrees(self):
+        found = lc.check_sheet(self.text, self.ctx.draw_area,
+                               self.ctx.num / self.ctx.den,
+                               table_band=getattr(self.ctx, "_table_band",
+                                                  None))
+        self.assertEqual([f for f in found if f["kind"] == "ink-on-text"],
+                         [])
 
 
 if __name__ == "__main__":

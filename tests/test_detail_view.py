@@ -300,6 +300,66 @@ class SampleSheetTest(unittest.TestCase):
             self.assertAlmostEqual(float(info["mm_per_unit"]), 1.0, places=6)
 
 
+class CaptionBandTest(unittest.TestCase):
+    """A detail view's caption band belongs to the view (issue #18).
+
+    place_detail_view always reserved room for the caption inside the
+    island it looked for — and then claimed only the geometry square, so
+    a leader note landed in the band and the caption had nowhere to go.
+    The band is claimed with the view now; it YIELDS to a callout with
+    nowhere else, because a caption has a ladder of its own."""
+
+    def setUp(self):
+        self.ctx = mw.SheetContext(1, 1)
+        self.ctx.dimstyles = draw.sheet_dimstyles(self.ctx)
+        self.layout = draw.Layout(self.ctx)
+        ring = [(-20.0, -20.0), (20.0, -20.0), (20.0, 20.0), (-20.0, 20.0)]
+        self.parent = {
+            "visible": [seg(a, b) for a, b in
+                        zip(ring, ring[1:] + ring[:1])]
+            + [seg((-6.0, 0.0), (6.0, 0.0)),    # something to enlarge
+               seg((0.0, -6.0), (0.0, 6.0))],
+            "hidden": [], "bounds": [[-20.0, -20.0], [20.0, 20.0]]}
+        self.spec = {"label": "B", "scale": "2:1", "of": "front",
+                     "center": [0.0, 0.0], "radius": 10.0}
+        self.part = {"scale": "1:1"}
+
+    def place(self):
+        return draw.place_detail_view(self.ctx, self.layout, self.part,
+                                      self.spec, self.parent, (0.0, 0.0))
+
+    def test_the_band_is_claimed_with_the_view(self):
+        _recs, job, _off = self.place()
+        self.assertIsNotNone(job)
+        cap, rect = job["caption"]
+        self.assertEqual(cap, "DETAIL B (2:1)")
+        kinds = [c[5] for c in self.layout.claims
+                 if tuple(c[:4]) == tuple(rect)]
+        self.assertEqual(kinds, ["caption"], "the caption band is not kept")
+        self.assertGreaterEqual(rect[2] - rect[0],
+                                mw.text_w(cap, self.ctx.mm(4.0)) - 1e-9)
+
+    def test_the_caption_is_drawn_in_it(self):
+        _recs, job, off = self.place()
+        recs = draw.detail_caption_records(self.ctx, self.layout, job, off)
+        self.assertTrue(recs)
+        _cap, rect = job["caption"]
+        x, y = (float(v) for v in recs[0].split()[1:3])
+        self.assertAlmostEqual(x, (rect[0] + rect[2]) / 2.0, places=6)
+        self.assertAlmostEqual(y, rect[3], places=6)
+
+    def test_it_yields_to_a_note_with_nowhere_else(self):
+        _recs, job, off = self.place()
+        _cap, rect = job["caption"]
+        # a leader note takes the band, as place_callouts may
+        self.layout.claim(rect, "callout-NOWHERE ELSE")
+        self.layout.unclaim(rect, "label-DETAIL B (2:1)")
+        recs = draw.detail_caption_records(self.ctx, self.layout, job, off)
+        self.assertTrue(recs, "the caption gave up instead of moving")
+        y = float(recs[0].split()[2])
+        self.assertNotAlmostEqual(y, rect[3], places=6)
+
+
 class DetailManifestTest(unittest.TestCase):
     """What /finalise refuses to lock."""
 

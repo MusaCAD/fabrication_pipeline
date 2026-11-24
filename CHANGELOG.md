@@ -5,6 +5,136 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.11.0 — 2026-11-24
+
+Three faults a real set carried past every check the pipeline had, the
+check that would have caught them, and details on a second sheet:
+[#16](https://github.com/MusaCAD/fabrication_pipeline/issues/16),
+[#17](https://github.com/MusaCAD/fabrication_pipeline/issues/17),
+[#18](https://github.com/MusaCAD/fabrication_pipeline/issues/18),
+[#22](https://github.com/MusaCAD/fabrication_pipeline/issues/22) and
+[#19](https://github.com/MusaCAD/fabrication_pipeline/issues/19).
+
+### Fixed
+
+- **A tapped hole's thread-end line was drawn at its mouth** (#16).
+  `thread_lines` sorted the span and drew the line at the LOWER
+  coordinate, though it documented `span[0]`. A blind hole drilled from a
+  pocket floor at x = 888.6 and threaded 10 deep to x = 898.6 therefore
+  got the thick line across the mouth it opens from, and the place where
+  the thread really stops was left unmarked; only holes that happened to
+  run toward lower coordinates came out right. The line now goes where
+  the usable thread stops — `span[0]` as documented, or the new
+  `"end_at"` when the span reads the other way round, which it usually
+  does — and the lock refuses an `end_at` outside the threaded span.
+- **The datum triangle covered the diameter sign of its own callout**
+  (#17). Its tip sat exactly on the knee, where the leader's own label
+  starts 0.4 x arrow further on, so the filled triangle blacked out the
+  lower left of the first glyph: on a size callout that glyph is the ⌀,
+  which a vendor cannot afford to read wrong. It showed on three of
+  three such sheets in one set. The triangle now walks BACK along its
+  leader — where ISO 1101 puts it anyway; it is the knee it no longer
+  sits on — until its ink stands 0.6 mm clear of that text, and it never
+  reaches back over the letter in its own box. The box keeps the spot it
+  had, so a datum that already read correctly is untouched, and the
+  triangle's ink is claimed like every other annotation's.
+- **A leader could lie on the outline it points at, or cross another
+  leader** (#18). The level knee heads the ladder, and on a roomy sheet
+  that spot is almost always free, so a callout anchored on the
+  silhouette of a turned part drew its leader ON that silhouette — one
+  ran 76.8 mm along it — where the arrow can no longer be told from the
+  part (ISO 128-22). In other orders one leader crossed another, so each
+  appeared to point at the other's feature. Every rung is now tested
+  against the view geometry and against the leaders already down, in
+  printed millimetres; a knee also stays beside its own view rather than
+  stepping into the next view's column. When the manifest's order is
+  what makes two leaders cross, the sheet is re-composed with the
+  callouts in FAN ORDER — the order their arrows are seen in from the
+  column they share — and the better pass is kept: a fan cannot cross
+  itself. When no rung is clean at all, the least bad one is drawn and
+  the fault reported, because a callout the vendor never sees is worse
+  than one whose leader crosses another. Balloons are ordered as ONE fan
+  per side across every view that shares the column, and a fan now
+  settles any crossing pair, not only neighbouring ones.
+- **A detail view's caption could be crowded out by the notes under it.**
+  The island `place_detail_view` reserved included a caption band, but
+  nothing claimed it, so a leader note landed there and the caption had
+  nowhere to go. The band is claimed with the view now — a reservation
+  that yields, since a note has no ladder of alternatives and a caption
+  has — and when it does yield the caption falls back to a shorter
+  stand-off before it fails. A caption that cannot be placed at all says
+  why.
+
+### Added
+
+- **The layout check** (#22), stage 4c, run inside /draw. The value check
+  reads what a sheet SAYS; this one reads how it LOOKS, off the finished
+  .musa, because the layout engine only ever tests the boxes it placed
+  against each other — a leader is a line, not a box, and every fault
+  above passed every check the pipeline had and was found by eye. It
+  reports:
+  - `leader-crossing` — two leaders cross, so each points at the other's
+    feature;
+  - `leader-on-outline` — a leader runs along drawn geometry, within
+    0.5 mm for more than 3 printed mm;
+  - `ink-on-text` — a symbol, datum triangle, frame or balloon lies on
+    text (a balloon's own number, inside its circle, is not that);
+  - `text-off-sheet` — annotation text outside the drawing area;
+  - `leaders-parallel` — two leaders running together closer than 2 mm,
+    a WARNING only: it reads badly but says nothing false.
+
+  Every tolerance is in printed millimetres at any scale, and the parts
+  table's rules and cells are the template's furniture rather than the
+  drawing's ink. /draw prints the findings and records them per sheet in
+  sheets.json (`layout_faults`, `layout_warnings`); /export refuses
+  everything but the warning unless a manifest `"layout_waivers"` entry
+  names it, exactly as `"value_waivers"` works for the value check.
+- **Detail views on an assembly's continuation sheet** (#19). An entry of
+  `assembly_sheet.detail_views` may say `"sheet": 2`: sheet 1 then keeps
+  the views and the section, and sheet 2 carries the enlargements, THEIR
+  BALLOONS and the rest of the parts table. The region is still circled
+  on the view it comes from, on sheet 1, and the letter there reads
+  "B (SH 2)" so the reader knows where to look. One balloon per part
+  number still means one on the whole DRAWING, not one per sheet: a part
+  shown best in a detail is ballooned with that detail, wherever it is.
+  A continuation sheet is made for the details even when the table fits.
+
+### Upgrade steps
+
+1. `git -C <your pipeline clone> fetch --tags && git checkout v0.11.0`
+2. **Tapped threads (#16): check every `end_line` you turned off.** The
+   convention is `span = [thread end, mouth]`; where the span reads into
+   the part instead, add `"end_at": <the thread end>` and drop
+   `"end_line": false`. The lock will tell you if the coordinate is not
+   on the thread.
+3. **Datum callouts (#17): take the leading spaces out.** If you padded a
+   callout's text to push its ⌀ clear of the triangle, remove the
+   padding — the triangle moves itself now, and the padding will push the
+   text further right than it needs to go.
+4. **Leaders (#18): re-run `/draw` and read the two new reports.** Hand
+   -chosen `at` points that worked around a leader riding an outline can
+   stay, but most of them are no longer needed. A sheet whose band is
+   genuinely full now says so instead of quietly crossing two leaders.
+5. **The layout check (#22) can stop an export that used to pass.** It
+   reports a real fault, so the fix is the sheet, not the check: move the
+   callout's arrow, put the note on the other view, or give the part a
+   bigger sheet. `"layout_waivers": ["<words from the finding>"]` in the
+   manifest waives one deliberately, as `"value_waivers"` does.
+6. **An assembly with more details than fit (#19):** add `"sheet": 2` to
+   the ones that do not, and re-run. Nothing else changes; without it,
+   every detail stays on sheet 1 as before.
+
+### Compatibility
+
+Four real sets redraw sheet for sheet: the TPE assembly and its parts and
+amogha RES-41-LH-01 are byte-identical, and of thirteen sslxbt sheets the
+two that carried none of these faults are byte-identical too. The ten
+that changed each carried one — a datum triangle on a ⌀, a leader on an
+outline, two leaders crossing — and the layout check counts 23 faults on
+that set before and 5 after, all five on the one sheet whose annotation
+band is genuinely full (it now says so). The value check is clean across
+the set.
+
 ## v0.10.0 — 2026-11-24
 
 Both open layout limits, and a regression of my own from v0.8.0:

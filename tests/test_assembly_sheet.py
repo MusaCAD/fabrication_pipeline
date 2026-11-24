@@ -455,5 +455,60 @@ class RealAssemblySheetTest(unittest.TestCase):
         self.assertAlmostEqual(float(info["mm_per_unit"]), 0.5, places=6)
 
 
+    def test_a_detail_can_be_drawn_on_the_continuation_sheet(self):
+        """Issue #19: sheet 1 carries the views and the section, sheet 2
+        the details with their own balloons and the rest of the table."""
+        m = json.loads(json.dumps(self.m))
+        m["_analysis_path"] = self.m["_analysis_path"]
+        m["assembly_sheet"]["detail_views"] = [
+            dict(self.m["assembly_sheet"]["detail_views"][0], sheet=2)]
+        built = draw.build_assembly_sheet(m, self.proj)
+        self.assertEqual(len(built), 2, "no continuation sheet was made")
+        one, two = built[0][0].render(), built[1][0].render()
+        self.assertEqual(built[0][2]["unresolved"], [])
+        self.assertEqual(built[1][2]["unresolved"], [])
+        # the region is marked on the view it comes from, on sheet 1, and
+        # the letter says where to look
+        self.assertIn("B (SH 2)", one)
+        self.assertNotIn("DETAIL B (2:1)", one)
+        # the enlargement itself, captioned, is on sheet 2
+        self.assertIn("DETAIL B (2:1)", two)
+        self.assertEqual(built[1][3]["details"], ["B"])
+
+    def test_its_balloons_go_with_it(self):
+        m = json.loads(json.dumps(self.m))
+        m["_analysis_path"] = self.m["_analysis_path"]
+        m["assembly_sheet"]["detail_views"] = [
+            dict(self.m["assembly_sheet"]["detail_views"][0], sheet=2)]
+        built = draw.build_assembly_sheet(m, self.proj)
+        one, two = built[0][0].render(), built[1][0].render()
+        # the screw is ballooned in the detail, which is now on sheet 2:
+        # one balloon per P.NO. on the DRAWING, not per sheet
+        self.assertEqual(built[0][3]["balloons"]["ballooned"]["05"],
+                         "detail:B")
+        self.assertEqual(built[0][3]["balloons"]["not_shown"], [])
+        n_one = sum(1 for l in one.splitlines() if l.startswith("LEADER "))
+        n_two = sum(1 for l in two.splitlines() if l.startswith("LEADER "))
+        self.assertEqual((n_one, n_two), (4, 1))
+
+    def test_the_detail_still_fails_loudly_when_it_cannot_be_drawn(self):
+        m = json.loads(json.dumps(self.m))
+        m["_analysis_path"] = self.m["_analysis_path"]
+        m["assembly_sheet"]["detail_views"] = [
+            dict(self.m["assembly_sheet"]["detail_views"][0],
+                 sheet=2, radius=400.0)]
+        built = draw.build_assembly_sheet(m, self.proj)
+        self.assertTrue(any("detail" in u for u in built[-1][2]["unresolved"]
+                            + built[0][2]["unresolved"]))
+
+
+class DetailSheetNumberTest(unittest.TestCase):
+    def test_it_defaults_to_the_first_sheet(self):
+        self.assertEqual(draw.detail_sheet({}), 1)
+        self.assertEqual(draw.detail_sheet({"sheet": 2}), 2)
+        self.assertEqual(draw.detail_sheet({"sheet": "x"}), 1)
+        self.assertEqual(draw.detail_sheet({"sheet": 0}), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

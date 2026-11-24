@@ -26,6 +26,7 @@ from common import (MANIFESTS_DIR, MUSA_PLOT, OUTPUT_MUSA_DIR,
                     SCRATCH_DIR, die, dump_dims, paper_key, png_size,
                     read_json, run_freecad, today, write_json)
 import fc_tree
+import layout_check
 import musa_writer as mw
 import verify
 from manifest import VIEW_DIRS
@@ -372,10 +373,18 @@ def thread_lines(ctx, threads, view_jobs, offs):
       span   - [start, end] along the axis: the threaded length
       major / minor - crest and root diameters (M2.5 x 0.45: 2.5 / 2.013;
                a tapped M6 x 1: 6 major, 5 tap drill)
-      end_line - draw the thread-end line at span[0] (default false for an
-               external thread, where a diameter step already puts an edge
-               there; default TRUE for an internal one, whose thread ends
-               inside the drilled hole with nothing else to mark it)
+      end_line - draw the thread-end line where the usable thread STOPS
+               (default false for an external thread, where a diameter step
+               already puts an edge there; default TRUE for an internal
+               one, whose thread ends inside the drilled hole with nothing
+               else to mark it)
+      end_at   - that coordinate, when the span does not read end-first.
+               `span` is [thread end, mouth] by convention, so the end is
+               span[0]; a span written the other way round (ascending into
+               the part, which reads better) names the end here instead.
+               Issue #16: the line used to be drawn at the LOWER span
+               coordinate, so a hole threaded toward +x got it across the
+               mouth and the place the thread really stops was unmarked.
       circles - [{"view": v, "center": [x, y]}] for an internal thread:
                where the hole is drawn as a circle, so the 3/4 arc goes on
     Threads in section keep their hatch where the solid put it — out to
@@ -404,13 +413,15 @@ def thread_lines(ctx, threads, view_jobs, offs):
                     y = t["axis"] + s * rline + oy
                     recs.append(mw.line((a + ox, y), (b + ox, y)))
             if t.get("end_line", internal):
+                e = float(t["end_at"]) if t.get("end_at") is not None \
+                    else float(t["span"][0])
                 if vert:
-                    recs.append(mw.line((t["axis"] - rmaj + ox, a + oy),
-                                        (t["axis"] + rmaj + ox, a + oy),
+                    recs.append(mw.line((t["axis"] - rmaj + ox, e + oy),
+                                        (t["axis"] + rmaj + ox, e + oy),
                                         P_THICK))
                 else:
-                    recs.append(mw.line((a + ox, t["axis"] - rmaj + oy),
-                                        (a + ox, t["axis"] + rmaj + oy),
+                    recs.append(mw.line((e + ox, t["axis"] - rmaj + oy),
+                                        (e + ox, t["axis"] + rmaj + oy),
                                         P_THICK))
         for spec in (t.get("circles") or []) if internal else ():
             view = spec.get("view", "front")
@@ -945,10 +956,16 @@ def place_detail_view(ctx, layout, part, spec, parent_job, parent_off,
         layout.unresolved.append(f"detail-{label}-no-geometry")
         return [], None, None
     pad = ctx.mm(DETAIL_PAD_MM if pad_mm is None else pad_mm)
-    cap_h = ctx.mm(4.0) + ctx.mm(8.0)      # caption height + its stand-off
+    cap = detail_caption(spec.get("scale", "1:1"), label)
+    cap_th = ctx.mm(4.0)
+    cap_w = mw.text_w(cap, cap_th)
+    cap_h = cap_th + ctx.mm(8.0)           # caption height + its stand-off
     side = 2.0 * rk
-    spot = _free_spot(ctx, layout, side + 2 * pad, side + 2 * pad + cap_h,
-                      zones)
+    # the island has to hold the CAPTION too: it is wider than the circle
+    # on a small detail, and a band nobody reserved is a band the callouts
+    # fill, leaving the caption nowhere to go (it then failed the sheet)
+    spot = _free_spot(ctx, layout, max(side + 2 * pad, cap_w + ctx.mm(2.0)),
+                      side + 2 * pad + cap_h, zones)
     if spot is None:
         layout.unresolved.append(f"detail-{label}-noroom")
         return [], None, None
@@ -958,6 +975,16 @@ def place_detail_view(ctx, layout, part, spec, parent_job, parent_off,
     off = (cx, cy)                 # the detail's own origin is its centre
     layout.claim((cx - rk, cy - rk, cx + rk, cy + rk),
                  f"detail-{label}-view", "view")
+    # the caption's own room, claimed with the view it names: one
+    # stand-off under it, where _view_label would have put it
+    cap_rect = (cx - cap_w / 2.0, cy - rk - cap_h,
+                cx + cap_w / 2.0, cy - rk - cap_h + cap_th)
+    # kind "caption": a reservation that YIELDS. A callout with nowhere
+    # else to go may take it, and the caption then walks its own ladder
+    # like any other view label — the band it reserved is the one spot it
+    # is sure of, not the only one it can use
+    layout.claim(cap_rect, f"label-{cap}", "caption")
+    job["caption"] = (cap, cap_rect)
     recs = []
     # boundary: the detail is bounded by the same circle that marks it on
     # the parent view (ISO 128-34 continuous thin line)
@@ -965,7 +992,21 @@ def place_detail_view(ctx, layout, part, spec, parent_job, parent_off,
     return recs, job, off
 
 
-def detail_marker(ctx, layout, spec, parent_job, parent_off):
+def detail_sheet(spec) -> int:
+    """Which sheet of the set a detail view is drawn on (issue #19).
+
+    An assembly's details and the rest of its parts table can go on the
+    CONTINUATION sheet: sheet 1 then carries the views and the section,
+    sheet 2 the enlargements and their balloons. The region is still
+    marked on the view it comes from, on sheet 1, and the letter there
+    says which sheet to turn to."""
+    try:
+        return max(1, int(spec.get("sheet", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def detail_marker(ctx, layout, spec, parent_job, parent_off, sheet=None):
     """The circle round the region on the PARENT view, with its letter.
 
     The circle is ink laid over the view BY DESIGN (it encloses features),
@@ -973,6 +1014,8 @@ def detail_marker(ctx, layout, spec, parent_job, parent_off):
     cen = spec["center"]
     r = float(spec["radius"])
     label = str(spec.get("label", "B"))
+    if sheet and sheet > 1:
+        label = f"{label} (SH {sheet})"
     cx = cen[0] + parent_off[0]
     cy = cen[1] + parent_off[1]
     recs = [mw.circle((cx, cy), r)]
@@ -1021,6 +1064,36 @@ def detail_specs(specs, dspec, k):
     return out
 
 
+def detail_caption_records(ctx, layout, job, off):
+    """The caption of a detail view: in the band place_detail_view kept
+    for it, or — if a callout with nowhere else to go took that band —
+    wherever the view-label ladder can put it."""
+    cap, rect = job.get("caption", (None, None))
+    if not cap:
+        return []
+    layout.unclaim(rect, f"label-{cap}")
+    if not layout.collides(rect):
+        layout.claim(rect, f"label-{cap}")
+        return [mw.mtext(((rect[0] + rect[2]) / 2.0, rect[3]), cap,
+                         ctx.mm(4.0), attach=1)]
+    # the band it was kept was taken, so: a shorter stand-off first (a
+    # detail's caption may sit closer than a view's), then the ladder,
+    # and at the end a caption shifted along under its own circle rather
+    # than no caption at all
+    mark = len(layout.unresolved)
+    recs = _view_label(ctx, layout, job, off, cap,
+                       standoffs=(5.0, 8.0, 12.0, 16.0, 20.0, 24.0),
+                       shifts=(0.0, 0.25, -0.25, 0.45, -0.45))
+    if len(layout.unresolved) > mark:
+        del layout.unresolved[mark:]
+        layout.unresolved.append(
+            f"label-{cap}: the detail's caption has nowhere to go — the "
+            "band under it is full of leader notes. Move the detail "
+            "(`detail_view.center`), shorten or move a callout, or draw "
+            "this part on a bigger sheet")
+    return recs
+
+
 def detail_caption(scale: str, label: str) -> str:
     """"DETAIL B (2:1)" — the caption every detail view carries, naming its
     own scale because it differs from the sheet's."""
@@ -1041,7 +1114,19 @@ class Layout:
         self.ctx = ctx
         self.area = ctx.draw_area
         self.claims: list[tuple] = []   # (x0,y0,x1,y1,label,kind)
+        # every leader drawn so far, as (tip, knee, label): a bounding box
+        # cannot tell a leader crossing another from one running beside it,
+        # and two leaders that cross read as pointing at each other's
+        # features (issue #18)
+        self.leaders: list[tuple] = []
         self.unresolved: list[str] = []
+        # placed, but not as it should be: a leader with nowhere clean to
+        # go is still DRAWN — a dropped callout tells the vendor nothing,
+        # while a crossing one tells them something imperfectly — and the
+        # fault is recorded here, reported per sheet and found again by
+        # the layout check on the finished sheet, which stops /export
+        # (issue #18)
+        self.faults: list[str] = []
         self.flips: list[str] = []      # dims moved to the view's near edge
         self.nudges = 0
 
@@ -1101,6 +1186,20 @@ class Layout:
         self.unresolved.append(label)
         return None
 
+    def leader_crossing(self, tip, knee):
+        """The label of the first leader this one would cross, or None."""
+        for t, k, label in self.leaders:
+            if _segs_cross(tip, knee, t, k, self.ctx.mm(0.5)):
+                return label
+        return None
+
+    def leader_crossings(self, tip, knee) -> list:
+        """Every leader this one would cross. A leader that has to cross
+        one is still better than one that crosses five, so the last-resort
+        knee is chosen by this count (issue #18)."""
+        return [label for t, k, label in self.leaders
+                if _segs_cross(tip, knee, t, k, self.ctx.mm(0.5))]
+
     def anno_clearance(self, r) -> float:
         """Distance from `r` to the nearest TEXT claim. A symbol that must
         read as belonging to one annotation (a datum box on its callout's
@@ -1117,6 +1216,7 @@ class Layout:
 
     def report(self):
         return {"nudges": self.nudges, "unresolved": self.unresolved,
+                "faults": self.faults,
                 "flips": self.flips, "claims": len(self.claims)}
 
 
@@ -1513,6 +1613,47 @@ def _leader_path_clear(ctx, layout, tip, knee, max_frac=0.25):
     return hit <= max_frac * (steps + 1)
 
 
+def _segs_cross(a0, a1, b0, b1, eps) -> bool:
+    """Do two segments cross TRANSVERSELY, away from both their ends?
+
+    A leader legitimately starts on the outline it points at and ends in a
+    column of knees beside its neighbours, so a touch at an endpoint is
+    not a crossing; `eps` is how far from either end the intersection has
+    to be before it counts."""
+    rx, ry = a1[0] - a0[0], a1[1] - a0[1]
+    sx, sy = b1[0] - b0[0], b1[1] - b0[1]
+    den = rx * sy - ry * sx
+    if abs(den) < 1e-12:
+        return False                      # parallel: never a crossing
+    qpx, qpy = b0[0] - a0[0], b0[1] - a0[1]
+    t = (qpx * sy - qpy * sx) / den
+    u = (qpx * ry - qpy * rx) / den
+    la = math.hypot(rx, ry) or 1.0
+    lb = math.hypot(sx, sy) or 1.0
+    return (eps / la < t < 1.0 - eps / la
+            and eps / lb < u < 1.0 - eps / lb)
+
+
+def _crossing_other(layout, tip, knee, label):
+    """The label of a leader this one crosses, other than its own."""
+    for t, k, lab in layout.leaders:
+        if lab != label and _segs_cross(tip, knee, t, k,
+                                        layout.ctx.mm(0.5)):
+            return lab
+    return None
+
+
+def leader_runs_along(ctx, geom, tip, knee) -> float:
+    """Printed millimetres this leader would run ALONG drawn geometry.
+
+    A leader that lies on the outline it points at cannot be told from it
+    (ISO 128-22): the arrow stops being an arrow and becomes part of the
+    part. Crossing geometry transversely is ordinary drafting and is not
+    measured here — only the collinear run (issue #18)."""
+    worst, _ = dim_ink_conflict(ctx, geom, [(tuple(tip), tuple(knee))])
+    return worst
+
+
 def _claim_leader_ink(ctx, layout, tip, knee, label):
     """Claim a thin corridor of small rects along a leader's tip->knee
     segment (sampled — a diagonal's single bbox would over-claim) so later
@@ -1528,6 +1669,7 @@ def _claim_leader_ink(ctx, layout, tip, knee, label):
         py = tip[1] + (knee[1] - tip[1]) * f
         layout.claim((px - band, py - band, px + band, py + band),
                      f"leader-{label}", "line")
+    layout.leaders.append((tuple(tip), tuple(knee), label))
 
 
 def fmt_val(v: float) -> str:
@@ -1616,7 +1758,8 @@ def dim_extents(ctx, layout, job, off, *, width_side="top",
     return recs
 
 
-def dim_circles(ctx, layout, job, off, suppress=(), limit=4, lfac=1.0):
+def dim_circles(ctx, layout, job, off, suppress=(), limit=4, lfac=1.0,
+                geom=()):
     """Diameter dims for distinct hole radii; angle candidates dodge
     collisions; radii in `suppress` are handled by callouts instead.
     `lfac` is the view's DIMLFAC (1/k in a detail view), so the label reads
@@ -1694,20 +1837,30 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4, lfac=1.0):
         if placed is None:
             # edge feature: no angle clears the outline — standard leader
             # callout into the right band instead of a diameter dim
-            kx = vrect[2] + ctx.mm(8.0)
             # angled leaders first — a 0-deg leader rides the feature's
-            # own centerline mark
-            for dy in (8.0, -8.0, 14.0, -14.0, 20.0, -20.0, 26.0, -26.0,
-                       0.0):
+            # own centerline mark — and the knee steps further out when
+            # the near column is taken, as a callout's does (issue #18:
+            # one column of knees is not enough once a leader may not
+            # cross another)
+            for kdx, dy in ((kdx, dy)
+                            for kdx in (8.0, 16.0, 24.0)
+                            for dy in (8.0, -8.0, 14.0, -14.0, 20.0, -20.0,
+                                       26.0, -26.0, 0.0)):
+                kx = vrect[2] + ctx.mm(kdx)
                 ky = cy + ctx.mm(dy)
                 # the LEADER's label sits with its BASELINE on the knee
                 ink = mw.leader_text_ink((kx, ky), label, h, ctx.mm(2.5))
+                ang = math.atan2(ky - cy, kx - cx)
+                tip = (cx + c["r"] * math.cos(ang),
+                       cy + c["r"] * math.sin(ang))
+                if geom and leader_runs_along(ctx, geom, tip,
+                                              (kx, ky)) > COLLINEAR_OK:
+                    continue             # along an outline (issue #18)
+                if layout.leader_crossing(tip, (kx, ky)):
+                    continue
                 r = layout.place([(ink[0], ink[1])], ink[2] - ink[0],
                                  ink[3] - ink[1], f"dim-{label}")
                 if r is not None:
-                    ang = math.atan2(ky - cy, kx - cx)
-                    tip = (cx + c["r"] * math.cos(ang),
-                           cy + c["r"] * math.sin(ang))
                     recs.append(mw.leader(tip, (kx, ky), label, h,
                                      props=mw.P_ANNO))
                     _claim_leader_ink(ctx, layout, tip, (kx, ky),
@@ -1728,6 +1881,8 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4, lfac=1.0):
 # step widens the band and eats the opposite gutter, where the height dim
 # lives, so keep the ladder short.
 CALLOUT_KNEE_STEPS = (10.0, 18.0, 26.0)
+KNEE_BESIDE_MM = 16.0       # how far past its own view a callout's knee
+                            # may step before it is in another view's column
 
 
 def annotation_band_width(ctx, callouts, gdt, views=None):
@@ -1846,8 +2001,78 @@ def gdt_reserve(ctx, part) -> dict:
     return need
 
 
+def callout_anchor(co, job, off):
+    """(x, y, feature radius) this callout's leader points at, in sheet
+    coordinates — an `at` point as given, else the circle of that radius
+    in the topmost row and, within it, the one NEAREST the right-hand band
+    (the shortest leader crosses the least other annotation). None when
+    the view draws no such circle."""
+    ox, oy = off
+    if "at" in co:
+        return (co["at"][0] + ox, co["at"][1] + oy, 0.0)
+    matches = [p for p in job["visible"] if p["t"] == "circle"
+               and abs(p["r"] - co["circle_r"]) < 0.05]
+    if not matches:
+        return None
+    top = max(p["c"][1] for p in matches)
+    row = [p for p in matches if abs(p["c"][1] - top) < 0.05]
+    c = max(row, key=lambda p: p["c"][0])
+    return (c["c"][0] + ox, c["c"][1] + oy, c["r"])
+
+
+def fan_order(ctx, callouts, view_jobs, offs, by_view=True):
+    """The callouts of a sheet in the order their arrows appear FROM THE
+    COLUMN their knees share (issue #18).
+
+    Knees are handed out from each callout's own level outward, so when
+    two callouts are placed in an order that disagrees with the order
+    their arrows are seen in, the second reaches past the first and the
+    two leaders cross. Seen from the middle of the column, the arrows lie
+    at different ANGLES, and taking them in that order makes a fan, which
+    cannot cross itself. The angle is what matters rather than the height:
+    the callouts of a turned part all sit on one bore line, where height
+    says nothing and the arrow nearest the column must still be served
+    last. (The balloon fan is ordered the same way, for the same reason.)
+
+    The manifest's own order is the tie-break and the fallback for
+    anything the views do not place, so this is a REORDERING, never a
+    dropping."""
+    anchors, keys = {}, {}
+    for i, co in enumerate(callouts):
+        view = co.get("view", "front")
+        job = view_jobs.get(view)
+        if job is None:
+            continue
+        anc = callout_anchor(co, job, offs[view])
+        if anc is not None:
+            anchors[i] = (view, anc)
+    for view in {v for v, _ in anchors.values()}:
+        job = view_jobs[view]
+        mine = [(i, a) for i, (v, a) in anchors.items() if v == view]
+        kx = job["bounds"][1][0] + offs[view][0] \
+            + ctx.mm(CALLOUT_KNEE_STEPS[0])
+        py = sum(a[1] for _, a in mine) / len(mine)
+        for i, a in mine:
+            keys[i] = -math.atan2(a[1] - py, -(a[0] - kx) or 1e-9)
+    # by VIEW first: each view's callouts share a column of their own, so
+    # an angle measured at one of them says nothing about the other
+    rank = {}
+    for i, co in enumerate(callouts):
+        view = co.get("view", "front")
+        if view in view_jobs:
+            rank.setdefault(view, len(rank))
+    unplaced = len(rank) + 1
+    order = sorted(range(len(callouts)),
+                   key=lambda i: ((rank.get(callouts[i].get("view",
+                                                             "front"),
+                                            unplaced),)
+                                  if by_view else ()) +
+                   (i not in keys, keys.get(i, 0.0), i))
+    return [callouts[i] for i in order]
+
+
 def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
-                   limits=None):
+                   limits=None, geom=()):
     """Leader callouts (fit specs, hole callouts) landing in the right-hand
     band. A callout carries either a single "text" or a "lines" stack
     (ASME Y14.5 hole note: optional per-line "sym" prefix glyph, cbore /
@@ -1857,11 +2082,24 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
     view of a side-by-side pair wraps to the inter-view gap, not to the
     sheet edge, so its note stays in its own column (issue #13).
 
+    `geom` is the drawn view geometry: a rung whose leader would run ALONG
+    an outline, or cross a leader already on the sheet, is passed over for
+    the next one (issue #18). The level knee is tried first as it always
+    was, so a leader that was already clear keeps what it had; it is the
+    ones that rode the silhouette of a turned part — on a roomy sheet the
+    level spot is nearly always free — that now step up or down until they
+    meet the feature at an angle. When NO rung is clear the least bad one
+    is drawn and the fault recorded: a callout the vendor never sees is
+    worse than one whose leader crosses another, and the layout check
+    reports it on the finished sheet either way.
+
     Returns (records, {(view, circle_r): full_rect}, suppress_radii,
-    {(view, circle_r): (knee, text_left)}, anchors) — the landing is where
-    a datum on that feature of size attaches, and `anchors` lists EVERY
-    callout as its own annotation, so two features of one size stay
-    distinguishable (issue #7; the dicts keep only the last of them)."""
+    {(view, circle_r): (knee, text_left, arrow)}, anchors) — the landing is
+    where a datum on that feature of size attaches, carrying the leader's
+    own ARROW point so the datum triangle can be set back ALONG the leader
+    and clear the text (issue #17), and `anchors` lists EVERY callout as
+    its own annotation, so two features of one size stay distinguishable
+    (issue #7; the dicts keep only the last of them)."""
     h = ctx.mm(3.2)
     recs, rects, suppress, lands = [], {}, {}, {}
     anchors: list = []
@@ -1875,23 +2113,12 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
         if job is None:
             layout.unresolved.append(f"callout-view-{view}")
             continue
+        anchor = callout_anchor(co, job, offs[view])
+        if anchor is None:
+            layout.unresolved.append(f"callout-nocircle-{first[:18]}")
+            continue
         ox, oy = offs[view]
-        if "at" in co:
-            cx, cy = co["at"][0] + ox, co["at"][1] + oy
-            crad = 0.0
-        else:
-            matches = [p for p in job["visible"] if p["t"] == "circle"
-                       and abs(p["r"] - co["circle_r"]) < 0.05]
-            if not matches:
-                layout.unresolved.append(f"callout-nocircle-{first[:18]}")
-                continue
-            # topmost row, and within it the feature NEAREST the right-hand
-            # band: the shortest leader crosses the least other annotation
-            top = max(p["c"][1] for p in matches)
-            row = [p for p in matches if abs(p["c"][1] - top) < 0.05]
-            c = max(row, key=lambda p: p["c"][0])
-            cx, cy = c["c"][0] + ox, c["c"][1] + oy
-            crad = c["r"]
+        cx, cy, crad = anchor
         mnb, mxb = job["bounds"]
         s = 1.2 * h                      # prefix glyph cell side
         gap = 0.45 * h                   # glyph-to-text gap
@@ -1899,15 +2126,19 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
         arrow = ctx.mm(2.5)              # dimstyle arrow (leader text offset)
         first_sym = lines[0].get("sym")
 
-        def stack_ink(x1, ky, knee):
+        def stack_ink(lines_, x1, knee):
             """Ink of everything this callout draws right of the knee: the
             LEADER's own label (baseline AT the knee, 0.4*arrow clear of it)
-            or a first-line glyph cell, plus the attach=3 stacked lines."""
+            or a first-line glyph cell, plus the attach=3 stacked lines.
+            Takes its lines, so a rung can be MEASURED without taking it."""
+            ky = knee[1]
+            sym0 = lines_[0].get("sym")
             boxes = []
-            if not first_sym:
-                boxes.append(mw.leader_text_ink(knee, first, h, arrow))
-            for k, ln in enumerate(lines):
-                if k == 0 and not first_sym:
+            if not sym0:
+                boxes.append(mw.leader_text_ink(knee, lines_[0]["text"], h,
+                                                arrow))
+            for k, ln in enumerate(lines_):
+                if k == 0 and not sym0:
                     continue
                 cy_l = ky - k * lh
                 tx = x1
@@ -1919,14 +2150,12 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
             return (min(b[0] for b in boxes), min(b[1] for b in boxes),
                     max(b[2] for b in boxes), max(b[3] for b in boxes))
 
-        placed = None
-        # step OUTWARD before stepping along: the near column of the band
-        # belongs to the view's own location dims (placed first), so a
-        # callout parks its knee past them and keeps its short level leader
-        for dy, kdx in ((dy, kdx)
-                        for dy in (0.0, 8.0, -8.0, -16.0, -24.0, -32.0,
-                                   -40.0, -48.0, -56.0, 16.0, 24.0, 32.0)
-                        for kdx in CALLOUT_KNEE_STEPS):
+        state = {}
+
+        def rung(dy, kdx):
+            """Everything a rung determines: where the knee goes, where the
+            arrow lands, how the note wraps to the column that knee leaves,
+            and the ink it would claim."""
             knee_x = mxb[0] + ox + ctx.mm(kdx)
             ky = cy + ctx.mm(dy)         # knee = first-line centre
             x1 = knee_x + ctx.mm(1.5)    # left edge of every line
@@ -1935,49 +2164,133 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
             # dropped callout (round-8: the 3X %%c27 bore note on sheet 03)
             avail = (limits or {}).get(view, ctx.draw_area[2]) \
                 - x1 - ctx.mm(1.0)
-            lines = []
+            lines_ = []
             for ln in spec_lines:
                 room = avail - ((s + gap) if ln.get("sym") else 0.0)
                 parts = fit_lines(ln["text"], h, room)
-                lines.append({**ln, "text": parts[0]})
-                lines += [{"text": p} for p in parts[1:]]
-            first = lines[0]["text"]
-            first_sym = lines[0].get("sym")
+                lines_.append({**ln, "text": parts[0]})
+                lines_ += [{"text": p} for p in parts[1:]]
             ang = math.atan2(ky - cy, knee_x - cx)
             tip = (cx + crad * math.cos(ang), cy + crad * math.sin(ang))
-            if not _leader_path_clear(ctx, layout, tip, (knee_x, ky)):
-                continue                 # would run along existing dim ink
-            ink = stack_ink(x1, ky, (knee_x, ky))
+            return (knee_x, ky), x1, tip, lines_
+
+        def harm_of(knee, tip, ky):
+            """How bad this rung's LEADER is, smallest first: clear, then
+            crossing another leader or running along an outline, then
+            parked beside another view altogether (issue #18)."""
+            beside = (mnb[1] + oy - ctx.mm(KNEE_BESIDE_MM) <= ky
+                      <= mxb[1] + oy + ctx.mm(KNEE_BESIDE_MM))
+            along = leader_runs_along(ctx, geom, tip, knee) if geom else 0.0
+            crossed = layout.leader_crossings(tip, knee)
+            bad = along > COLLINEAR_OK or crossed
+            return ((0 if not bad else 1) if beside else 2,
+                    len(crossed), round(along / ctx.mm(1.0), 1)), \
+                along, (crossed[0] if crossed else None)
+
+        def fits(ink, over_caption):
+            r = (ink[0], ink[1], ink[2], ink[3])
+            return layout.inside(r) and not layout.collides(
+                r, ignore=("caption",) if over_caption else ())
+
+        def try_rung(dy, kdx, last_resort=False, over_caption=False):
+            """Place this callout with its knee at (kdx, dy) from the
+            feature, unless its leader would be unreadable there."""
+            nonlocal lines, first, first_sym
+            knee, x1, tip, lines_ = rung(dy, kdx)
+            if not _leader_path_clear(ctx, layout, tip, knee):
+                return None              # would run along existing dim ink
+            if not last_resort and harm_of(knee, tip, knee[1])[0][0] > 0:
+                return None
+            lines = lines_
+            first = lines[0]["text"]
+            first_sym = lines[0].get("sym")
+            ink = stack_ink(lines_, x1, knee)
             r = layout.place([(ink[0], ink[1])], ink[2] - ink[0],
-                             ink[3] - ink[1], label)
+                             ink[3] - ink[1], label,
+                             ignore=("caption",) if over_caption else ())
             if r is None:
                 layout.unresolved.pop()
-            if r is not None:
-                # a first-line glyph would sit under the leader's own text,
-                # so render such a line ourselves (empty leader content)
-                recs.append(mw.leader(tip, (knee_x, ky),
-                                      "" if first_sym else first, h,
-                                      props=mw.P_ANNO))
-                _claim_leader_ink(ctx, layout, tip, (knee_x, ky), label)
-                for k, ln in enumerate(lines):
-                    if k == 0 and not first_sym:
-                        continue
-                    cy_l = ky - k * lh
-                    tx = x1
-                    if ln.get("sym"):
-                        recs += mw.callout_sym(ln["sym"],
+                return None
+            # a first-line glyph would sit under the leader's own text,
+            # so render such a line ourselves (empty leader content)
+            recs.append(mw.leader(tip, knee, "" if first_sym else first, h,
+                                  props=mw.P_ANNO))
+            _claim_leader_ink(ctx, layout, tip, knee, label)
+            for k, ln in enumerate(lines):
+                if k == 0 and not first_sym:
+                    continue
+                cy_l = knee[1] - k * lh
+                tx = x1
+                if ln.get("sym"):
+                    recs.extend(mw.callout_sym(ln["sym"],
                                                (x1, cy_l - s / 2), s,
-                                               props=mw.P_ANNO)
-                        tx = x1 + s + gap
-                    recs.append(mw.mtext((tx, cy_l), ln["text"], h,
-                                         attach=3, props=mw.P_ANNO))
-                placed = r
+                                               props=mw.P_ANNO))
+                    tx = x1 + s + gap
+                recs.append(mw.mtext((tx, cy_l), ln["text"], h, attach=3,
+                                     props=mw.P_ANNO))
+            state["knee"] = knee
+            state["x1"] = x1
+            state["tip"] = tip
+            return r
+
+        placed = None
+        # step OUTWARD before stepping along: the near column of the band
+        # belongs to the view's own location dims (placed first), so a
+        # callout parks its knee past them and keeps its short level leader
+        rungs = [(dy, kdx)
+                 for dy in (0.0, 8.0, -8.0, -16.0, -24.0, -32.0,
+                            -40.0, -48.0, -56.0, 16.0, 24.0, 32.0,
+                            -64.0, -72.0, -80.0, 40.0, 48.0)
+                 for kdx in CALLOUT_KNEE_STEPS]
+        for dy, kdx in rungs:
+            placed = try_rung(dy, kdx)
+            if placed is not None:
                 break
+        if placed is None:
+            # nowhere left: a detail view's caption band is a reservation
+            # that yields — a caption has a ladder of its own to fall back
+            # on, a leader note has not
+            for dy, kdx in rungs:
+                placed = try_rung(dy, kdx, over_caption=True)
+                if placed is not None:
+                    break
+        if placed is None:
+            # no rung leaves this leader clear. Take the LEAST BAD of the
+            # ones that fit and say what is wrong with it: a callout the
+            # vendor never sees is worse than one whose leader crosses
+            # another, and the layout check reports it on the finished
+            # sheet either way (issue #18)
+            best = None
+            for dy, kdx in rungs:
+                knee, x1, tip, lines_ = rung(dy, kdx)
+                if not _leader_path_clear(ctx, layout, tip, knee):
+                    continue
+                if not fits(stack_ink(lines_, x1, knee), True):
+                    continue
+                score_, along, crosses = harm_of(knee, tip, knee[1])
+                if best is None or score_ < best[0]:
+                    best = (score_, dy, kdx, along, crosses)
+            if best is not None:
+                _, dy, kdx, along, crosses = best
+                placed = try_rung(dy, kdx, last_resort=True,
+                                  over_caption=True)
+            if placed is not None:
+                why = (f"crosses the leader of {crosses[8:]!r}" if crosses
+                       else f"runs {along:.0f} mm along an outline"
+                       if along > COLLINEAR_OK
+                       else "lands beside another view, so its leader "
+                            "crosses that view's own column")
+                layout.faults.append(
+                    f"{label}: its leader {why} — no knee on this sheet "
+                    "avoids it. Move the callout's arrow (`at`), put it on "
+                    "the other view, or make room beside this one")
         if placed is not None:
+            knee_x, ky = state["knee"]
+            x1 = state["x1"]
             if "circle_r" in co:
                 key = (view, round(co["circle_r"], 3))
                 rects[key] = placed
-                lands[key] = ((knee_x, ky), (x1, ky))
+                lands[key] = ((knee_x, ky), (x1, ky), state["tip"])
                 anchors.append(feature_anchor(
                     view, co["circle_r"], placed, lands[key],
                     cid=co.get("id"),
@@ -2347,6 +2660,59 @@ def _feature_circle(job, rad, off):
     return (c["c"][0] + ox, c["c"][1] + oy, c["r"])
 
 
+def _cell_ink(box_rect, letter, h):
+    """The ink of the letter mw.datum_label centres in its box."""
+    w = mw.glyph_ink_w(letter, h)
+    cx = (box_rect[0] + box_rect[2]) / 2.0
+    cy = (box_rect[1] + box_rect[3]) / 2.0
+    return (cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+
+
+def datum_triangle_rect(box_rect, tip, h):
+    """Ink rect of the filled triangle mw.datum_label draws at `tip`, for a
+    stem coming from `box_rect`: base 0.9 x h back along the stem, half
+    that across it (musa_writer.datum_label's own proportions)."""
+    b = 0.9 * h
+    cx = (box_rect[0] + box_rect[2]) / 2.0
+    cy = box_rect[3] if tip[1] > box_rect[3] else box_rect[1]
+    dx, dy = tip[0] - cx, tip[1] - cy
+    ln = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / ln, dy / ln
+    px, py = -uy, ux
+    base = (tip[0] - ux * b, tip[1] - uy * b)
+    pts = [tip, (base[0] + px * b * 0.5, base[1] + py * b * 0.5),
+           (base[0] - px * b * 0.5, base[1] - py * b * 0.5)]
+    return (min(q[0] for q in pts), min(q[1] for q in pts),
+            max(q[0] for q in pts), max(q[1] for q in pts))
+
+
+def _stem_clear(ctx, layout, box_rect, tip) -> bool:
+    """Does the datum box's stem reach `tip` without crossing text? The box
+    is not claimed yet, so the sampling stops short of it, as every other
+    stem check here does."""
+    stem = ((box_rect[0] + box_rect[2]) / 2.0,
+            box_rect[3] if tip[1] > box_rect[3] else box_rect[1])
+    ln = math.hypot(stem[0] - tip[0], stem[1] - tip[1]) or 1.0
+    f = max(0.0, 1.0 - ctx.mm(1.5) / ln)
+    near = (tip[0] + (stem[0] - tip[0]) * f, tip[1] + (stem[1] - tip[1]) * f)
+    return _leader_path_clear(ctx, layout, tip, near, max_frac=1.0)
+
+
+def _leader_unit(knee, arrow):
+    """Unit vector from the knee back along the leader, toward its arrow
+    (an older landing carries no arrow: a level leader, which is the one
+    place the fault was seen), and how far back the triangle may go."""
+    if arrow is not None:
+        dx, dy = arrow[0] - knee[0], arrow[1] - knee[1]
+        ln = math.hypot(dx, dy)
+        if ln > 1e-9:
+            return (dx / ln, dy / ln), 0.4 * ln
+    return (-1.0, 0.0), None
+
+
+TRI_SETBACKS = (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.0)
+
+
 def datum_on_landing(ctx, layout, letter, landing, stack=None):
     """Datum symbol on a leader-directed size callout.
 
@@ -2356,24 +2722,73 @@ def datum_on_landing(ctx, layout, letter, landing, stack=None):
     then hangs directly off the shoulder: a 1.2 mm stem, nothing dragged
     across the sheet.
 
-    `stack` is the callout's whole ink rect, which opens two further
-    placements for a CROWDED column (issue #7: several `at` callouts in one
-    view stack 8 mm apart, and the next one's text sits exactly where the
-    box would go, leaving the datum unresolved whatever order they are in):
-    off the far end of the landing — ISO 1101 5.3 allows the triangle on an
-    extension of the dimension line — and under the whole stack, where the
-    stem runs down the knee column and crosses no text at all.
+    `stack` is the callout's whole ink rect, which does two jobs. It opens
+    two further placements for a CROWDED column (issue #7: several `at`
+    callouts in one view stack 8 mm apart, and the next one's text sits
+    exactly where the box would go, leaving the datum unresolved whatever
+    order they are in): off the far end of the landing — ISO 1101 5.3
+    allows the triangle on an extension of the dimension line — and under
+    the whole stack, where the stem runs down the knee column and crosses
+    no text at all.
+
+    And it is what the TRIANGLE is kept clear of (issue #17). The tip used
+    to sit exactly on the knee, where the leader's own label starts 0.4 x
+    arrow further on, so the filled triangle covered the lower left of the
+    first glyph — the diameter sign of a size callout, which is the one
+    glyph a vendor cannot afford to read wrong. The triangle now walks
+    BACK along the leader, which is where ISO 1101 puts it anyway, until
+    its own ink stands clear of that text; the box keeps the spot it
+    always had, so a datum that already read correctly is untouched.
     Returns (records, box_rect) or ([], None)."""
-    (kx, ky), _ = landing
+    (kx, ky), _, *rest = landing
+    arrow = rest[0] if rest else None
     h = ctx.mm(3.2)
     sq = 1.7 * h
     gap = ctx.mm(1.2)
+    (ux, uy), cap = _leader_unit((kx, ky), arrow)
+    if cap is None:
+        cap = ctx.mm(6.0)
+    # a WHITE gap, not a touch: the triangle is a filled shape and the
+    # glyph a 0.3 mm stroke, so the two have to stand visibly apart
+    clr = ctx.mm(0.6)
+    want = None if stack is None else (stack[0] - clr, stack[1] - clr,
+                                       stack[2] + clr, stack[3] + clr)
+
+    def tip_for(rect, tip0, dirv, lim):
+        """Where this box's triangle goes: `tip0` when its ink already
+        stands clear of the callout's text, else the SHORTEST step from
+        there along `dirv` — back along the leader, or further out along
+        the dimension line's extension — that does clear it. None when
+        there is no room for it on that line at all."""
+        if want is None:
+            return tip0
+        for d in TRI_SETBACKS:
+            dd = ctx.mm(d)
+            if d > 0.0 and dd > lim:
+                break
+            t = (tip0[0] + dirv[0] * dd, tip0[1] + dirv[1] * dd)
+            tri = datum_triangle_rect(rect, t, h)
+            if Layout._overlap(tri, want, 0.0):
+                continue
+            if Layout._overlap(tri, _cell_ink(rect, letter, h), clr):
+                # the triangle reaches back into its own box, over the
+                # LETTER in it: the stem is shorter than the triangle is
+                # long, which is no datum at all (issue #17)
+                continue
+            if d > 0.0 and not _stem_clear(ctx, layout, rect, t):
+                # stepping the triangle round the text only to drag the
+                # STEM across it is not progress: this box cannot carry a
+                # set-back triangle, so another one must
+                continue
+            return t
+        return None
+
     cands = []
     for dx in (0.0, 4.0, 8.0, -4.0, 12.0):
         for below in (True, False):
             x = kx + ctx.mm(dx) - sq / 2.0
             y = ky - gap - sq if below else ky + gap
-            cands.append((x, y, (kx, ky)))
+            cands.append((x, y, (kx, ky), (ux, uy), cap))
     # a datum box 1 mm from a foreign label reads as that label's, so the
     # first legal spot is not good enough: take the first one that stands
     # CLEAR of other text, else the clearest one there is
@@ -2381,32 +2796,39 @@ def datum_on_landing(ctx, layout, letter, landing, stack=None):
 
     def legal_spots(spots):
         out = []
-        for bx, by, tip in spots:
+        for bx, by, tip0, dirv, lim in spots:
             rect = (bx, by, bx + sq, by + sq)
             if not layout.inside(rect) \
                     or layout.collides(rect, ignore=("slot",)):
                 continue
-            clr = layout.anno_clearance(rect)
-            if clr >= clear_enough:
-                return [(clr, rect, tip)]
-            out.append((clr, rect, tip))
+            tip = tip_for(rect, tip0, dirv, lim)
+            if tip is None:
+                continue            # its triangle cannot clear the text
+            clr_ = layout.anno_clearance(rect)
+            if clr_ >= clear_enough:
+                return [(clr_, rect, tip)]
+            out.append((clr_, rect, tip))
         return out
 
     legal = legal_spots(cands)
     if not legal and stack is not None:
         more = []
-        for dx in (1.5, 4.0, 8.0):               # past the text, in line
+        # in line past the text: ISO 1101 5.3's extension of the dimension
+        # line, so the triangle sits at the far END of the landing and
+        # steps further out along it, never back toward the text
+        for dx in (1.5, 4.0, 8.0):
             more.append((stack[2] + ctx.mm(dx), ky - sq / 2.0,
-                         (stack[2], ky)))
+                         (stack[2], ky), (1.0, 0.0), ctx.mm(8.0)))
         for dy in (2.0, 6.0):                    # below the whole stack
             more.append((kx - sq / 2.0, stack[1] - ctx.mm(dy) - sq,
-                         (kx, ky)))
+                         (kx, ky), (ux, uy), cap))
         for dy in (1.5, 5.0):                    # above it
-            more.append((kx - sq / 2.0, stack[3] + ctx.mm(dy), (kx, ky)))
+            more.append((kx - sq / 2.0, stack[3] + ctx.mm(dy),
+                         (kx, ky), (ux, uy), cap))
         legal = legal_spots(more)
     if not legal:
         return [], None
-    clr, rect, tip = max(legal, key=lambda g: g[0])
+    clr_, rect, tip = max(legal, key=lambda g: g[0])
     layout.claim(rect, f"datum-{letter}")
     if math.dist(((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0),
                  tip) > ctx.mm(2.5):
@@ -2415,6 +2837,9 @@ def datum_on_landing(ctx, layout, letter, landing, stack=None):
         _claim_leader_ink(ctx, layout, tip,
                           ((rect[0] + rect[2]) / 2.0,
                            (rect[1] + rect[3]) / 2.0), f"datum-{letter}")
+    # the triangle is ink too (issue #17): claimed, so no later annotation
+    # can land on it either
+    layout.claim(datum_triangle_rect(rect, tip, h), f"datum-{letter}-tri")
     recs, _ = mw.datum_label((rect[0], rect[1]), letter, tip, h,
                              props=mw.P_ANNO)
     return recs, rect
@@ -3796,62 +4221,75 @@ def _uncross(order, tip_of, kx, start, pitch, rounds=8):
     angle from the fan's middle gets almost every pair right; this is
     what settles the ones where a landing's height and its distance from
     the column disagree."""
+    n = len(order)
     for _ in range(rounds):
         swapped = False
-        for i in range(len(order) - 1):
-            a, b = order[i], order[i + 1]
-            ka = (kx, start - i * pitch)
-            kb = (kx, start - (i + 1) * pitch)
-            if _proper_crossing(ka, tip_of[a], kb, tip_of[b], 0.0):
-                order[i], order[i + 1] = b, a
-                swapped = True
+        # EVERY pair, not only neighbours: two leaders that cross can sit
+        # several knees apart with no crossing pair between them, and a
+        # neighbour sweep never reaches them (issue #18)
+        for i in range(n - 1):
+            for j in range(i + 1, n):
+                a, b = order[i], order[j]
+                ka = (kx, start - i * pitch)
+                kb = (kx, start - j * pitch)
+                if _proper_crossing(ka, tip_of[a], kb, tip_of[b], 0.0):
+                    order[i], order[j] = b, a
+                    swapped = True
         if not swapped:
             break
     return order
 
 
-def balloons(ctx, layout, asm_job, off, items, start_y=None, knee_x=None,
-             side="right", dense=False):
+def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
+                 knee_x=None, side="right", dense=False):
     """P.NO. leader callouts fanned into a band through the collision
     layout. Each arrow lands on an edge that belongs to that instance
     alone (balloon_landing).
 
-    `items` is [(instance index, P.NO. as drawn)] — the caller decides
-    WHICH instance carries each part number, because a part number is
-    ballooned once on the whole sheet, in the view where it reads best
-    (balloon_plan). `start_y` continues a fan begun in another view and
-    `knee_x` pins every view's balloons to ONE column: a second column of
-    knees on the SAME side is where leaders start crossing each other.
-    `side` puts the column left of the view instead, for the other half of
-    a split fan (balloon_sides) — the balloon then sits left of its knee,
-    so the leader still meets it from the view."""
-    ox, oy = off
-    mn, mx = asm_job["bounds"]
+    `items` is [(instance index, P.NO. as drawn)] for ONE view, or
+    [(job, off, instance index, P.NO.)] for several — because every
+    view's balloons share one column, and two views ordered one after the
+    other hand out their knees in two runs, which is where the leaders
+    cross between them (issue #18). Ordered as ONE fan they cannot.
+    The caller decides WHICH instance carries each part number, because a
+    part number is ballooned once on the whole sheet, in the view where it
+    reads best (balloon_plan). `start_y` continues a fan begun elsewhere
+    and `knee_x` pins the column. `side` puts that column left of the
+    view instead, for the other half of a split fan (balloon_sides) — the
+    balloon then sits left of its knee, so the leader still meets it from
+    the view."""
+    if asm_job is None:
+        ents = [(j, o, k, pid) for j, o, k, pid in items]
+    else:
+        ents = [(asm_job, off, k, pid) for k, pid in items]
+    if not ents:
+        return [], start_y
     recs = []
-    insts = asm_job.get("instances", [])
-    pid_by_index = dict(items)
     h = ctx.mm(BALLOON_TEXT_MM)
     brad = 1.4 * h                       # balloon circle radius
     sgn = -1.0 if side == "left" else 1.0
+    lo_x = min(j["bounds"][0][0] + o[0] for j, o, _k, _p in ents)
+    hi_x = max(j["bounds"][1][0] + o[0] for j, o, _k, _p in ents)
+    hi_y = max(j["bounds"][1][1] + o[1] for j, o, _k, _p in ents)
     if knee_x is not None:
         kx = knee_x
     elif sgn > 0:
-        kx = mx[0] + ox + ctx.mm(16.0)
+        kx = hi_x + ctx.mm(16.0)
     else:
-        kx = mn[0] + ox - ctx.mm(16.0)
+        kx = lo_x - ctx.mm(16.0)
     # rank by where each arrow will LAND, not by instance centre: knees are
     # handed out top-down, so any disagreement between the two orders makes
     # the leaders cross. Probe the landings from one common reference knee
-    # (the top of the band) to break the knee<->landing circularity.
-    start = start_y if start_y is not None else mx[1] + oy
+    # to break the knee<->landing circularity.
+    start = start_y if start_y is not None else hi_y
     # the fan radiates from the MIDDLE of the column it will occupy, not
     # from its top: angles measured at the top make the order of two
     # landings at similar heights turn on a rounding, and the leaders
     # then cross
-    probe = (kx, start - (len(pid_by_index) - 1)
+    probe = (kx, start - (len(ents) - 1)
              * balloon_pitch(ctx, dense) / 2.0)
 
-    def _fan_key(k):
+    def _fan_key(i):
         """Where this arrow lands, as SEEN from the column.
 
         Knees are handed out top-down, so the order has to be the order
@@ -3860,31 +4298,30 @@ def balloons(ctx, layout, asm_job, off, items, start_y=None, knee_x=None,
         when the parts are spread ALONG the assembly instead of up it,
         which is exactly when the fan has to be split (two columns), so
         that is where the angle is used."""
-        p = balloon_landing(ctx, asm_job, off, k, probe)
+        job, o, k, _pid = ents[i]
+        p = balloon_landing(ctx, job, o, k, probe)
         if not dense:
             return -p[1]
         # the x term points INWARD, away from the column, for both sides:
         # a right-hand column looks left and a left-hand one looks right
         return -math.atan2(p[1] - probe[1], -sgn * (p[0] - kx) or 1e-9)
 
-    ys = sorted(pid_by_index, key=_fan_key)
+    ys = sorted(range(len(ents)), key=_fan_key)
     # a split fan FIXES each arrow where the fan was ordered from: the
     # landing is otherwise recomputed for every candidate knee and slides
     # along the part's own edge, so two leaders ordered apart end up
     # crossing after all
-    fixed = {k: balloon_landing(ctx, asm_job, off, k, probe) for k in ys} \
-        if dense else {}
+    fixed = {i: balloon_landing(ctx, ents[i][0], ents[i][1], ents[i][2],
+                                probe) for i in ys} if dense else {}
     if dense:
         ys = _uncross(ys, fixed, kx, start, balloon_pitch(ctx, dense))
-    next_y = mx[1] + oy if start_y is None else start_y
-    for rank, k in enumerate(ys):
-        inst = insts[k]
-        pid = pid_by_index[k]
+    next_y = hi_y if start_y is None else start_y
+    for rank, i in enumerate(ys):
+        job, o, k, pid = ents[i]
         placed = None
-        for dy in [4.0 * k for k in range(0, 25)]:
+        for dy in [4.0 * step for step in range(0, 25)]:
             ky = next_y - ctx.mm(dy)
-            tip = fixed.get(k) or balloon_landing(ctx, asm_job, off, k,
-                                                  (kx, ky))
+            tip = fixed.get(i) or balloon_landing(ctx, job, o, k, (kx, ky))
             r = layout.place([(kx if sgn > 0 else kx - 2 * brad,
                                ky - brad)], 2 * brad, 2 * brad,
                              f"balloon-{pid}-{rank}")
@@ -4347,7 +4784,8 @@ def _claim_view(layout, job, off, name):
                   mx[0] + off[0], mx[1] + off[1]), name, "view")
 
 
-def _view_label(ctx, layout, job, off, textstr):
+def _view_label(ctx, layout, job, off, textstr, standoffs=None,
+                shifts=(0.0,)):
     """View caption, centered under the view. Placed AFTER that view's dims
     (reference style: the caption sits below the dimension band), so its
     stand-off ladder has to reach past a couple of dim rows."""
@@ -4355,8 +4793,10 @@ def _view_label(ctx, layout, job, off, textstr):
     h = ctx.mm(4.0)
     tw = mw.text_w(textstr, h)
     cx = (mn[0] + mx[0]) / 2 + off[0]
-    cands = [(cx - tw / 2, mn[1] + off[1] - ctx.mm(d) - h)
-             for d in (8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0)]
+    cands = [(cx - tw / 2 + tw * f, mn[1] + off[1] - ctx.mm(d) - h)
+             for d in (standoffs
+                       or (8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0))
+             for f in shifts]
     # fallback: beside the view (tight sheets where the below-band is full)
     cands += [(mx[0] + off[0] + ctx.mm(d),
                (mn[1] + mx[1]) / 2 + off[1] - h / 2)
@@ -4477,21 +4917,42 @@ def build_part_sheet(m, part, proj):
     centring the view boxes alone leaves the sheet visibly lopsided
     (round-5 QA D3). Iterates on the measured imbalance and keeps the best
     fully-resolved pass."""
-    reserve = None
+    reserve, co_order = None, None
+
+    def score(p):
+        u = p[2].unresolved
+        # an annotation the sheet does not carry is the worst, and a
+        # GD&T frame is the one with its own retry to come; after that,
+        # an annotation the sheet carries BADLY (a leader with nowhere
+        # clean to go, issue #18)
+        return (len(u),
+                sum(1 for x in u if x.startswith(("datum-", "fcf-"))),
+                len(p[2].faults))
+
     best = _compose_part_sheet(m, part, proj)
+    if any(u.startswith("callout-") for u in best[2].unresolved) \
+            or best[2].faults:
+        # a callout found no knee whose leader stays clear of the outlines
+        # and of the leaders already down. Place them in the order their
+        # arrows appear instead — a fan cannot cross itself (issue #18) —
+        # one view at a time, since each view's knees are its own column,
+        # and then across the sheet, which is the order to take when the
+        # views' own leaders are what meet. Either pass is kept only if it
+        # does better; a sheet whose callouts all placed keeps the order
+        # the manifest gave them.
+        for order in ("fan", "fan-across"):
+            retry = _compose_part_sheet(m, part, proj, co_order=order)
+            if score(retry) < score(best):
+                best, co_order = retry, order
     if best[2].unresolved and any(u.startswith(("datum-", "fcf-"))
-                                  for u in best[2].unresolved):
+                                  for u in best[2].unresolved):  # noqa
         # A datum or a frame found no room on its own callout: give it one
         # by reserving the slot under that callout and re-composing, which
         # restacks the column around it (issue #7). Only then — a sheet
         # whose GD&T already placed keeps the layout it had.
         trial_reserve = gdt_reserve(best[0], part)
-        retry = _compose_part_sheet(m, part, proj, reserve=trial_reserve)
-
-        def score(p):
-            u = p[2].unresolved
-            return (len(u), sum(1 for x in u
-                                if x.startswith(("datum-", "fcf-"))))
+        retry = _compose_part_sheet(m, part, proj, reserve=trial_reserve,
+                                    co_order=co_order)
 
         if score(retry) < score(best):
             # fewer failures wins; on a tie the pass that placed more of the
@@ -4514,16 +4975,20 @@ def build_part_sheet(m, part, proj):
         if abs(shift) <= tol:
             break
         trial = _compose_part_sheet(m, part, proj, dx=dx + shift,
-                                    reserve=reserve)
+                                    reserve=reserve, co_order=co_order)
         tlo, thi = content_balance(trial[2])
-        if trial[2].unresolved or abs(thi - tlo) >= abs(hi - lo):
+        if trial[2].unresolved or abs(thi - tlo) >= abs(hi - lo) \
+                or len(trial[2].faults) > len(best[2].faults):
+            # a better-balanced sheet that has to cross a leader to get
+            # there is not better (issue #18)
             break
         dx += shift
         best = trial
     return best[0], best[1], best[2].report()
 
 
-def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
+def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None,
+                        co_order=None):
     """One placement pass; `dx` shifts the whole view group (and therefore
     everything anchored to it) horizontally, and `reserve` keeps a slot
     under named size callouts for the GD&T hung on them (gdt_reserve).
@@ -4599,7 +5064,8 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
     layout = Layout(ctx)
     rows_h = mw.PARTS_ROW_H * ctx.t
     ax0, ay0, ax1, _ = ctx.draw_area
-    layout.claim(table_band(ctx, rows_h), "parts-rows", "reserved")
+    ctx._table_band = table_band(ctx, rows_h)
+    layout.claim(ctx._table_band, "parts-rows", "reserved")
     zones = [view_zone(ctx, part, v, j,
                        offs[v if v in offs else "section"])
              for v, j in view_jobs.items()]
@@ -4626,9 +5092,28 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
         if of not in view_jobs:
             layout.unresolved.append(f"detail-of-{of}-missing")
         else:
+            # a detail view PREFERS to sit clear of the callout band:
+            # parked in it, it takes a note's only landing, and a note
+            # has no ladder of alternatives the way a detail does. When
+            # the band is the only room there is, it goes there (issue
+            # #18 — on a crowded sheet this is what decides whether
+            # everything fits).
+            det_zones = list(zones)
+            if band_w > 0.0:
+                bx = max(j["bounds"][1][0]
+                         + offs[v if v in offs else "section"][0]
+                         for v, j in view_jobs.items()) + ctx.mm(2.0)
+                det_zones.append((bx, ctx.draw_area[1], ctx.draw_area[2],
+                                  ctx.draw_area[3]))
+            mark = len(layout.unresolved)
             det_recs, det_job, det_off = place_detail_view(
                 ctx, layout, part, dspec, view_jobs[of],
-                offs[of if of in offs else "section"], zones=zones)
+                offs[of if of in offs else "section"], zones=det_zones)
+            if det_job is None:
+                del layout.unresolved[mark:]
+                det_recs, det_job, det_off = place_detail_view(
+                    ctx, layout, part, dspec, view_jobs[of],
+                    offs[of if of in offs else "section"], zones=zones)
             if det_job is not None:
                 view_jobs["detail"] = det_job
                 offs["detail"] = det_off
@@ -4720,9 +5205,11 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
         omn, omx = view_jobs[outer]["bounds"]
         oox = offs[outer if outer in offs else "section"][0]
         co_limits[inner] = omn[0] + oox - ctx.mm(2.0)
+    cos = callouts if co_order is None else fan_order(
+        ctx, callouts, view_jobs, offs, by_view=co_order == "fan")
     co_recs, co_rects, suppress, co_lands, co_anchors = place_callouts(
-        ctx, layout, callouts, view_jobs, offs, reserve=reserve,
-        limits=co_limits)
+        ctx, layout, cos, view_jobs, offs, reserve=reserve,
+        limits=co_limits, geom=geom)
     ctx.entities += co_recs
     dim_rects: dict = {}
 
@@ -4742,7 +5229,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
                                                       h_side), geom=geom,
                                     soft=cut_arrows)
     recs, rr = dim_circles(ctx, layout, front, offs["front"],
-                           suppress=suppress.get("front", ()))
+                           suppress=suppress.get("front", ()), geom=geom)
     ctx.entities += recs
     dim_rects.update({("front", k): v for k, v in rr.items()})
     if section and part.get("section_extent_dims", True) \
@@ -4760,12 +5247,12 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
                                                       sec_h_side), geom=geom,
                                     soft=cut_arrows)
         recs, rr = dim_circles(ctx, layout, section, offs["section"],
-                               suppress=suppress.get("section", ()))
+                               suppress=suppress.get("section", ()), geom=geom)
         ctx.entities += recs
         dim_rects.update({("section", k): v for k, v in rr.items()})
     if aux:
         recs, rr = dim_circles(ctx, layout, aux, offs["section"],
-                               suppress=suppress.get("aux", ()))
+                               suppress=suppress.get("aux", ()), geom=geom)
         ctx.entities += recs
         dim_rects.update({("aux", k): v for k, v in rr.items()})
     if flat:
@@ -4776,13 +5263,13 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
                                     floors=floors_for("flat", "bottom",
                                                       "left"), geom=geom)
         recs, rr = dim_circles(ctx, layout, flat, offs["section"],
-                               suppress=suppress.get("flat", ()))
+                               suppress=suppress.get("flat", ()), geom=geom)
         ctx.entities += recs
         dim_rects.update({("flat", k): v for k, v in rr.items()})
     if det_job is not None:
         recs, rr = dim_circles(ctx, layout, det_job, det_off,
                                suppress=suppress.get("detail", ()),
-                               lfac=lfacs["detail"])
+                               lfac=lfacs["detail"], geom=geom)
         ctx.entities += recs
         dim_rects.update({("detail", k): v for k, v in rr.items()})
     if second_label:
@@ -4798,9 +5285,8 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None):
     # stack is a wide, rigidly-anchored block, a datum box is a small square
     # with a dozen candidate spots along its edge
     if det_job is not None:
-        ctx.entities += _view_label(
-            ctx, layout, det_job, det_off,
-            detail_caption(dspec["scale"], str(dspec.get("label", "B"))))
+        ctx.entities += detail_caption_records(ctx, layout, det_job,
+                                               det_off)
     frames = gdt.get("frames", [])
     anchored = [f for f in frames if f["target"] != "datum_A_face"]
     on_datum = [f for f in frames if f["target"] == "datum_A_face"]
@@ -4904,11 +5390,17 @@ def bounds_of_prims(prims):
     return mn, mx
 
 
-def continuation_sheet(m, asm, rows, analysis, sheet_of):
-    """A second sheet carrying the rest of a parts table that does not fit.
+def continuation_sheet(m, asm, rows, analysis, sheet_of, details=(),
+                       balloons=None):
+    """The second sheet of an assembly drawing.
 
     Same DRG NO., "SHEET 2 OF 2" (CLAUDE.md: i OF n only within one DRG
-    NO.), title block and table — no views: it exists to carry rows."""
+    NO.), title block and table. It carries the rest of a parts table that
+    does not fit — and, when the manifest asks for it, the DETAIL views
+    with their own balloons (issue #19): sheet 1 then has the views and
+    the section, sheet 2 the enlargements and the remaining rows. The
+    regions are marked on sheet 1, where the views are, and each letter
+    there says which sheet to turn to."""
     num, den = parse_scale(asm["scale"])
     ctx = sheet_context(m, asm, num, den)
     ctx.dimstyles = sheet_dimstyles(ctx)
@@ -4922,9 +5414,55 @@ def continuation_sheet(m, asm, rows, analysis, sheet_of):
             ctx, idx, parts_row_cells(row, analysis, m), overflow=overflow)
     ctx.entities += mw.date_records(ctx, today())
     rows_h = mw.PARTS_ROW_H * ctx.t * len(rows)
-    ctx.entities += place_notes(
-        ctx, layout, [f"PARTS TABLE CONTINUED FROM SHEET {sheet_of[0] - 1}."],
-        rows_h)
+    ctx._table_band = table_band(ctx, rows_h)
+    layout.claim(ctx._table_band, "parts-rows", "reserved")
+
+    ball = balloons or {}
+    # the fan's column, and the strip it needs: left of the parts table,
+    # which on a widened sheet travels with the title block, so the
+    # details keep to the left of BOTH
+    brad = 1.4 * ctx.mm(BALLOON_TEXT_MM)
+    fan_w = 2 * brad + ctx.mm(16.0)
+    # on a WIDENED paper the parts table travels with the title block and
+    # takes the right-hand column, so the fan goes left of it; on A4 the
+    # table runs the full width along the bottom and the column is the
+    # sheet's own right edge
+    band = ctx._table_band
+    right = band[0] if band[0] > (ctx.draw_area[0] + ctx.draw_area[2]) / 2 \
+        else ctx.draw_area[2]
+    knee_x = right - fan_w
+    fan_zone = [(knee_x - ctx.mm(2.0), ctx.draw_area[1],
+                 ctx.draw_area[2], ctx.draw_area[3])]
+
+    placed_details = []
+    for spec, _of, parent, job in details:
+        label = str(spec.get("label", "B"))
+        # the balloon column of this sheet belongs to the fan, as on
+        # sheet 1: the detail islands keep to the left of it
+        recs, djob, off = place_detail_view(
+            ctx, layout, asm, spec, parent, (0.0, 0.0),
+            zones=fan_zone, pad_mm=DETAIL_ASSEMBLY_PAD_MM)
+        if djob is None:
+            continue
+        djob["instances"] = job.get("instances", [])
+        ctx.entities += recs
+        emit_prims(ctx, djob["visible"], off)
+        emit_prims(ctx, djob["hidden"], off, P_HIDDEN)
+        ctx.entities += section_hatches(ctx, djob, off)
+        ctx.entities += detail_caption_records(ctx, layout, djob, off)
+        placed_details.append((label, djob, off))
+
+    items = [(djob, off, k, pid) for label, djob, off in placed_details
+             for (k, pid) in (ball.get(f"detail:{label}") or [])]
+    if items:
+        recs, _ = balloons_fan(ctx, layout, None, None, items,
+                               start_y=ctx.draw_area[3] - brad,
+                               knee_x=knee_x, dense=True)
+        ctx.entities += recs
+    if rows:
+        ctx.entities += place_notes(
+            ctx, layout,
+            [f"PARTS TABLE CONTINUED FROM SHEET {sheet_of[0] - 1}."], rows_h)
     layout.unresolved.extend(overflow)
     ctx._stamp_rect = None
     return ctx, replaced, layout.report()
@@ -5036,7 +5574,8 @@ def build_assembly_sheet(m, proj):
     # band and its frame was drawn straight across the table's upper rows
     # (issue #9), since nothing had claimed them yet
     ax0, ay0, ax1, _ = ctx.draw_area
-    layout.claim(table_band(ctx, rows_h), "parts-rows", "reserved")
+    ctx._table_band = table_band(ctx, rows_h)
+    layout.claim(ctx._table_band, "parts-rows", "reserved")
     box_recs, stamp_rect = pictorial_box(ctx, layout, shaded_png("assembly"),
                                          zones=zones, floor=ay0 + rows_h)
     ctx.entities += box_recs
@@ -5049,20 +5588,32 @@ def build_assembly_sheet(m, proj):
     # ink enlarged (the part sheets' machinery, issue #2)
     detail_specs_list = asm.get("detail_views") or []
     detail_recs, detail_jobs, detail_offs = [], {}, {}
+    later: list = []            # details the manifest puts on sheet 2
     for spec in detail_specs_list:
         label = str(spec.get("label", "B"))
         of = spec.get("of", "front")
         if of not in views:
             layout.unresolved.append(f"detail-of-{of}-missing")
             continue
+        key = f"detail:{label}"
+        k = detail_factor(asm, spec)
+        if detail_sheet(spec) > 1:
+            # a detail may be drawn on the CONTINUATION sheet, with its own
+            # balloons: sheet 1 carries the views and the section, sheet 2
+            # the details and the rest of the table. Its job is built here
+            # all the same, because the balloon plan has to know what it
+            # shows before either sheet is drawn.
+            job = detail_job(views[of], spec, k)
+            job["instances"] = detail_instances(views[of], spec, k)
+            detail_jobs[key] = job
+            later.append((spec, of, views[of], job))
+            continue
         recs, job, off = place_detail_view(ctx, layout, asm, spec, views[of],
                                            offs[of], zones=zones,
                                            pad_mm=DETAIL_ASSEMBLY_PAD_MM)
         if job is None:
             continue
-        job["instances"] = detail_instances(views[of], spec,
-                                            detail_factor(asm, spec))
-        key = f"detail:{label}"
+        job["instances"] = detail_instances(views[of], spec, k)
         detail_jobs[key] = job
         detail_offs[key] = off
         detail_recs.append((recs, job, off, spec, of))
@@ -5101,6 +5652,11 @@ def build_assembly_sheet(m, proj):
         emit_prims(ctx, job["hidden"], off, P_HIDDEN)
         ctx.entities += section_hatches(ctx, job, off)
         ctx.entities += detail_marker(ctx, layout, spec, views[of], offs[of])
+    for spec, of, _parent, _job in later:
+        # the region is marked where it IS, on this sheet's view; the
+        # letter says which sheet to turn to
+        ctx.entities += detail_marker(ctx, layout, spec, views[of], offs[of],
+                                      sheet=detail_sheet(spec))
 
     ctx.entities += thread_lines(ctx, asm.get("threads", []), views, offs)
     if iso and section is None:
@@ -5113,11 +5669,10 @@ def build_assembly_sheet(m, proj):
             ctx, layout, section, offs["section"],
             f"SECTION {sec_spec.get('label', 'A')}-{sec_spec.get('label', 'A')}")
     for _recs, job, off, spec, _of in detail_recs:
-        ctx.entities += _view_label(
-            ctx, layout, job, off,
-            detail_caption(spec["scale"], str(spec.get("label", "B"))))
+        ctx.entities += detail_caption_records(ctx, layout, job, off)
 
     balloon_report = {}
+    later_balloons: dict = {}
     if asm.get("balloons", True):
         id_by_file = {p["file"]: p["part_id"] for p in m["parts"]}
         # an analysis written before v0.5.0 has no paths, only names
@@ -5128,8 +5683,13 @@ def build_assembly_sheet(m, proj):
         all_views = dict(views, **detail_jobs)
         all_offs = dict(offs, **detail_offs)
         plan = balloon_plan(m, all_views, id_by_path)
+        # a balloon on a detail that is drawn on sheet 2 is drawn THERE
+        elsewhere = {f"detail:{str(sp.get('label', 'B'))}"
+                     for sp, _of, _p, _j in later}
         by_view: dict = {}
         for pid, (view, k) in plan.items():
+            if view in elsewhere:
+                continue
             by_view.setdefault(view, []).append((k, disp_no(pid)))
         # ONE column while it holds them all; otherwise one each side of
         # the view, every balloon on the side its own part sits on. 26
@@ -5166,17 +5726,25 @@ def build_assembly_sheet(m, proj):
         # the room it needs is
         next_y = {"left": top, "right": top} if sides \
             else {"left": None, "right": None}
-        for view in sorted(by_view, key=lambda v: (v != "front", v)):
-            for sd in ("right", "left"):
-                items = [it for it in by_view[view]
-                         if sides.get((view, it[0]), "right") == sd]
-                if not items:
-                    continue
-                recs, next_y[sd] = balloons(
-                    ctx, layout, all_views[view], all_offs[view], items,
-                    start_y=next_y[sd], knee_x=columns[sd], side=sd,
-                    dense=bool(sides))
-                ctx.entities += recs
+        for sd in ("right", "left"):
+            # every view's balloons on this side are ONE fan: ordered in
+            # two runs, one view after the other, their leaders cross
+            # between the views (issue #18)
+            items = [(all_views[view], all_offs[view], k, pid)
+                     for view in sorted(by_view,
+                                        key=lambda v: (v != "front", v))
+                     for (k, pid) in by_view[view]
+                     if sides.get((view, k), "right") == sd]
+            if not items:
+                continue
+            recs, next_y[sd] = balloons_fan(
+                ctx, layout, None, None, items, start_y=next_y[sd],
+                knee_x=columns[sd], side=sd, dense=bool(sides))
+            ctx.entities += recs
+        later_balloons.update({v: [] for v in elsewhere})
+        for pid, (view, k) in plan.items():
+            if view in elsewhere:
+                later_balloons[view].append((k, disp_no(pid)))
         missing = [p["part_id"] for p in m["parts"]
                    if str(p["part_id"]) not in plan]
         balloon_report = {"ballooned": {k: v[0] for k, v in plan.items()},
@@ -5194,11 +5762,25 @@ def build_assembly_sheet(m, proj):
             "details": [str(s.get("label", "B")) for s in detail_specs_list],
             "section": section is not None}
     sheets = [(ctx, replaced, layout.report(), meta)]
-    if rest_rows:
-        sheets.append(continuation_sheet(m, asm, rest_rows, analysis,
-                                         [2, table_report["sheets"]])
-                      + ({"parts_table": {"continuation_of": asm["drg_no"]}},))
+    if rest_rows or later:
+        n_sheets = max(2, table_report["sheets"])
+        sheets.append(continuation_sheet(
+            m, asm, rest_rows, analysis, [2, n_sheets],
+            details=later, balloons=later_balloons)
+            + ({"parts_table": {"continuation_of": asm["drg_no"]},
+                "details": [str(sp.get("label", "B"))
+                            for sp, _o, _p, _j in later]},))
     return sheets
+
+
+def sheet_layout_check(ctx, path: Path, waivers=None):
+    """Read a finished sheet back and report what it LOOKS like (issue
+    #22). Returns (live faults, waived, warnings)."""
+    found = layout_check.check_sheet(
+        path.read_text(), ctx.draw_area, ctx.num / ctx.den,
+        table_band=getattr(ctx, "_table_band", None))
+    live, waived_ = verify.waived(layout_check.faults(found), waivers)
+    return live, waived_, layout_check.warnings(found)
 
 
 def main() -> None:
@@ -5237,6 +5819,8 @@ def main() -> None:
     tpl_texts = [r.content.replace("\\n", "\n")
                  for r in mw.parse_template() if r.kind == "MTEXT"]
     value_findings = []
+    layout_findings: list = []
+    layout_warnings: list = []
     for idx, part in enumerate(drawn, start=1):
         ctx, replaced, lay = build_part_sheet(m, part, proj)
         stamp_rects[part["drg_no"]] = ctx._stamp_rect
@@ -5252,7 +5836,19 @@ def main() -> None:
         live, done = verify.waived(values, part.get("value_waivers"))
         value_findings += [f"{part['drg_no']}: {ln}"
                            for ln in verify.report(live)]
+        # the layout check (issue #22): what the sheet LOOKS like, read
+        # back off the finished sheet the way the value check reads what
+        # it says
+        lay_live, lay_waived, lay_warn = sheet_layout_check(
+            ctx, out, part.get("layout_waivers") or m.get("layout_waivers"))
+        layout_findings += [f"{part['drg_no']}: {ln}"
+                            for ln in layout_check.report(lay_live)]
+        layout_warnings += [f"{part['drg_no']}: {ln}"
+                            for ln in layout_check.report(lay_warn)]
         sheets.append({"values": live, "values_waived": done,
+                       "layout_faults": lay_live,
+                       "layout_waived": lay_waived,
+                       "layout_warnings": lay_warn,
                        "template_problems": list(
                            getattr(ctx, "field_overflow", [])),
                        "file": str(out), "drg_no": part["drg_no"],
@@ -5283,7 +5879,17 @@ def main() -> None:
             stamp_rects[drg + suffix] = ctx._stamp_rect
             asm_out = OUTPUT_MUSA_DIR / f"{drg}{suffix}.musa"
             asm_out.write_text(ctx.render())
+            lay_live, lay_waived, lay_warn = sheet_layout_check(
+                ctx, asm_out,
+                asm.get("layout_waivers") or m.get("layout_waivers"))
+            layout_findings += [f"{drg}{suffix}: {ln}"
+                                for ln in layout_check.report(lay_live)]
+            layout_warnings += [f"{drg}{suffix}: {ln}"
+                                for ln in layout_check.report(lay_warn)]
             entry = {"file": str(asm_out), "drg_no": drg,
+                     "layout_faults": lay_live,
+                     "layout_waived": lay_waived,
+                     "layout_warnings": lay_warn,
                      "template_problems": list(
                          getattr(ctx, "field_overflow", [])),
                      "description": asm["description"],
@@ -5345,9 +5951,22 @@ def main() -> None:
               '"value_waivers" if it is deliberate)')
     else:
         print("values: every value the manifest states is on its sheet")
+    if layout_findings:
+        print(f"layout: {len(layout_findings)} fault(s) on the finished "
+              "sheets:")
+        for line in layout_findings:
+            print(f"  {line}")
+        print("  (/export will refuse these; waive one in the manifest's "
+              '"layout_waivers" if it is deliberate)')
+    else:
+        print("layout: no crossing leaders, no ink on text, nothing off "
+              "the sheet")
+    for line in layout_warnings:
+        print(f"  warning: {line}")
     write_json(OUTPUT_MUSA_DIR / "sheets.json",
                {"manifest": str(man_path), "sheets": sheets,
                 "values_ok": not value_findings,
+                "layout_ok": not layout_findings,
                 "deliver_to": m.get("deliver_to")})
     print(f"wrote {len(sheets)} sheets + output/musa/sheets.json")
     if problems:

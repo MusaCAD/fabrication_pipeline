@@ -47,6 +47,7 @@ FURNITURE = tuple(re.compile(p) for p in (
     r"^SECTION [A-Z]-[A-Z]$",
     r"^DETAIL [A-Z] \(\d+:\d+\)$",
     r"^[A-Z]$",
+    r"^[A-Z] \(SH \d+\)$",                   # a detail marked on another sheet
     r"^-?[\d.]+$",
     r"^(\d+\s*,\s*)+\d+$",                  # a P.NO. list in one cell
     r"^\d+ ITEMS$",

@@ -175,8 +175,11 @@ class PlaceDatumsTest(unittest.TestCase):
         self.assertEqual(self.layout.unresolved, [])
         self.assertIn("A", pos)
         tip = solid_triangles("\n".join(recs))[0][0]
-        self.assertAlmostEqual(tip[0], 130.0)
+        # on the leader, at the shoulder or set back along it so the
+        # triangle clears the callout's first glyph (issue #17)
         self.assertAlmostEqual(tip[1], 205.0)
+        self.assertLessEqual(tip[0], 130.0 + 1e-9)
+        self.assertGreater(tip[0], 130.0 - self.ctx.mm(8.0))
 
     def test_it_falls_back_to_the_diameter_dim(self):
         rects = {("front", 12.5): (112.0, 212.0, 126.0, 216.0)}
@@ -212,13 +215,26 @@ class SampleSheetDatumTest(unittest.TestCase):
     def test_the_triangle_sits_on_the_bore_callout_s_leader(self):
         bore = [l for l in leaders(self.text) if l["text"].startswith("%%c25")]
         self.assertEqual(len(bore), 1)
-        knee = bore[0]["knee"]
+        knee, tip = bore[0]["knee"], bore[0]["tip"]
         tips = [t[0] for t in solid_triangles(self.text)]
-        # on the leader's shoulder, or further along the same landing — ISO
-        # 1101 5.3 also allows the triangle on an EXTENSION of the
-        # dimension line, which is where it goes when the slots beside the
-        # shoulder are taken by the callout stacked under it (issue #7)
-        self.assertTrue(any(abs(t[1] - knee[1]) < 1e-6 and t[0] >= knee[0]
+
+        def on_the_leader(t):
+            """On the segment arrow->knee (the triangle may be set back
+            along it to clear the text, issue #17)..."""
+            dx, dy = knee[0] - tip[0], knee[1] - tip[1]
+            ln = math.hypot(dx, dy) or 1.0
+            off = abs((t[0] - tip[0]) * -dy / ln + (t[1] - tip[1]) * dx / ln)
+            along = ((t[0] - tip[0]) * dx + (t[1] - tip[1]) * dy) / (ln * ln)
+            return off < 0.01 and 0.5 < along <= 1.0
+
+        def on_the_landing(t):
+            """... or further along the same landing, in line with it: ISO
+            1101 5.3 allows the triangle on an EXTENSION of the dimension
+            line, which is where it goes when the slots beside the
+            shoulder are taken by the callout stacked under it (#7)."""
+            return abs(t[1] - knee[1]) < 1e-6 and t[0] >= knee[0]
+
+        self.assertTrue(any(on_the_leader(t) or on_the_landing(t)
                             for t in tips),
                         f"no datum triangle on the landing from {knee}")
 

@@ -467,7 +467,12 @@ def thread_problems(part: dict, who: str, bbox=None) -> list[str]:
     """A thread the sheet can draw (issue #12): the crest must be bigger
     than the root — for a tapped hole that means the thread is wider than
     its tap drill — and the threaded length must be a real span inside the
-    part, not a stray coordinate."""
+    part, not a stray coordinate.
+
+    The thread-end line is drawn where the usable thread stops: span[0] by
+    convention, or `end_at` when the span reads the other way round (issue
+    #16). A coordinate outside the threaded span would put that line
+    somewhere the thread is not, so it is checked here."""
     out = []
     for t in part.get("threads") or []:
         kind = str(t.get("kind", "external"))
@@ -494,6 +499,17 @@ def thread_problems(part: dict, who: str, bbox=None) -> list[str]:
             if b - a > longest + 0.001:
                 out.append(f"{who}: thread span {t['span']} is longer "
                            f"({b - a:g}) than the part ({longest:g})")
+        if t.get("end_at") is not None:
+            try:
+                e = float(t["end_at"])
+            except (TypeError, ValueError):
+                out.append(f"{who}: thread end_at {t['end_at']!r} is not a "
+                           "coordinate")
+            else:
+                if not a - 0.001 <= e <= b + 0.001:
+                    out.append(f"{who}: thread end_at {e:g} is outside the "
+                               f"threaded span {t['span']} — the thread-end "
+                               "line would be drawn where the thread is not")
         if kind == "internal":
             for spec in t.get("circles") or []:
                 cen = spec.get("center")

@@ -24,7 +24,8 @@ co-author line to git commits.
   a per-run working area only.
 - MusaCAD gaps found while drafting are FILED UPSTREAM (gh issue on
   MusaCAD/MusaCAD) — see memory musacad-gap-issues; workarounds live in the
-  harness (e.g. --min-lw 0.30 floors hairline text strokes, issue #19).
+  harness (e.g. --min-lw 0.30 floors hairline text strokes, MusaCAD
+  issue #19 — issue numbers elsewhere in this file are this repo's).
 - tools/musacad-libs/ holds MusaCAD static libs built OUT-OF-TREE by
   tools/build.sh (musa_cad tree never modified/rebuilt in place); rebuild
   after every musa_cad pull so headers and libs never diverge.
@@ -202,9 +203,14 @@ co-author line to git commits.
     section must not cut along their length — shafts, rods, screws, nuts,
     pins, O-rings — resolved to instance paths and passed to fc_project as
     `section_exempt`, which leaves those parts whole inside the cut.
-  - `detail_views`: [{label, scale, of, center, radius, balloons}] — the
-    part sheets' detail machinery (DIMLFAC and all), several per sheet,
-    each with its circle and letter on the parent view. An assembly detail
+  - `detail_views`: [{label, scale, of, center, radius, balloons, sheet}]
+    — the part sheets' detail machinery (DIMLFAC and all), several per
+    sheet, each with its circle and letter on the parent view. `"sheet":
+    2` draws it on the CONTINUATION sheet instead (issue #19): sheet 1
+    keeps the views and the section, sheet 2 carries the enlargements,
+    their balloons and the rest of the table. The region is still marked
+    on the view it comes from, and the letter there reads "B (SH 2)". A
+    continuation sheet is made for the details even when the table fits. An assembly detail
     reserves only DETAIL_ASSEMBLY_PAD_MM of clearance: it carries no
     dimensions of its own, only balloons.
   - BALLOONS: ONE per P.NO. on the whole sheet, never one per instance —
@@ -260,7 +266,12 @@ co-author line to git commits.
   to that feature; assembly links follow the same map), and the thread is
   drawn by ISO 6410 convention from manifest `"threads"` — a root line at
   the minor dia over the threaded span, `end_line` only where no diameter
-  step already draws that edge. Section hatch runs out to the crest, so the
+  step already draws that edge. The end line goes where the usable thread
+  STOPS: `span[0]` by convention, or `"end_at"` when the span reads the
+  other way round (issue #16 — it used to be drawn at the lower span
+  coordinate, so a hole threaded toward +x got it across its own mouth and
+  the place the thread really ends was unmarked; the lock checks `end_at`
+  lies inside the span). Section hatch runs out to the crest, so the
   root lines simply overlay it. At M2.5/1:1 the 0.24 mm crest-root gap is
   under the 0.30 mm stroke floor and prints as one heavier band: normal for
   small threads — the DESIGNATION carries the spec, not the line-work.
@@ -367,6 +378,38 @@ co-author line to git commits.
   notes block draws bottom-up). /draw prints and records them; /export
   REFUSES to run on any that is not waived by an explicit manifest
   `"value_waivers"` entry.
+- WHERE A LEADER MAY GO (issue #18): a leader must meet its feature at an
+  angle and keep clear of the other leaders. place_callouts (and the
+  diameter-leader fallback in dim_circles) tests every rung of its ladder
+  against the view geometry and against the leaders already down:
+  `leader_runs_along` measures the COLLINEAR run (ISO 128-22 — a leader
+  lying on the outline it points at is no longer an arrow) and
+  `Layout.leader_crossings` the transverse ones. The level knee is still
+  tried first, so a leader that was already clear keeps what it had.
+  A knee also belongs BESIDE its own view (KNEE_BESIDE_MM): stepping
+  further lands it in the next view's column, which its leader then has
+  to cross. When the first pass leaves a callout with nowhere clean,
+  build_part_sheet re-composes with the callouts in FAN ORDER —
+  `draw.fan_order`, the order their arrows are seen in from the column
+  they share, one view at a time and then across the sheet — and keeps
+  whichever pass does better; a fan cannot cross itself. When no rung is
+  clean at all the LEAST BAD one is drawn and the fault recorded in
+  `Layout.faults` (a callout the vendor never sees is worse than one whose
+  leader crosses another), and the layout check reports it on the finished
+  sheet. Balloons are one fan per side across every view that shares the
+  column, settled by exchanging ANY crossing pair, not only neighbours.
+- THE LAYOUT CHECK (issue #22, src/layout_check.py, run inside /draw):
+  what the manifest states is the value check's business; this one reads
+  how the sheet LOOKS, off the finished .musa, because the engine only
+  ever tests the boxes it placed against each other. It reports leaders
+  that cross, a leader running along drawn geometry (within 0.5 mm for
+  more than 3 printed mm), a symbol / triangle / frame / balloon lying on
+  text, annotation text outside the drawing area, and — as a WARNING —
+  two leaders running together closer than 2 mm. /draw prints them and
+  records them per sheet; /export refuses everything but the warning
+  unless a manifest `"layout_waivers"` entry names it. Tolerances are in
+  PRINTED millimetres at any scale; the parts-table band is the
+  template's furniture, not the drawing's ink.
 - SIDE-BY-SIDE SECTIONS (issue #13): with `projection: right|left` and
   leaders on BOTH views, each view gets its OWN callout column — the
   inner view's in the inter-view gap, the outer view's outside the group
@@ -402,6 +445,7 @@ co-author line to git commits.
 | 3 finalise | /finalise | src/manifest.py propose/lock (interactive) | manifests/manifest.json (locked) |
 | 4 draw | /draw | src/draw.py (+fc_project.py in FreeCAD) | output/musa/*.musa + sheets.json |
 | 4b values | (inside /draw) | src/verify.py | sheets.json "values" per sheet |
+| 4c layout | (inside /draw) | src/layout_check.py | sheets.json "layout_faults" per sheet |
 | 5 export | /export | src/export.py → tools/bin/musa_plot, pdfunite | output/pdf/*.pdf + print_set.pdf |
 | all | /pipeline <dir> | stages 1–5 with MANDATORY pause after /judge | — |
 
@@ -439,7 +483,15 @@ composition/rework), qa-checker (verify PDFs after every /export).
   SYMBOLS: flatness, position, perpendicularity, coaxiality (concentric
   circles; its zone is a cylinder, so the tolerance carries %%c) and
   circular runout (oblique arrow) — musa_writer._FCF_SYMBOLS.
-  DATUMS: a target naming a view edge (bottom_face / short_edge /
+  DATUMS: a datum triangle is SET BACK along its leader until its own ink
+  clears the callout's text (issue #17): on the knee, where the leader's
+  label starts, the filled triangle covered the first glyph — on a size
+  callout the diameter sign, the one glyph a vendor cannot afford to read
+  wrong. It stays on the leader (ISO 1101), or on the extension of the
+  landing past the text (ISO 1101 5.3) when the shoulder is crowded; it
+  never reaches back over the letter in its own box, and its ink is
+  claimed like every other annotation's.
+  A target naming a view edge (bottom_face / short_edge /
   long_edge) marks a SURFACE. A datum on a FEATURE OF SIZE — a bore or a
   spigot, whose datum is its AXIS — uses `"target": "<kind>_r<radius>"`
   (e.g. `bore_r12.5`, radius always in TRUE mm, in any view) and the

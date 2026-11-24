@@ -46,6 +46,26 @@ def main() -> None:
             + "\n  ".join(bad)
             + "\n  fix the manifest or the sheet and re-run /draw, or waive "
               "it in the manifest's \"value_waivers\"")
+    # the layout check (issue #22): what the sheets LOOK like. The engine
+    # only knows that the boxes it placed do not overlap; this is read off
+    # the finished sheet, and every one of these faults reached a vendor
+    # once because nothing was reading it.
+    bad = []
+    for sheet in meta["sheets"]:
+        for f in sheet.get("layout_faults") or []:
+            bad.append(f"{sheet['drg_no']}: {f['kind'].upper()}: "
+                       f"{f['what']}")
+    if bad:
+        die("the sheets do not read cleanly:\n  " + "\n  ".join(bad)
+            + "\n  fix the layout and re-run /draw, or waive it in the "
+              "manifest's \"layout_waivers\"")
+    warn = [f"{s['drg_no']}: {f['what']}" for s in meta["sheets"]
+            for f in s.get("layout_warnings") or []]
+    for line in warn:
+        print(f"layout warning: {line}")
+    lw = sum(len(s.get("layout_waived") or []) for s in meta["sheets"])
+    if lw:
+        print(f"layout: {lw} fault(s) waived in the manifest")
     waived = sum(len(s.get("values_waived") or []) for s in meta["sheets"])
     if waived:
         print(f"values: {waived} difference(s) waived in the manifest")

@@ -224,5 +224,76 @@ class ThreadLockTest(unittest.TestCase):
         self.assertIn("center", " ".join(bad))
 
 
+class ThreadEndLineTest(unittest.TestCase):
+    """Where the thread-end line goes (issue #16).
+
+    The real failure: a blind hole drilled from a POCKET FLOOR at
+    x = 888.6 and threaded 10 deep to x = 898.6, in a section whose x
+    increases into the part. The line was drawn at the lower span
+    coordinate, which is the mouth, and the place where the thread really
+    stops was left unmarked."""
+
+    MOUTH, END = 888.6, 898.6
+
+    def thread(self, **kw):
+        spec = {"kind": "internal", "views": ["section"], "orient": "h",
+                "axis": 0.0, "span": [self.END, self.MOUTH],
+                "major": 6.0, "minor": 5.0}
+        spec.update(kw)
+        return [spec]
+
+    def ends(self, recs):
+        """The thread-end lines: across the major diameter."""
+        return [v for v, _pr in lines(recs)
+                if abs(v[0] - v[2]) < 1e-9
+                and abs(abs(v[3] - v[1]) - 6.0) < 1e-6]
+
+    def test_the_line_is_drawn_where_the_thread_stops(self):
+        got = self.ends(records(self.thread()))
+        self.assertEqual(len(got), 1)
+        self.assertAlmostEqual(got[0][0], self.END, places=6)
+
+    def test_not_at_the_mouth_the_hole_opens_from(self):
+        got = self.ends(records(self.thread()))
+        self.assertNotAlmostEqual(got[0][0], self.MOUTH, places=6)
+
+    def test_end_at_names_it_when_the_span_reads_the_other_way(self):
+        got = self.ends(records(self.thread(span=[self.MOUTH, self.END],
+                                            end_at=self.END)))
+        self.assertEqual(len(got), 1)
+        self.assertAlmostEqual(got[0][0], self.END, places=6)
+
+    def test_the_thread_itself_still_covers_the_whole_span(self):
+        for spec in (self.thread(),
+                     self.thread(span=[self.MOUTH, self.END],
+                                 end_at=self.END)):
+            roots = [v for v, _pr in lines(records(spec))
+                     if abs(v[1] - v[3]) < 1e-9]
+            self.assertEqual(len(roots), 2)
+            for v in roots:
+                self.assertAlmostEqual(min(v[0], v[2]), self.MOUTH, places=6)
+                self.assertAlmostEqual(max(v[0], v[2]), self.END, places=6)
+
+    def test_a_hole_that_runs_the_other_way_is_unchanged(self):
+        # span[0] is the thread end whichever way the hole runs: the
+        # fixture's own M6, drilled downward, keeps the line it had
+        got = self.ends(records(tapped()))
+        self.assertEqual(len(got), 0)      # that one is across x, not y
+        across = [v for v, _pr in lines(records(tapped()))
+                  if abs(v[1] - v[3]) < 1e-9
+                  and abs(abs(v[2] - v[0]) - MAJOR) < 1e-6]
+        self.assertAlmostEqual(across[0][1], THREAD_DEEP, places=6)
+
+    def test_the_lock_refuses_an_end_outside_the_thread(self):
+        part = {"threads": self.thread(end_at=1000.0)}
+        bad = mf.thread_problems(part, "05", [60, 60, 60])
+        self.assertTrue(bad)
+        self.assertIn("outside the threaded span", " ".join(bad))
+
+    def test_an_end_inside_the_span_locks(self):
+        part = {"threads": self.thread(end_at=self.END)}
+        self.assertEqual(mf.thread_problems(part, "05", [60, 60, 60]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,7 @@ decision-by-decision finalisation step.
         ⏸ user approval
 /finalise              conversational elicitation -> locked manifests/manifest.json
 /draw                  HLR views + sections + GD&T + dims -> output/musa/*.musa
+                       (+ the value check and the layout check)
 /export                plot each sheet on its paper + print set -> output/pdf/
 /pipeline <model_dir>  all stages, pausing after /judge
 ```
@@ -47,7 +48,8 @@ printed size on every sheet and all the extra paper going to the drawing.
   (models carry the real helix; views project the thread blank via
   `project_feature` and draw the root line; a tapped hole is drawn from
   its tap drill out to the major diameter, with the thread-end line and a
-  three-quarter arc in the end view), tabulated drawings (one sheet for a
+  three-quarter arc in the end view, its thread-end line where the thread
+  really stops), tabulated drawings (one sheet for a
   family that differs in one size: a letter dimension and a table of
   variants), GD&T datum flags — on a face,
   or on a feature of size, where the triangle goes on that feature's own
@@ -55,7 +57,8 @@ printed size on every sheet and all the extra paper going to the drawing.
   does — and feature control frames (flatness, position, perpendicularity,
   coaxiality, circular runout), including frames on a plane face, leadered
   to the nearest edge-on line of that face and never across the section
-  hatch. Where one view holds two features of the same size, the datum or
+  hatch. A datum triangle is set back along its own leader far enough to
+  clear the callout's text, so no glyph is ever covered. Where one view holds two features of the same size, the datum or
   frame says which it means (`bore_r35.75@tail`, naming a callout's `id`,
   or `@x280`, its coordinate in the view); a frame is drawn only when it
   touches its own size callout or carries a leader to it, and the sheet
@@ -66,7 +69,9 @@ printed size on every sheet and all the extra paper going to the drawing.
   a section, hatched part by part so neighbours can be told apart and
   leaving shafts, screws and pins uncut), enlarged detail views, one
   circled balloon per part number across the whole sheet — in two columns,
-  one each side of the view, when one cannot hold them all — a parts table
+  one each side of the view, when one cannot hold them all, and on the
+  continuation sheet with the detail that shows the part when the
+  manifest puts that detail there — a parts table
   that can be grouped by sub-assembly with quantities per group and in
   total, and build notes. Sub-assemblies are followed to the real parts at
   any depth, so the table counts each part across every sub-assembly that
@@ -82,6 +87,10 @@ printed size on every sheet and all the extra paper going to the drawing.
   modelled to MusaCAD's exact rendering geometry, line bands, extension
   corridors, leaders, frames, notes) with auto-nudge and a hard
   zero-overlap gate: a sheet that cannot be laid out cleanly fails loudly.
+  A leader meets its feature at an angle and never lies on the outline it
+  points at or crosses another leader; when the manifest's order would
+  make two cross, the callouts are re-composed in the order their arrows
+  are seen in from the column they share.
 
 ## Requirements
 
@@ -126,13 +135,22 @@ style contract.
 
 ### Tests
 
-Every sheet is checked against its own manifest before it can be
-exported: /draw compares every value the manifest states — callout and
+Every sheet is checked twice before it can be exported, both times by
+reading the finished sheet rather than asking the engine what it did.
+
+The VALUE check compares every value the manifest states — callout and
 note text, tolerances, datum letters, the title block, the value each
-location dimension must measure — with what the sheet actually prints,
-and /export refuses to run on a difference nobody waived. A dropped fit
-class or a model coordinate printed as a dimension is named, with the
-sheet it is on.
+location dimension must measure — with what the sheet actually prints. A
+dropped fit class or a model coordinate printed as a dimension is named,
+with the sheet it is on.
+
+The LAYOUT check reads how the sheet looks: leaders crossing each other,
+a leader running along the outline it points at, a symbol or balloon
+lying on text, text outside the drawing area, and — as a warning — two
+leaders running together closer than 2 mm.
+
+/export refuses to run on anything either of them finds that the manifest
+does not waive (`"value_waivers"`, `"layout_waivers"`).
 
 ```
 python3 -m unittest discover -s tests -v

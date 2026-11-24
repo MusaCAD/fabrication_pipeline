@@ -218,6 +218,19 @@ class WaiverTest(unittest.TestCase):
         self.assertEqual(done, [])
 
 
+class SheetMarkedDetailTest(unittest.TestCase):
+    """A detail drawn on the continuation sheet marks its region "B
+    (SH 2)" on the view it comes from (issue #19). That is the
+    pipeline's own furniture, not a value the manifest should state."""
+
+    def test_the_marker_is_not_an_extra_value(self):
+        musa = ("MUSACAD 14\n"
+                "MTEXT 10.0 10.0 0.0 4.0 0.0 1.0 1.0 3 0 6 255 0 255 0 25\n"
+                "B (SH 2)\n\nEND\n")
+        found = verify.check_sheet({}, {"description": "X"}, musa)
+        self.assertEqual([f for f in found if f["kind"] == "extra"], [])
+
+
 class ExportGateTest(unittest.TestCase):
     """/draw reports the differences; /export refuses to run on them."""
 

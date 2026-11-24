@@ -274,5 +274,46 @@ class TooManyEvenForTwoTest(unittest.TestCase):
             self.assertIn("room for", msg)
 
 
+class UncrossTest(unittest.TestCase):
+    """Settling a fan whose leaders would still cross (issue #18).
+
+    The real failure: two balloons several knees apart crossed, with no
+    crossing pair between them, so a sweep of NEIGHBOURS never reached
+    them — and the sheet went out with two leaders pointing at each
+    other's part."""
+
+    # the right-hand column of the real 26-balloon sheet: where its
+    # arrows land, and the fan they have to come out in. The pair that
+    # crossed sat two knees apart, with a pair that did NOT cross
+    # between them, so a sweep of neighbours never reached it.
+    REAL_KX, REAL_START, REAL_PITCH = 1551.0, 1287.0, 61.5
+    REAL_TIPS = [(1338, 966), (1339, 966), (1363, 966), (1427, 966),
+                 (1433, 935), (1466, 950), (1335, 966), (1276, 966),
+                 (1270, 966), (1209, 966), (1205, 966), (1092, 986),
+                 (1117, 966), (1091, 986)]
+
+    def test_it_settles_a_pair_that_are_not_neighbours(self):
+        kx, start = self.REAL_KX, self.REAL_START
+        pitch = self.REAL_PITCH
+        tips = {i: (float(x), float(y))
+                for i, (x, y) in enumerate(self.REAL_TIPS)}
+        order = draw._uncross(list(tips), tips, kx, start, pitch)
+        self.assertEqual(sorted(order), sorted(tips), "a balloon was lost")
+        for i in range(len(order) - 1):
+            for j in range(i + 1, len(order)):
+                ka = (kx, start - i * pitch)
+                kb = (kx, start - j * pitch)
+                self.assertFalse(
+                    draw._proper_crossing(ka, tips[order[i]], kb,
+                                          tips[order[j]], 0.0),
+                    f"{order[i]} still crosses {order[j]}")
+
+    def test_an_order_that_does_not_cross_is_left_alone(self):
+        kx, start, pitch = 100.0, 100.0, 10.0
+        tips = {"a": (20.0, 90.0), "b": (20.0, 60.0), "c": (20.0, 30.0)}
+        self.assertEqual(draw._uncross(["a", "b", "c"], tips, kx, start,
+                                       pitch), ["a", "b", "c"])
+
+
 if __name__ == "__main__":
     unittest.main()

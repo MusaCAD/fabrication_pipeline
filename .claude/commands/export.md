@@ -6,8 +6,10 @@ Run pipeline stage 5 (export):
 
 1. Run `python3 src/export.py`. It REFUSES to run if /draw's value check
    found a difference between the manifest and a sheet that nobody
-   waived (issue #14) — report the differences to the user rather than
-   waiving them yourself. Otherwise it plots every sheet from
+   waived (issue #14), or if its layout check found a fault on a
+   finished sheet — a crossing leader, a leader on an outline, ink on
+   text, text off the sheet (issue #22). Report them to the user rather
+   than waiving them yourself. Otherwise it plots every sheet from
    output/musa/sheets.json via tools/bin/musa_plot (QT_QPA_PLATFORM=offscreen)
    at the sheet's manifest scale on the paper that sheet states (A4
    portrait unless its manifest entry says otherwise), verifies the

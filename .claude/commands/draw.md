@@ -31,8 +31,17 @@ Run pipeline stage 4 (drawing generation):
    the script flagged. Delegate style/layout iteration to the draftsman
    subagent when substantial rework is needed.
 
-The run ends with the VALUE CHECK: every value the manifest states is
-compared with what the sheet prints (src/verify.py), and the differences
-are printed and recorded in sheets.json. /export will refuse them, so
-fix the manifest or the sheet — or waive one deliberately in the
-manifest's "value_waivers" — and re-run.
+The run ends with TWO CHECKS, both read off the finished sheets:
+
+- the VALUE CHECK (src/verify.py): every value the manifest states is
+  compared with what the sheet prints;
+- the LAYOUT CHECK (src/layout_check.py): how the sheet looks — leaders
+  crossing each other, a leader running along the outline it points at,
+  a symbol or balloon lying on text, text outside the drawing area, and
+  (as a warning only) two leaders running together closer than 2 mm.
+
+Both are printed and recorded in sheets.json. /export will refuse
+anything but the warning, so fix the manifest or the sheet — or waive one
+deliberately in "value_waivers" / "layout_waivers" — and re-run. A
+leader fault usually means the callout's arrow (`at`) wants moving, the
+note belongs on the other view, or the sheet needs more room.

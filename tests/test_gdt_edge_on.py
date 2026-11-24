@@ -212,8 +212,11 @@ class DatumEdgeOnTest(unittest.TestCase):
         self.assertEqual(self.layout.unresolved, [])
         self.assertIn("A", pos)
         tip = solid_triangles("\n".join(recs))[0][0]
-        self.assertAlmostEqual(tip[0], 120.0)
+        # on the leader: at its shoulder, or set back along it to clear
+        # the callout's own text (issue #17)
         self.assertAlmostEqual(tip[1], 170.0)
+        self.assertLessEqual(tip[0], 120.0 + 1e-9)
+        self.assertGreater(tip[0], 120.0 - self.ctx.mm(8.0))
 
     def test_without_any_size_dimension_it_says_what_to_add(self):
         recs, pos = draw.place_datums(self.ctx, self.layout, self.gdt,
