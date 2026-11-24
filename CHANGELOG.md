@@ -5,6 +5,113 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.8.0 — 2026-11-24
+
+Three faults found drawing a real set, and the paper size they ran into:
+[#7](https://github.com/MusaCAD/fabrication_pipeline/issues/7),
+[#8](https://github.com/MusaCAD/fabrication_pipeline/issues/8),
+[#9](https://github.com/MusaCAD/fabrication_pipeline/issues/9) and
+[#10](https://github.com/MusaCAD/fabrication_pipeline/issues/10).
+
+### Fixed
+
+- **A feature control frame could still be drawn with no leader, and not
+  reported** (#7). v0.7.0 made that a loud failure, but only on the paths
+  it knew about: when the slot under a callout was taken, the widened
+  ladder walked away from it and landed under a NEIGHBOUR's callout,
+  where the frame needed no leader because a callout had been found at
+  all. A frame is now emitted only when it TOUCHES its own size
+  annotation — directly under or over it, overlapping across, with no
+  other annotation in the gap (`draw._frame_attached`) — or carries a
+  leader to it; otherwise the sheet fails with the reason and no frame
+  ink is written. On the real sheets this moved a runout frame off a
+  "2 x M4 ACROSS" note and onto its own ⌀51.8 spigot callout, and gave a
+  perpendicularity frame that had been sitting under a stranger's ⌀180
+  dimension a leader to the boss it controls.
+- **A frame on a shoulder face leadered to the far side of the view**
+  (#7). A face seen edge-on on a turned part is one short line EACH SIDE
+  of the axis; `face_line` took the longest, which was as often the far
+  one, and the leader then ran the width of the part, along the face
+  line, through the section hatch. `face_lines` returns every segment of
+  the face and `place_frame_near_face` takes the one it can reach by the
+  shortest clear route; a route through the hatch (`hatch_polys` /
+  `crosses_polys`) is taken only when there is no clear one.
+- **A datum box crowded out by the callouts stacked under its own** (#7).
+  Every spot within ±12 mm of the shoulder was the next callout's text,
+  and datum A came out unresolved whatever order they were in. It now has
+  the far end of its own landing to hang from (ISO 1101 5.3's extension
+  of the dimension line) and, where even that is taken, the sheet is
+  re-composed with the slot under that callout reserved
+  (`draw.gdt_reserve`, claims of kind `"slot"` that only the frame and
+  datum hung on it may use, released once they are placed). The retry
+  runs only when the first pass failed, so a sheet whose GD&T already
+  placed keeps the layout it had.
+- **/judge judged a part drawn on ANOTHER part's sheet at the wrong
+  scale** (#8). One disc of a kit, drawn 2:1 on the kit's sheet and
+  carrying its DRG NO. with `sheet: false`, was judged at /judge's own
+  suggested 1:1 and warned about thin features no manifest scale could
+  clear, while the lock skipped it altogether. Both stages now resolve
+  the sheet a part is drawn on (`judge.sheet_scales`) and judge it at
+  that sheet's scale; a part no sheet draws at all is not judged for
+  legibility, since nothing is drawn for it (`judge.not_drawn`).
+- **Wrong quantities in a grouped assembly parts table** (#9). An O-ring
+  used four times inside one sub-assembly printed P.NO. "17, 17, 17, 17"
+  with QTY 16, a nut used six times across two printed "18, 18" with QTY
+  12, and heading rows showed the number of parts under them (21, 22)
+  where the sub-assembly itself is used once. Quantities now come from
+  `part_usage`, once: `group_usage` counts instance paths per
+  sub-assembly, every P.NO. gets exactly one row, a part used under
+  several sub-assemblies is listed once in a common section instead of
+  counted in each, a heading states the sub-assembly's own quantity
+  (`sub_assembly_qty`) and carries no item number, a hardware group row
+  lists each number once and only exists for two or more of a kind (so no
+  row reads "1 ITEMS"), and TOTAL is the sum of the rows.
+- **The pictorial box could be drawn across the parts table** (#9). The
+  assembly sheet placed it before claiming the table's rows and without a
+  floor, so it slid down into the bottom band; part sheets had always
+  claimed the rows first.
+
+### Added
+
+- **A target may name WHICH feature of its size it means** (#7): size
+  alone does not identify a feature on a tube bored the same at both
+  ends, where the last callout authored silently won. A datum or frame
+  target may carry a selector — `bore_r35.75@tail` for the callout whose
+  manifest `"id"` is `tail`, or `bore_r35.75@x280` for its coordinate in
+  the view's own axes — and a target that still fits two annotations
+  fails, at the lock (`manifest.ambiguity_problem`) as well as at /draw.
+- **Per-sheet paper size** (#10). A part entry or `assembly_sheet` may
+  state `"paper": "A3L"` (or `{"size": "A3", "orientation":
+  "landscape"}`) and is drawn on that paper's title block, named in the
+  top-level `"templates": {"A3L": "/abs/path.musa"}`. One set may mix
+  papers — an A3-landscape assembly sheet among A4 part sheets — and
+  pdfunite merges them. The geometry is measured, not restated: a paper
+  template is the A4 one widened (same units, same row pitch, same text,
+  the same printed size, the title block travelling with the right edge),
+  so `musa_writer.template_geom` takes the difference between the two
+  furniture bounds as the widening and picks the smallest paper it fits.
+  S0 therefore never changes — the title block prints identically on
+  every sheet of a set and all the extra millimetres go to the drawing
+  area. `tools/widen_template.py` makes such a template from the default
+  one. sheets.json records each sheet's paper, /export plots on it and
+  checks the harness agrees, /judge sizes the fit with `judge.area_mm`,
+  and the lock checks the paper is one the harness is measured for and
+  that a template exists for it.
+- `manifest.quantity_problems` fails the lock when a manifest quantity
+  has drifted from the model's own usage count.
+
+### Compatibility
+
+An existing manifest redraws byte for byte: no paper statement means A4
+portrait with the measured S0 to the digit, and the GD&T retry pass runs
+only where the first pass failed. Verified on four real sets — eleven
+sslxbt part sheets, the TPE assembly and its parts, amogha RES-41-LH-01
+and `samples/out/RES-SAMPLE-01`. Four sheets change, each because it
+carried one of the faults above: two sslxbt sheets (the runout frame and
+the two shoulder leaders), the TPE insert (its ⊥ frame was one of the
+silently unleadered ones) and the sample (its datum now places, which
+also lets the balance pass centre the sheet).
+
 ## v0.7.0 — 2026-11-24
 
 Two GD&T cases common on turned parts could not be drawn
