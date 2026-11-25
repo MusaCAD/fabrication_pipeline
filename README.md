@@ -79,7 +79,9 @@ detail that the band cannot hold goes there instead of failing the sheet.
   one each side of the view, when one cannot hold them all; in the view
   its own leader can reach without crossing another; and on the
   continuation sheet with the detail that shows the part when the
-  manifest puts that detail there — a parts table
+  manifest puts that detail there — overall dimensions on the view the
+  manifest names and the side of it it names, so they need not stand in
+  the balloon fan's path, a parts table
   that can be grouped by sub-assembly with quantities per group and in
   total, and build notes. Sub-assemblies are followed to the real parts at
   any depth, so the table counts each part across every sub-assembly that
@@ -103,7 +105,15 @@ detail that the band cannot hold goes there instead of failing the sheet.
   A leader meets its feature at an angle and never lies on the outline it
   points at or crosses another leader; when the manifest's order would
   make two cross, the callouts are re-composed in the order their arrows
-  are seen in from the column they share.
+  are seen in from the column they share. A size callout whose stated
+  arrow point leaves no clean route is tried again on the same feature's
+  other points — the far end of the drawn edge, or the silhouette line on
+  the other side of the same circle — before any crossing is accepted,
+  and because the overall dimensions are placed after the callouts, the
+  sheet is composed once more with the extension lines the first pass
+  found. A balloon fan passes over the knee rows whose leaders would meet
+  a sight arrow or disappear under the pictorial, and says so when the
+  column is too short to.
 
 ## Requirements
 
@@ -159,16 +169,23 @@ with the sheet it is on.
 
 The LAYOUT check reads how the sheet looks: leaders crossing each other,
 a leader running along the outline it points at, reaching its feature
-through another view, or crossing a dimension line, a sight arrow or the
-pictorial box, a symbol or balloon lying on text, a datum box sitting
-nearer another callout than the one it belongs to, a callout column so
+through another view, or crossing a dimension line, an extension line, a
+sight arrow or the pictorial box, a leader through another leader's
+arrowhead (or two arrows landing in one place), a leader running UNDER
+the pictorial, whose stamped image is opaque, a symbol or balloon lying
+on text, a dimension's own line through a label, two annotations too
+close to read apart, a datum box sitting nearer another callout than the
+one it belongs to or on that callout's own line, a callout column so
 narrow the note comes out one word a line, text outside the drawing area
-or on the title block,
-and — as warnings — two leaders running together closer than 2 mm and a
-leader across an extension line.
+or on the title block, and — as a warning — two leaders running together
+closer than 2 mm. Each finding names the leader, and a balloon by its own
+number, so one crossing can be waived without waiving the kind. Each
+names the dimension it crosses, by what that dimension measures.
 
 /export refuses to run on anything either of them finds that the manifest
-does not waive (`"value_waivers"`, `"layout_waivers"`).
+does not waive (`"value_waivers"`, `"layout_waivers"`) — except a leader
+hidden under the pictorial, which no waiver covers: it is not printed at
+all, so there is nothing for the vendor to read.
 
 ```
 python3 -m unittest discover -s tests -v

@@ -12,6 +12,7 @@ callout. All of them passed every check the pipeline had and were found by
 eye.
 """
 
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -79,9 +80,11 @@ class LeaderCrossingTest(unittest.TestCase):
         self.assertEqual(lc.check_sheet(text, AREA), [])
 
     def test_a_touch_at_the_ends_is_not_a_crossing(self):
-        # two balloons landing on the same edge of the same part
+        # two balloons landing on the same edge of the same part, far
+        # enough apart that each arrow is its own (issue #29 reports the
+        # pair that lands in one place: ArrowheadTest)
         text = sheet(mw.leader((50, 50), (120, 60), "", 3.0, props=A),
-                     mw.leader((50, 50), (120, 40), "", 3.0, props=A))
+                     mw.leader((50, 44), (120, 40), "", 3.0, props=A))
         self.assertEqual(lc.check_sheet(text, AREA), [])
 
     def test_the_scale_does_not_change_the_rule(self):
@@ -268,6 +271,35 @@ class ExportGateTest(unittest.TestCase):
             self.run_export(waived=[{"kind": "leader-crossing",
                                      "what": "the leaders cross"}]),
             ["A.musa"])
+
+    def test_what_no_waiver_covers_says_so(self):
+        """A leader under the pictorial is not printed at all, so the
+        failure names the levers that exist rather than the waiver that
+        does not (issue #30)."""
+        import contextlib
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(buf):
+            self.run_export([{"kind": "leader-hidden", "waivable": False,
+                              "what": "the leader of 'balloon 22' runs "
+                                      "49.2 mm under the pictorial"}])
+        said = buf.getvalue()
+        self.assertIn("no waiver covers", said)
+        self.assertIn('"pictorial": false', said)
+        self.assertNotIn('waive it in the manifest', said)
+
+    def test_an_ordinary_fault_beside_it_names_the_waiver_too(self):
+        import contextlib
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(buf):
+            self.run_export([
+                {"kind": "leader-hidden", "waivable": False,
+                 "what": "the leader of 'balloon 22' runs 49.2 mm under "
+                         "the pictorial"},
+                {"kind": "leader-crossing",
+                 "what": "the leaders of 'a' and 'b' cross"}])
+        said = buf.getvalue()
+        self.assertIn("no waiver covers", said)
+        self.assertIn('"layout_waivers"', said)
 
     def test_a_warning_alone_exports(self):
         self.assertEqual(

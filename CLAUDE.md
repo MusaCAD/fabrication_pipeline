@@ -250,6 +250,18 @@ co-author line to git commits.
     section must not cut along their length — shafts, rods, screws, nuts,
     pins, O-rings — resolved to instance paths and passed to fc_project as
     `section_exempt`, which leaves those parts whole inside the cut.
+  - `extent_dims` — WHICH VIEW carries the overall dimensions, and on
+    which side of it (issue #30): `"front"` (the default, today's sheet
+    exactly), `"section"`, `"none"`, or {view, which: ["w"|"h"],
+    width_side: top|bottom, height_side: left|right}. The balloon
+    columns stand on both sides of the views and a split fan reaches
+    across the top of the drawing area — which is exactly where the
+    front view's own overall dims go, so on the real A3-landscape sheet
+    seven balloon leaders crossed a dimension line and the only lever was
+    `front_extent_dims: false`, dropping dimensions a test facility asks
+    for. The section carries no balloons when every part is ballooned on
+    the front view. `draw.extent_dims_spec` reads it; the old
+    `front_extent_dims: false` still means none.
   - `detail_views`: [{label, scale, of, center, radius, balloons, sheet}]
     — the part sheets' detail machinery (DIMLFAC and all), several per
     sheet, each with its circle and letter on the parent view. `"sheet":
@@ -293,6 +305,23 @@ co-author line to git commits.
     missing balloon fails the sheet while a table row has somewhere else
     to go. If two columns still cannot hold them, the sheet says so with
     the counts.
+    A ROW THE FAN CANNOT USE (issue #30): the cutting plane's sight
+    arrows stand at the ends of the view, BETWEEN it and the column, so
+    every leader from a row at their height crosses one whichever balloon
+    sits there; and the pictorial's stamp is OPAQUE, so a leader under it
+    is not printed at all. Neither is settled by the fan's order, the way
+    a dimension line is, and stepping ONE balloon out of its row makes
+    the fan cross itself — the order was settled against the rows. So the
+    rows are settled FIRST (draw.fan_rows + knee_spoilt): the pitch, with
+    any such row passed over, and `_uncross` and `_order_against_ink` are
+    then handed that row list. When the column is not long enough for the
+    skipping it would take, the plain rows are kept — a balloon the
+    drawing does not carry is worse than one that is hard to read — and
+    the sheet names the balloon and the levers: a bigger paper,
+    `"pictorial": false` (an assembly sheet or a part sheet may say it has
+    no room for one), or that part ballooned in a detail view. The layout
+    check reads the same thing back off the finished sheet as
+    `leader-hidden`, which NO waiver covers.
   - `parts_table` {group_by: none|sub_assembly, group_hardware, total}.
     Grouped by sub-assembly it uses the v0.5.0 tree: a heading row per
     sub-assembly carrying its own quantity, then its parts, then a TOTAL
@@ -491,6 +520,32 @@ co-author line to git commits.
   than its own longest word comes out ONE WORD A LINE and its leader then
   crosses the view to reach it: that is a fault naming the words, because
   the fix is a shorter note or a bigger sheet, not another knee.
+  THE SAME FEATURE'S OTHER EDGE (issue #29): an extension line and
+  another leader's ARROWHEAD are now things the engine tries to avoid
+  before it accepts either. place_callouts walks its rungs a STRICT pass
+  first (clear of those two as well), then — for a size callout, whose
+  feature is a circle — the same feature's OTHER POINTS: the far end of
+  the drawn edge the stated `at` lies on, its middle, and the silhouette
+  line 2r away, which is the same circle (draw.feature_edge_anchors, off
+  the projected ink; a callout with no `circle_r` keeps the spot it was
+  given, because a note's arrow means the place it was put). Only then
+  does the old ladder run, so a callout that was already clear takes the
+  rung it always did. `Layout.arrow_clash` is the arrowhead test — the
+  triangle is dim_arrow_tri, core/dimension.cpp's own proportions — and
+  it catches both a shaft through somebody else's arrowhead and two
+  arrows landing in one place.
+  THE INK THAT IS NOT THERE YET (issue #29): standard practice puts the
+  dimension columns nearest the view and the leader notes outboard of
+  them, so the callouts are placed BEFORE the overall dimensions — and
+  when a callout chose its knee, the extension lines of the length
+  dimensions did not exist. The engine cannot avoid what is not there, so
+  the first pass is what tells it: `draw.crossed_ext_lines` reads those
+  segments off the finished layout, build_part_sheet composes ONCE MORE
+  with them as ink to keep off (`ext_ahead`, carried through the balance
+  loop by `shift_segs`, since seeded ink travels with the view group),
+  and the pass that crosses fewer of them wins. On the real sheets that
+  moved four callouts — three onto a clean knee and one onto the
+  feature's other edge — and took their crossings to nil.
 - THE LAYOUT CHECK (issue #22, src/layout_check.py, run inside /draw):
   what the manifest states is the value check's business; this one reads
   how the sheet LOOKS, off the finished .musa, because the engine only
@@ -508,12 +563,52 @@ co-author line to git commits.
   knee so a table's cells are not read as somebody's note), a datum box
   nearer another callout than its own (`datum_boxes`, the triangle's tip
   being the vertex FARTHEST from the box), annotation text outside the
-  drawing area, and — as WARNINGS — two leaders running together closer
-  than 2 mm and a leader across an extension line. /draw prints them and records them per
+  drawing area, and — as a WARNING — two leaders running together closer
+  than 2 mm. /draw prints them and records them per
   sheet; /export refuses everything but the warning unless a manifest
   `"layout_waivers"` entry names it. Tolerances are in PRINTED
   millimetres at any scale; the parts-table band and the pictorial box
   are the pipeline's own furniture, not the drawing's ink.
+  EVERY KIND OF INK IT CROSSES, NAMED (issues #29, #30): a leader that
+  crossed a dimension line on its way into the pictorial was reported for
+  the dimension alone — the check stopped at the first kind it found —
+  and the pictorial, which HIDES it, went unsaid. Each kind is reported
+  now, and each names the dimension it belongs to (`dim_ink` tags every
+  segment through `_dim_name`: the measured def-point distance times the
+  style's DIMLFAC, which is what the reader sees). Every BALLOON is named
+  by its own number (`balloon_numbers` reads the circle beside the knee,
+  `leader_name` matches them), because a sheet of them all read "the
+  leader of 'balloon'" and one waiver string covered the lot. What the
+  check adds this round:
+    leader-across-extension-line  now a FAULT, not a warning: the engine
+                                  tries the feature's other edge first;
+    leader-through-arrowhead      a shaft through another leader's
+                                  arrowhead, or two arrows landing in one
+                                  place (`arrowhead` + `seg_meets_poly`);
+    leader-hidden                 a leader UNDER the pictorial, whose
+                                  stamp is opaque (`inside_run` measures
+                                  how much is lost). NEVER WAIVABLE —
+                                  verify.waived keeps a finding marked
+                                  `waivable: False` live whatever the
+                                  manifest names;
+    annotation-crowded            two annotations closer than the 0.8 mm
+                                  the engine itself keeps between its own
+                                  claims, anchored to a LEADER's label so
+                                  a notes block's own leading is not read
+                                  as crowding, and a frame's cells belong
+                                  to their frame;
+    ink-on-text                   also a DIMENSION's own line or
+                                  extension line through a label — into
+                                  the BODY of the glyphs, so a line
+                                  grazing the top of a letter box is not
+                                  reported;
+    datum-beside-wrong-callout    also a box on another callout's own
+                                  LINE, just past its words: text reads
+                                  ALONG a line, so that is what the box
+                                  reads as however near its own callout
+                                  may be in plain distance. Only a box
+                                  sharing nobody's line is judged by
+                                  distance (#27's rule).
 - SIDE-BY-SIDE SECTIONS (issue #13): with `projection: right|left` and
   leaders on BOTH views, each view gets its OWN callout column — the
   inner view's in the inter-view gap, the outer view's outside the group
@@ -602,7 +697,11 @@ composition/rework), qa-checker (verify PDFs after every /export).
   callout is the nearest text to it (draw.datum_on_landing `mine`, which
   measures with `rect_gap` against `Layout.anno_clearance(ignore=stack)`);
   when no spot is, the sheet fails and says so, because a datum on the
-  wrong feature is worse than no datum at all.
+  wrong feature is worse than no datum at all. And TEXT READS ALONG A
+  LINE (issue #29): the check asks first which label the box sits just
+  after on its OWN line, whatever the distances say, since a box on the
+  line below reads as that line's — `datum-beside-wrong-callout` either
+  way.
   A target naming a view edge (bottom_face / short_edge /
   long_edge) marks a SURFACE. A datum on a FEATURE OF SIZE — a bore or a
   spigot, whose datum is its AXIS — uses `"target": "<kind>_r<radius>"`

@@ -306,11 +306,17 @@ def check_sheet(m: dict, part: dict, musa_text: str, dims=(), bbox=None,
 def waived(findings: list[dict], waivers) -> tuple[list, list]:
     """(live, waived): a waiver is an explicit string in the manifest that
     appears in the finding, named and reasoned like every other waiver
-    here."""
+    here.
+
+    A finding that carries `waivable: False` is never waived, whatever
+    the manifest names: a leader hidden under the pictorial is not
+    printed at all, and no reason makes the vendor see it (issue #30)."""
     live, done = [], []
     for f in findings:
         text = f"{f['kind']} {f['what']} {f.get('found', '')}"
-        if any(str(w) and str(w) in text for w in (waivers or [])):
+        if f.get("waivable") is False:
+            live.append(f)
+        elif any(str(w) and str(w) in text for w in (waivers or [])):
             done.append(f)
         else:
             live.append(f)

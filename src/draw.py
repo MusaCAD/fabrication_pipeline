@@ -1204,6 +1204,26 @@ class Layout:
         return any(_segs_cross(tip, knee, a, b, 0.0)
                    for a, b, _w in self.ext_lines)
 
+    def arrow_clash(self, tip, knee):
+        """The label of a leader whose ARROWHEAD this one would meet, or
+        None (issue #29).
+
+        Two arrowheads in one place say nothing: neither arrow can be
+        told from the other, and a leader through the tip of somebody
+        else's arrow looks like part of it. The crossing is AT that
+        leader's end point, which is exactly where leader_crossing does
+        not look — a leader legitimately touches the outline it points
+        at and the knees of its neighbours."""
+        size = self.ctx.mm(DIM_ARROW_MM)
+        mine = dim_arrow_tri(tip, knee, size)
+        for t, k, lab in self.leaders:
+            if math.dist(tip, t) <= size:
+                return lab               # the two arrows land together
+            if _seg_meets_tri(tip, knee, dim_arrow_tri(t, k, size)) \
+                    or _seg_meets_tri(t, k, mine):
+                return lab
+        return None
+
     def restore(self, snap) -> None:
         (claims, unresolved, leaders, flips, faults, nudges) = snap
         self.claims = list(claims)
@@ -1712,6 +1732,38 @@ def _segs_cross(a0, a1, b0, b1, eps) -> bool:
             and eps / lb < u < 1.0 - eps / lb)
 
 
+# Every dimstyle this pipeline writes carries the same arrow size, and a
+# LEADER's arrowhead is drawn at its style's (scene_snapshot.cpp hands
+# knee - tip and the size to append_arrowhead).
+DIM_ARROW_MM = 2.5
+
+
+def dim_arrow_tri(tip, knee, size):
+    """The triangle MusaCAD fills at a leader's tip: apex on the tip, base
+    `size` towards the knee, half-width 0.18*size — dim_arrowhead's own
+    proportions, which are core/dimension.cpp's."""
+    ux, uy = knee[0] - tip[0], knee[1] - tip[1]
+    ln = math.hypot(ux, uy)
+    if ln < 1e-9 or size <= 0.0:
+        return []
+    ux, uy = ux / ln, uy / ln
+    px, py = -uy, ux
+    bx, by = tip[0] + ux * size, tip[1] + uy * size
+    return [(tip[0], tip[1]),
+            (bx + px * size * 0.18, by + py * size * 0.18),
+            (bx - px * size * 0.18, by - py * size * 0.18)]
+
+
+def _seg_meets_tri(a, b, tri) -> bool:
+    """Does a segment cross into a filled triangle?"""
+    if not tri:
+        return False
+    edges = list(zip(tri, tri[1:] + tri[:1]))
+    if any(_segs_cross(a, b, p, q, 0.0) for p, q in edges):
+        return True
+    return any(_point_in_poly(tri, p) for p in (a, b))
+
+
 def _crossing_other(layout, tip, knee, label):
     """The label of a leader this one crosses, other than its own."""
     for t, k, lab in layout.leaders:
@@ -1895,6 +1947,41 @@ def dim_extents(ctx, layout, job, off, *, width_side="top",
                                precision=prec))
             _claim_dim_ink(ctx, layout, a, b, lp, "v", label)
     return recs
+
+
+def extent_dims_spec(asm: dict):
+    """Where an assembly sheet's overall dimensions go, or None for none
+    (issue #30).
+
+    The balloon columns stand on both sides of the views and the fan
+    reaches across the top of the drawing area — which is exactly where
+    the front view's own overall dims are placed, so seven balloon
+    leaders crossed a dimension line and the only way out was to drop
+    the overall dimensions altogether. A test facility asks for them, so
+    the manifest says where they go instead:
+
+      "extent_dims": "front" | "section" | "none"
+      "extent_dims": {"view": ..., "which": ["w"], "width_side": "bottom",
+                      "height_side": "right"}
+
+    The section carries no balloons when every part is ballooned on the
+    front view, and the room below it is free. Omitted = "front", today's
+    sheet exactly; `front_extent_dims: false` still means none."""
+    if not asm.get("front_extent_dims", True):
+        return None
+    spec = asm.get("extent_dims", "front")
+    if isinstance(spec, str):
+        spec = {"view": spec}
+    view = spec.get("view") or "front"
+    if view == "none":
+        return None
+    return {"view": view,
+            "which": tuple(spec.get("which") or ("w", "h")),
+            # the outer side of a section drawn below the front view is
+            # its bottom: the inter-view gap is the front view's
+            "width_side": spec.get("width_side")
+            or ("bottom" if view == "section" else "top"),
+            "height_side": spec.get("height_side") or "left"}
 
 
 def dim_circles(ctx, layout, job, off, suppress=(), limit=4, lfac=1.0,
@@ -2167,6 +2254,83 @@ def callout_anchor(co, job, off):
     return (c["c"][0] + ox, c["c"][1] + oy, c["r"])
 
 
+def feature_edge_anchors(co, job, off, anchor, tol=0.05):
+    """Other points on the SAME feature this callout's arrow may land on
+    (issue #29).
+
+    A diameter callout anchored by `at` points at one of the two lines a
+    cylinder is drawn as. Its leader may have to cross the extension
+    lines of the length dimensions above the view, where one from the
+    other END of that edge, or from the feature's other edge, crosses
+    nothing — and it is the same circle either way, so the callout still
+    names the feature the designer named. Only a callout carrying
+    `circle_r` gets them: with no size there is no feature for another
+    point to be ON, and a note's arrow means the spot it was put on.
+
+    The candidates come off the DRAWN ink: the segment the stated point
+    lies on gives its two ends (stepped a little inside, so the arrow
+    lands on the edge and not on its corner) and its middle, then a
+    segment parallel to it 2r away — a cylinder's other silhouette line
+    — gives the same three."""
+    if "at" not in co or "circle_r" not in co:
+        return []
+    try:
+        r = float(co["circle_r"])
+    except (TypeError, ValueError):
+        return []
+    if r <= 0.0:
+        return []
+    ax, ay = anchor[0], anchor[1]
+    segs = [(a, b) for a, b in prim_segments(job.get("visible", []), off)
+            if math.dist(a, b) > tol]
+    home = None
+    for a, b in segs:
+        if _seg_pt_dist(a, b, (ax, ay)) > tol:
+            continue
+        if home is None or math.dist(a, b) > math.dist(*home):
+            home = (a, b)
+    if home is None:
+        return []
+    out = []
+    for edge in [home] + _parallel_edges(segs, home, 2.0 * r, tol):
+        a, b = edge
+        length = math.dist(a, b)
+        ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+        inset = min(length * 0.1, 2.0)
+        # the end nearest the annotation band first: the shortest leader
+        # crosses the least, which is callout_anchor's own rule
+        pts = sorted(((a[0] + ux * s, a[1] + uy * s)
+                      for s in (inset, length - inset, length / 2.0)),
+                     key=lambda p: -p[0])
+        out += [(p[0], p[1], 0.0) for p in pts
+                if math.dist(p, (ax, ay)) > tol]
+    return out
+
+
+def _parallel_edges(segs, home, dist, tol):
+    """The segments parallel to `home` and `dist` away from it, overlapping
+    it along its own direction: a cylinder's other silhouette line."""
+    a, b = home
+    length = math.dist(a, b)
+    ux, uy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+    out = []
+    for p, q in segs:
+        ln = math.dist(p, q)
+        vx, vy = (q[0] - p[0]) / ln, (q[1] - p[1]) / ln
+        if abs(ux * vy - uy * vx) > 0.01:
+            continue                      # not parallel
+        across = abs((p[0] - a[0]) * -uy + (p[1] - a[1]) * ux)
+        if abs(across - dist) > max(tol, 0.01 * dist):
+            continue
+        t0 = (p[0] - a[0]) * ux + (p[1] - a[1]) * uy
+        t1 = (q[0] - a[0]) * ux + (q[1] - a[1]) * uy
+        if min(t0, t1) > length - tol or max(t0, t1) < tol:
+            continue                      # alongside, not beside
+        out.append((p, q))
+    out.sort(key=lambda e: -math.dist(*e))
+    return out
+
+
 def fan_order(ctx, callouts, view_jobs, offs, by_view=True):
     """The callouts of a sheet in the order their arrows appear FROM THE
     COLUMN their knees share (issue #18).
@@ -2219,7 +2383,7 @@ def fan_order(ctx, callouts, view_jobs, offs, by_view=True):
 
 
 def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
-                   limits=None, geom=()):
+                   limits=None, geom=(), ext_ahead=()):
     """Leader callouts (fit specs, hole callouts) landing in the right-hand
     band. A callout carries either a single "text" or a "lines" stack
     (ASME Y14.5 hole note: optional per-line "sym" prefix glyph, cbore /
@@ -2265,7 +2429,10 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
             layout.unresolved.append(f"callout-nocircle-{first[:18]}")
             continue
         ox, oy = offs[view]
-        cx, cy, crad = anchor
+        # the arrow's own feature point. An alternative pass may move it
+        # to another point of the SAME feature when no rung from the
+        # stated one leaves the leader clean (issue #29)
+        here = [anchor]
         mnb, mxb = job["bounds"]
         s = 1.2 * h                      # prefix glyph cell side
         gap = 0.45 * h                   # glyph-to-text gap
@@ -2303,6 +2470,7 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
             """Everything a rung determines: where the knee goes, where the
             arrow lands, how the note wraps to the column that knee leaves,
             and the ink it would claim."""
+            cx, cy, crad = here[0]
             knee_x = mxb[0] + ox + ctx.mm(kdx)
             ky = cy + ctx.mm(dy)         # knee = first-line centre
             x1 = knee_x + ctx.mm(1.5)    # left edge of every line
@@ -2334,27 +2502,41 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
             # crossing another leader (issue #25). An extension line only
             # ranks the rung — a crowded sheet sometimes has no way round
             over = layout.crossing_ink(tip, knee)
-            ext = layout.crosses_extension(tip, knee)
+            # an extension line and another leader's ARROWHEAD only RANK a
+            # rung: the engine tries every rung that avoids them first
+            # (`strict`), and a crowded sheet sometimes has no way round
+            # one — which the layout check then reports (issue #29)
+            ext = layout.crosses_extension(tip, knee) or any(
+                _segs_cross(tip, knee, a, b, 0.0) for a, b in ext_ahead)
+            clash = layout.arrow_clash(tip, knee)
             bad = along > COLLINEAR_OK or crossed or over
             return ((0 if not bad else 1) if beside else 2,
                     len(crossed) + (1 if over else 0),
-                    round(along / ctx.mm(1.0), 1), 1 if ext else 0), \
+                    round(along / ctx.mm(1.0), 1),
+                    (1 if ext else 0) + (1 if clash else 0)), \
                 along, (crossed[0] if crossed else
-                        (f"over:{over}" if over else None))
+                        (f"over:{over}" if over else
+                         (f"head:{clash}" if clash else None)))
 
         def fits(ink, over_caption):
             r = (ink[0], ink[1], ink[2], ink[3])
             return layout.inside(r) and not layout.collides(
                 r, ignore=("caption",) if over_caption else ())
 
-        def try_rung(dy, kdx, last_resort=False, over_caption=False):
+        def try_rung(dy, kdx, last_resort=False, over_caption=False,
+                     strict=False):
             """Place this callout with its knee at (kdx, dy) from the
-            feature, unless its leader would be unreadable there."""
+            feature, unless its leader would be unreadable there.
+            `strict` also turns down a rung that would cross an extension
+            line or meet another leader's arrowhead (issue #29)."""
             nonlocal lines, first, first_sym
             knee, x1, tip, lines_ = rung(dy, kdx)
             if not _leader_path_clear(ctx, layout, tip, knee):
                 return None              # would run along existing dim ink
-            if not last_resort and harm_of(knee, tip, knee[1])[0][0] > 0:
+            score = harm_of(knee, tip, knee[1])[0]
+            if not last_resort and score[0] > 0:
+                return None
+            if strict and score[3]:
                 return None
             lines = lines_
             first = lines[0]["text"]
@@ -2397,10 +2579,30 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
                             -40.0, -48.0, -56.0, 16.0, 24.0, 32.0,
                             -64.0, -72.0, -80.0, 40.0, 48.0)
                  for kdx in CALLOUT_KNEE_STEPS]
+        # the strictest pass first: a rung clear of the extension lines
+        # and of every other arrowhead as well. A callout that was
+        # already clear of those takes the same rung it always did; it is
+        # the ones that had to cross a length dimension's extension line
+        # that now step, or move the arrow to the feature's other edge
+        # (issue #29).
         for dy, kdx in rungs:
-            placed = try_rung(dy, kdx)
+            placed = try_rung(dy, kdx, strict=True)
             if placed is not None:
                 break
+        if placed is None:
+            for alt in feature_edge_anchors(co, job, offs[view], anchor):
+                here[0] = alt
+                for dy, kdx in rungs:
+                    placed = try_rung(dy, kdx, strict=True)
+                    if placed is not None:
+                        break
+                if placed is not None:
+                    break
+                here[0] = anchor
+        for dy, kdx in rungs:
+            if placed is not None:
+                break
+            placed = try_rung(dy, kdx)
         if placed is None:
             # nowhere left: a detail view's caption band is a reservation
             # that yields — a caption has a ladder of its own to fall back
@@ -2432,6 +2634,9 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
             if placed is not None:
                 why = (crosses[5:] + " — ink that is not its own"
                        if crosses and crosses.startswith("over:")
+                       else f"runs through the arrowhead of "
+                            f"{crosses[5:][8:]!r}"
+                       if crosses and crosses.startswith("head:")
                        else f"crosses the leader of {crosses[8:]!r}"
                        if crosses
                        else f"runs {along:.0f} mm along an outline"
@@ -2468,7 +2673,7 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
                 anchors.append(feature_anchor(
                     view, co["circle_r"], placed, lands[key],
                     cid=co.get("id"),
-                    at=co.get("at") or (cx - ox, cy - oy)))
+                    at=co.get("at") or (anchor[0] - ox, anchor[1] - oy)))
                 extra = (reserve or {}).get(key)
                 if extra:
                     # keep the slot under this callout free for the datum or
@@ -4446,10 +4651,10 @@ def balloon_sides(ctx, views, offs, by_view, capacity, columns):
     return _rebalance(sides, offset, capacity)
 
 
-def _uncross(order, tip_of, kx, start, pitch, rounds=8):
+def _uncross(order, tip_of, kx, rows, rounds=8):
     """Exchange neighbours in a fan whose leaders would cross.
 
-    The knee of position i is fixed — `start - i * pitch` — so a crossing
+    The knee of position i is fixed — `rows[i]` — so a crossing
     between two neighbours is removed by swapping which balloon sits
     where, and repeated passes settle the whole column. Ordering by the
     angle from the fan's middle gets almost every pair right; this is
@@ -4464,8 +4669,8 @@ def _uncross(order, tip_of, kx, start, pitch, rounds=8):
         for i in range(n - 1):
             for j in range(i + 1, n):
                 a, b = order[i], order[j]
-                ka = (kx, start - i * pitch)
-                kb = (kx, start - j * pitch)
+                ka = (kx, rows[i])
+                kb = (kx, rows[j])
                 if _proper_crossing(ka, tip_of[a], kb, tip_of[b], 0.0):
                     order[i], order[j] = b, a
                     swapped = True
@@ -4515,7 +4720,7 @@ def crosses_other_view(tip, knee, inks, own_job):
     return None
 
 
-def _order_against_ink(order, tip_of, kx, start, pitch, job_of, inks,
+def _order_against_ink(order, tip_of, kx, rows, job_of, inks,
                        rounds=6):
     """The fan's order, settled against the sheet's OTHER ink as well as
     against itself (issue #25).
@@ -4530,7 +4735,7 @@ def _order_against_ink(order, tip_of, kx, start, pitch, job_of, inks,
     leader counts double: it says something false about the part, where
     a leader over a dimension line is only hard to read."""
     n = len(order)
-    knees = [(kx, start - i * pitch) for i in range(n)]
+    knees = [(kx, rows[i]) for i in range(n)]
     over = [[bool(crosses_other_view(tip_of[b], knees[s], inks, job_of[b]))
              for s in range(n)] for b in order]
     idx = {b: i for i, b in enumerate(order)}
@@ -4559,9 +4764,84 @@ def _order_against_ink(order, tip_of, kx, start, pitch, job_of, inks,
     return best
 
 
+def inside_run(a, b, rect) -> float:
+    """How much of a segment lies INSIDE a rect (Liang-Barsky): what an
+    opaque stamp over that rect would hide."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, a[0] - rect[0]), (dx, rect[2] - a[0]),
+                 (-dy, a[1] - rect[1]), (dy, rect[3] - a[1])):
+        if abs(p) < 1e-12:
+            if q < 0.0:
+                return 0.0
+            continue
+        r = q / p
+        if p < 0.0:
+            t0 = max(t0, r)
+        else:
+            t1 = min(t1, r)
+    return (t1 - t0) * math.hypot(dx, dy) if t1 > t0 else 0.0
+
+
+def knee_spoilt(ctx, tip, knee, step_off=(), hide=()):
+    """Why this knee row is no good for a balloon, or None (issue #30).
+
+    A leader that runs UNDER the pictorial is not printed there at all —
+    the stamped image is opaque — and one across a sight arrow ends up in
+    an arrowhead that is not its own. Neither is settled by the fan's
+    ORDER, the way a dimension line is: the arrows stand at the ends of
+    the cutting plane line, between the view and the column, so every
+    leader from a knee at that HEIGHT crosses one whichever balloon sits
+    there, and the pictorial covers a band of the column outright. So the
+    fan passes those rows over and goes on down the column, which moves
+    every balloon below down by the same step and leaves the order
+    alone."""
+    for r in hide:
+        if inside_run(tip, knee, r) > ctx.mm(0.5):
+            return "hidden under the pictorial"
+    for a, b in step_off:
+        if _segs_cross(tip, knee, a, b, 0.0):
+            return "across the cutting plane's sight arrow"
+    return None
+
+
+def fan_rows(ctx, kx, start, pitch, tips, step_off=(), hide=(),
+             floor=None):
+    """The knee heights a fan will use: the pitch, with any row passed
+    over whose leader would be hidden under the pictorial or cross a
+    sight arrow (issue #30).
+
+    The rows are settled BEFORE the order is, because the order is
+    settled against them: a fan ordered for one set of rows and placed on
+    another crosses itself, which is why the sheet's other ink is settled
+    in the ORDER rather than stepped round. The pictorial and the sight
+    arrows are the exception — no order avoids them. The arrows stand at
+    the ends of the cutting plane line, between the view and the column,
+    so every leader from a row at that height crosses one whichever
+    balloon sits there; and the pictorial's stamp covers a band of the
+    corridor outright, hiding whatever crosses it.
+
+    When the column cannot hold all the rows the skipping needs, the
+    plain rows are kept and the sheet says what is hidden: a balloon the
+    drawing does not carry is worse than one that is hard to read."""
+    n = len(tips)
+    plain = [start - i * pitch for i in range(n)]
+    if not n or not (step_off or hide):
+        return plain
+    floor = ctx.draw_area[1] if floor is None else floor
+    rows, y = [], start
+    while len(rows) < n and y >= floor:
+        if not any(knee_spoilt(ctx, tp, (kx, y), step_off, hide)
+                   for tp in tips):
+            rows.append(y)
+        y -= pitch
+    return rows if len(rows) == n else plain
+
+
 def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
                  knee_x=None, side="right", dense=False, inks=(),
-                 other=(), in_the_way=None):
+                 other=(), in_the_way=None, step_off=(), hide=(),
+                 floor=None):
     """P.NO. leader callouts fanned into a band through the collision
     layout. Each arrow lands on an edge that belongs to that instance
     alone (balloon_landing).
@@ -4646,8 +4926,15 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
     # crossing after all
     fixed = {i: balloon_landing(ctx, ents[i][0], ents[i][1], ents[i][2],
                                 probe) for i in ys} if dense else {}
+    pitch = balloon_pitch(ctx, dense)
+    rows = fan_rows(ctx, kx, start, pitch,
+                    [fixed.get(i) or balloon_landing(ctx, ents[i][0],
+                                                     ents[i][1], ents[i][2],
+                                                     (kx, start))
+                     for i in range(len(ents))],
+                    step_off, hide, floor)
     if dense:
-        ys = _uncross(ys, fixed, kx, start, balloon_pitch(ctx, dense))
+        ys = _uncross(ys, fixed, kx, rows)
         if inks or other:
             # and settled against the sheet's other ink: a fan ordered
             # only against itself sends its balloons over the dimension
@@ -4655,8 +4942,7 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
             # it places them ends up crossing the leaders it was ordered
             # against. Both are decided here, before a knee is taken
             # (issue #25).
-            ys = _order_against_ink(ys, fixed, kx, start,
-                                    balloon_pitch(ctx, dense),
+            ys = _order_against_ink(ys, fixed, kx, rows,
                                     [ents[i][0] for i in range(len(ents))],
                                     list(inks) + list(other))
     next_y = hi_y if start_y is None else start_y
@@ -4664,6 +4950,10 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
         job, o, k, pid = ents[i]
         placed = None
         blocked = None
+        # the row this balloon was ORDERED for, never above where the one
+        # before it ended up (issue #30)
+        if rank < len(rows):
+            next_y = min(rows[rank], next_y)
         for dy in [4.0 * step for step in range(0, 25)]:
             ky = next_y - ctx.mm(dy)
             tip = fixed.get(i) or balloon_landing(ctx, job, o, k, (kx, ky))
@@ -4700,6 +4990,18 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
                                          mw.P_ANNO))
                 next_y = ky - 2 * brad - ctx.mm(2.5 if dense else 4.0)
                 placed = r
+                why = knee_spoilt(ctx, tip, (kx, ky), step_off, hide)
+                if why:
+                    # fan_rows could not skip this row — the column is not
+                    # long enough for the skipping it would take — so the
+                    # balloon is drawn where it is and the sheet says what
+                    # that costs and what the levers are (issue #30)
+                    layout.faults.append(
+                        f"balloon-{pid}: its leader is {why}, and this "
+                        "column is not long enough to pass that row over "
+                        "— give the sheet a bigger paper, drop the "
+                        'pictorial ("pictorial": false) or balloon this '
+                        "part in a detail view")
                 break
         if placed is None:
             layout.unresolved.append(
@@ -5207,7 +5509,7 @@ def view_zone(ctx, part, view, job, off):
             mx[1] + off[1] + dim_gutter(ctx, part, view, "top"))
 
 
-def pictorial_box(ctx, layout, png=None, zones=(), floor=None):
+def pictorial_box(ctx, layout, png=None, zones=(), floor=None):  # noqa: C901
     """Reserved box for the shaded pictorial: top-right of the drawing area
     by preference, sliding left along the top band (then the bottom band)
     and shrinking through PICTORIAL_SIZES until it is clear of every view's
@@ -5299,6 +5601,48 @@ def content_balance(layout):
     return min(x[0] for x in xs) - ax0, ax1 - max(x[1] for x in xs)
 
 
+def shift_segs(segs, dx):
+    """The same segments with the view group's horizontal shift applied:
+    seeded dimension ink belongs to the views, so it moves with them when
+    _compose_part_sheet re-centres the group (issue #29)."""
+    return [((a[0] + dx, a[1]), (b[0] + dx, b[1])) for a, b in segs]
+
+
+def crossed_ext_lines(layout):
+    """The extension lines a CALLOUT's leader is left crossing on the
+    finished sheet (issue #29).
+
+    Standard practice puts the dimension columns nearest the view and the
+    leader notes outboard of them, so the callouts are placed first and
+    the overall dimensions after — which means that when a callout chose
+    its knee, the extension lines of the length dimensions were not on
+    the sheet yet. The engine cannot avoid what is not there, so the
+    first pass is what tells it: these segments go back in as ink to
+    avoid, and the sheet is composed once more."""
+    out = []
+    for tip, knee, lab in layout.leaders:
+        if not str(lab).startswith(("callout-", "dim-")):
+            continue
+        out += [(a, b) for a, b, _w in layout.ext_lines
+                if _segs_cross(tip, knee, a, b, 0.0)]
+    return out
+
+
+def balance_regresses(trial, best, trial_gap, best_gap) -> bool:
+    """Is this better-balanced trial worse in a way that matters?
+
+    The balance pass only ever trims what the gutters left over, so a
+    sheet that has to carry one more fault, cross one more of a
+    dimension's extension lines, or drop an annotation altogether to
+    look balanced is not better (issues #18, #29). The extension lines
+    matter here because the trial SHIFTS the view group: the ink the
+    earlier pass found moves with it, and a trial may meet a line the
+    seed never named."""
+    return (bool(trial.unresolved) or trial_gap >= best_gap
+            or len(trial.faults) > len(best.faults)
+            or len(crossed_ext_lines(trial)) > len(crossed_ext_lines(best)))
+
+
 def build_part_sheet(m, part, proj):
     """Compose the sheet, then re-compose it with the view group shifted so
     the content sits centred: the dimension/callout gutters are NOT
@@ -5306,7 +5650,7 @@ def build_part_sheet(m, part, proj):
     centring the view boxes alone leaves the sheet visibly lopsided
     (round-5 QA D3). Iterates on the measured imbalance and keeps the best
     fully-resolved pass."""
-    reserve, co_order = None, None
+    reserve, co_order, ext_ahead = None, None, ()
 
     def score(p):
         u = p[2].unresolved
@@ -5347,6 +5691,17 @@ def build_part_sheet(m, part, proj):
             # fewer failures wins; on a tie the pass that placed more of the
             # GD&T does, so the message names what is really in the way
             best, reserve = retry, trial_reserve
+    seeds = crossed_ext_lines(best[2])
+    if seeds:
+        # now that the sheet exists, the engine knows where the overall
+        # dimensions' extension lines are: compose once more with those
+        # as ink to keep off, and keep the pass that crosses fewer of
+        # them without losing anything else (issue #29)
+        retry = _compose_part_sheet(m, part, proj, reserve=reserve,
+                                    co_order=co_order, ext_ahead=seeds)
+        if (score(retry), len(crossed_ext_lines(retry[2]))) \
+                < (score(best), len(seeds)):
+            best, ext_ahead = retry, seeds
     if best[2].unresolved:
         return best[0], best[1], best[2].report()
     ctx = best[0]
@@ -5363,13 +5718,12 @@ def build_part_sheet(m, part, proj):
         shift = max(-limit - dx, min(limit - dx, shift))
         if abs(shift) <= tol:
             break
-        trial = _compose_part_sheet(m, part, proj, dx=dx + shift,
-                                    reserve=reserve, co_order=co_order)
+        trial = _compose_part_sheet(
+            m, part, proj, dx=dx + shift, reserve=reserve,
+            co_order=co_order, ext_ahead=shift_segs(ext_ahead, dx + shift))
         tlo, thi = content_balance(trial[2])
-        if trial[2].unresolved or abs(thi - tlo) >= abs(hi - lo) \
-                or len(trial[2].faults) > len(best[2].faults):
-            # a better-balanced sheet that has to cross a leader to get
-            # there is not better (issue #18)
+        if balance_regresses(trial[2], best[2], abs(thi - tlo),
+                             abs(hi - lo)):
             break
         dx += shift
         best = trial
@@ -5377,7 +5731,7 @@ def build_part_sheet(m, part, proj):
 
 
 def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None,
-                        co_order=None):
+                        co_order=None, ext_ahead=()):
     """One placement pass; `dx` shifts the whole view group (and therefore
     everything anchored to it) horizontally, and `reserve` keeps a slot
     under named size callouts for the GD&T hung on them (gdt_reserve).
@@ -5458,11 +5812,16 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None,
     zones = [view_zone(ctx, part, v, j,
                        offs[v if v in offs else "section"])
              for v, j in view_jobs.items()]
-    box_recs, stamp_rect = pictorial_box(ctx, layout,
-                                         shaded_png(part["part_id"]),
-                                         zones=zones, floor=ay0 + rows_h)
-    ctx.entities += box_recs
-    ctx._stamp_rect = stamp_rect
+    if part.get("pictorial", True):
+        box_recs, stamp_rect = pictorial_box(ctx, layout,
+                                             shaded_png(part["part_id"]),
+                                             zones=zones,
+                                             floor=ay0 + rows_h)
+        ctx.entities += box_recs
+        ctx._stamp_rect = stamp_rect
+    else:
+        # a sheet with no room for one says so (issue #30)
+        ctx._stamp_rect = None
     _claim_view(layout, front, offs["front"], "front-view")
     if second_name:
         _claim_view(layout, view_jobs[second_name], offs["section"],
@@ -5598,7 +5957,7 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None,
         ctx, callouts, view_jobs, offs, by_view=co_order == "fan")
     co_recs, co_rects, suppress, co_lands, co_anchors = place_callouts(
         ctx, layout, cos, view_jobs, offs, reserve=reserve,
-        limits=co_limits, geom=geom)
+        limits=co_limits, geom=geom, ext_ahead=ext_ahead)
     ctx.entities += co_recs
     dim_rects: dict = {}
 
@@ -5852,13 +6211,18 @@ def continuation_sheet(m, asm, rows, analysis, sheet_of, details=(),
     items = [(djob, off, k, pid) for label, djob, off in placed_details
              for (k, pid) in (ball.get(f"detail:{label}") or [])]
     if items:
+        cbox = getattr(ctx, "_pictorial_box", None)
         recs, _ = balloons_fan(ctx, layout, None, None, items,
                                start_y=ctx.draw_area[3] - brad,
                                knee_x=knee_x, dense=True,
                                inks=view_ink([(f"detail {label}", dj, off)
                                               for label, dj, off
                                               in placed_details]),
-                               other=other_ink(layout))
+                               other=other_ink(layout),
+                               step_off=[(a, b) for a, b, w
+                                         in layout.keep_off
+                                         if "arrow" in w],
+                               hide=[cbox] if cbox else [])
         ctx.entities += recs
     if rows:
         ctx.entities += place_notes(
@@ -5977,10 +6341,17 @@ def build_assembly_sheet(m, proj):
     ax0, ay0, ax1, _ = ctx.draw_area
     ctx._table_band = table_band(ctx, rows_h)
     layout.claim(ctx._table_band, "parts-rows", "reserved")
-    box_recs, stamp_rect = pictorial_box(ctx, layout, shaded_png("assembly"),
-                                         zones=zones, floor=ay0 + rows_h)
-    ctx.entities += box_recs
-    ctx._stamp_rect = stamp_rect
+    if asm.get("pictorial", True):
+        box_recs, stamp_rect = pictorial_box(
+            ctx, layout, shaded_png("assembly"), zones=zones,
+            floor=ay0 + rows_h)
+        ctx.entities += box_recs
+        ctx._stamp_rect = stamp_rect
+    else:
+        # a crowded assembly sheet has no room for one: 26 balloons in two
+        # columns use the whole drawing area, and a leader under the
+        # stamped image is not printed at all (issue #30)
+        ctx._stamp_rect = None
     _claim_view(layout, front, offs["front"], "assembly-view")
     if section is not None:
         _claim_view(layout, section, offs["section"], "assembly-section")
@@ -6063,8 +6434,19 @@ def build_assembly_sheet(m, proj):
     if iso and section is None:
         ctx.entities += _view_label(ctx, layout, front, offs["front"],
                                     "ISOMETRIC VIEW")
-    elif asm.get("front_extent_dims", True) and not iso:
-        ctx.entities += dim_extents(ctx, layout, front, offs["front"])
+    elif not iso and extent_dims_spec(asm):
+        spec = extent_dims_spec(asm)
+        job = section if spec["view"] == "section" else front
+        if job is None:
+            layout.unresolved.append(
+                "extent_dims names the section view, which this sheet "
+                "does not draw — put them on the front view or enable "
+                "the section")
+        else:
+            ctx.entities += dim_extents(
+                ctx, layout, job, offs[spec["view"]],
+                which=spec["which"], width_side=spec["width_side"],
+                height_side=spec["height_side"])
     if section is not None:
         ctx.entities += _view_label(
             ctx, layout, section, offs["section"],
@@ -6102,6 +6484,13 @@ def build_assembly_sheet(m, proj):
         columns = {"right": band_x, "left": left_x}
         inks = view_ink([(v, j, offs[v]) for v, j in views.items()])
         other = other_ink(layout)
+        # the ink a knee ROW has to keep clear of, rather than be ordered
+        # against: the opaque pictorial stamp and the sight arrows
+        # (issue #30)
+        box = getattr(ctx, "_pictorial_box", None)
+        stamped = [box] if box else []
+        sight_arrows = [(a, b) for a, b, w in layout.keep_off
+                        if "arrow" in w]
 
         def run_fans(plan):
             """Place every balloon of this plan and say which of them had
@@ -6144,7 +6533,8 @@ def build_assembly_sheet(m, proj):
                 got, next_y[sd] = balloons_fan(
                     ctx, layout, None, None, items, start_y=next_y[sd],
                     knee_x=columns[sd], side=sd, dense=bool(sides),
-                    inks=inks, other=other, in_the_way=blocked)
+                    inks=inks, other=other, in_the_way=blocked,
+                    step_off=sight_arrows, hide=stamped, floor=floor)
                 recs += got
             return recs, blocked, sides, full
 

@@ -5,6 +5,151 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.15.0 — 2026-11-25
+
+Where a leader may not go, and a balloon that says which one it is:
+[#29](https://github.com/MusaCAD/fabrication_pipeline/issues/29),
+[#30](https://github.com/MusaCAD/fabrication_pipeline/issues/30).
+
+### Fixed
+
+- **A leader across an extension line was only a warning** (#29), even
+  where a clean route existed. A diameter callout anchored on the top
+  edge of a cylinder, its column on the right, crossed the extension
+  lines of the length dimensions above the view; anchored on the BOTTOM
+  edge — the same circle — its leader crossed nothing. The project found
+  that by hand, sheet after sheet, and nothing stopped the crossings it
+  missed. Three things changed:
+  - the engine walks its rungs a STRICT pass first, clear of the
+    extension lines and of every other arrowhead as well, so a callout
+    that was already clean takes the rung it always did;
+  - then it tries the same feature's OTHER POINTS — the far end of the
+    drawn edge the stated `at` lies on, its middle, and the silhouette
+    line 2r away, which is the same circle (`draw.feature_edge_anchors`,
+    taken off the projected ink). A callout with no `circle_r` keeps the
+    spot it was given: a note's arrow means the place it was put;
+  - and the crossing that is left is a FAULT, naming the dimension it
+    crosses, so a reviewer can waive one crossing instead of a kind.
+- **The engine could not avoid ink that was not there yet** (#29).
+  Standard practice puts the dimension columns nearest the view and the
+  leader notes outboard of them, so the callouts are placed BEFORE the
+  overall dimensions — and when a callout chose its knee, those
+  extension lines did not exist. The first pass is what tells it now:
+  `draw.crossed_ext_lines` reads the segments off the finished layout and
+  `build_part_sheet` composes once more with them as ink to keep off
+  (carried through the balance loop by `shift_segs`, since seeded ink
+  travels with the view group). On the real sheets that took four
+  callouts' crossings to nil — three onto another knee, one onto the
+  feature's other edge, every arrow still on the feature it names.
+- **Every finding said 'balloon'** (#30). A balloon's leader carries no
+  text of its own, so a sheet of them reported "the leader of 'balloon'
+  crosses a dimension line" over and over: a reviewer could not tell
+  which crossing they were accepting, and one `layout_waivers` string
+  covered the lot, now and on every later redraw. Each balloon is named
+  by its own NUMBER, read off the circle beside its knee
+  (`layout_check.balloon_numbers`), and every dimension is named by what
+  it measures.
+- **The check stopped at the first kind of ink it found** (#30). A
+  balloon that crossed a dimension line on its way INTO the pictorial was
+  reported for the dimension alone, and the pictorial — which hides it
+  altogether — went unsaid. Each kind is reported now.
+- **A datum box was read by distance alone** (#29). Text reads ALONG a
+  line: a box on the line below, just past that line's words, reads as
+  that line's however near its own callout is in plain distance. The
+  check asks that question first and only falls back to #27's distance
+  rule for a box that shares nobody's line.
+
+### Added
+
+- **`extent_dims` — which view carries the overall dimensions** (#30),
+  and on which side of it: `"front"` (the default, today's sheet
+  exactly), `"section"`, `"none"`, or
+  `{view, which: ["w"|"h"], width_side: top|bottom, height_side:
+  left|right}`. The balloon columns stand on both sides of the views and
+  a split fan reaches across the top of the drawing area, which is
+  exactly where the front view's own overall dims go: on the real
+  A3-landscape assembly sheet seven balloon leaders crossed a dimension
+  line and the only lever was `front_extent_dims: false` — dropping
+  dimensions a test facility asks for. The section carries no balloons
+  when every part is ballooned on the front view. Checked at the lock
+  (`manifest.assembly_sheet_problems`); `front_extent_dims: false` still
+  means none.
+- **A balloon fan passes over a row it cannot use** (#30). The cutting
+  plane's sight arrows stand at the ends of the view, BETWEEN it and the
+  column, so every leader from a row at their height crosses one
+  whichever balloon sits there; and the pictorial's stamp is opaque, so a
+  leader under it is not printed at all. Neither is settled by the fan's
+  order, and stepping ONE balloon out of its row makes the fan cross
+  itself — the order was settled against the rows. So the rows are
+  settled first (`draw.fan_rows` + `knee_spoilt`), and `_uncross` and
+  `_order_against_ink` are handed that row list. When the column is not
+  long enough for the skipping it would take, the plain rows are kept — a
+  balloon the drawing does not carry is worse than one that is hard to
+  read — and the sheet names the balloon and its levers.
+- **`"pictorial": false`** (#30): an assembly sheet or a part sheet may
+  say it has no room for a shaded pictorial. A crowded sheet — 26
+  balloons in two columns — has none, and a leader under the stamp is
+  worse than no stamp.
+- **Three faults the check could not see** (#29, #30):
+  - `leader-through-arrowhead`: a shaft through another leader's
+    arrowhead, where the crossing is AT that leader's end point and
+    `leader-crossing` deliberately does not look — or two arrows landing
+    in one place, where the sheet does not say which feature each names.
+    The triangle is MusaCAD's own (`append_arrowhead`'s proportions, read
+    at the arrow size the sheet's DIMSTYLE states);
+  - `leader-hidden`: a leader under the pictorial, with how much of it is
+    lost. **No waiver covers it** — `verify.waived` keeps a finding
+    marked `waivable: False` live whatever the manifest names, because a
+    leader that is not printed points at nothing;
+  - `annotation-crowded`: two annotations closer than the 0.8 mm the
+    engine itself keeps between its own claims — a diameter dim's label
+    dropped into a callout column lands between two callouts and touches
+    both. Anchored to a LEADER's label, so a notes block's own leading is
+    not read as crowding, and a frame's cells belong to their frame.
+- **A dimension's own ink on a label** (#29): `ink-on-text` now also
+  reports a dimension line or an extension line through a label — into
+  the BODY of the glyphs, so a line grazing the top of a letter box is
+  not reported.
+
+### Upgrade steps
+
+1. `git -C <your pipeline clone> fetch --tags && git checkout v0.15.0`
+2. `/draw` and look at the layout findings. Two things will have
+   changed:
+   - **a `leader-across-extension-line` is now a fault, not a warning.**
+     The engine avoids most of them by itself (on the sslxbt set every
+     one of them went away), but one it cannot avoid stops /export until
+     a `layout_waivers` entry names it. The finding names the dimension,
+     so the entry can be `"the leader of '%%c46.6 (SIZED TO ' crosses an
+     extension line (the 128 mm dimension)"` and nothing else.
+   - **a waiver that named a balloon crossing needs rewriting.** The
+     findings now carry the balloon's number, so an old string like
+     `"the leader of 'balloon' crosses a dimension line"` no longer
+     matches — which is the point: it waived every balloon on the sheet.
+3. On an assembly sheet whose balloon fan has to cross the overall
+   dimensions, say where they go instead, e.g.
+   `"extent_dims": {"view": "section", "which": ["w"], "width_side":
+   "top"}`. On the sslxbt A3-landscape sheet that took the layout from
+   nineteen findings to one.
+4. A sheet that reports `leader-hidden` has no waiver. The levers are a
+   bigger paper, `"pictorial": false` on that sheet, or the part
+   ballooned in a detail view; the fault names them.
+5. Nothing else moves: a sheet with no crossing to avoid redraws byte for
+   byte.
+
+### Compatibility
+
+Of the four real sets — eleven sslxbt part sheets, the TPE assembly and
+its parts, amogha RES-41-LH-01 and `samples/out/RES-SAMPLE-01` — twelve
+of the sixteen sheets redraw byte for byte, both assembly sheets among
+them. The four that change are exactly the four that had the fault: on
+each, the engine moved a callout's knee or its arrow to the same
+feature's other edge, and each lost a finding (one of them lost a leader
+that was riding 63 mm of the part's own outline). The new checks report
+nothing on the TPE, amogha or sample sheets as they were drawn before.
+The suite is 650 tests; every one of the 45 mutations of this round's
+behaviour is killed by it.
+
 ## v0.14.0 — 2026-11-25
 
 The empty half of a widened sheet:

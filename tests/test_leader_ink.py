@@ -207,9 +207,11 @@ class CheckFindsItTest(unittest.TestCase):
         self.assertTrue(hit)
         self.assertIn("arrow", hit[0]["what"])
 
-    def test_a_leader_across_the_pictorial_box(self):
+    def test_a_leader_that_only_clips_the_pictorial_box(self):
+        """Across the corner, so almost none of it is under the stamp:
+        the box is ink that belongs to something else."""
         box = (200.0, 200.0, 300.0, 300.0)
-        text = sheet(self.leader((180.0, 250.0), (320.0, 250.0)))
+        text = sheet(self.leader((199.8, 190.0), (210.0, 200.2)))
         hit = [f for f in lc.check_sheet(text, AREA, boxes=[box])
                if f["kind"] == "leader-across-dimension"]
         self.assertTrue(hit)
@@ -217,20 +219,45 @@ class CheckFindsItTest(unittest.TestCase):
         # and the box is only ink when the sheet really has one
         self.assertNotIn("leader-across-dimension", kinds(text))
 
-    def test_an_extension_line_is_a_warning_only(self):
+    def test_a_leader_under_the_pictorial_is_hidden_instead(self):
+        """Through the middle: the stamped image is opaque, so that much
+        of the leader is not printed at all (issue #30). It is the
+        stronger finding and no waiver covers it, so the crossing is not
+        reported as well."""
+        box = (200.0, 200.0, 300.0, 300.0)
+        text = sheet(self.leader((180.0, 250.0), (320.0, 250.0)))
+        found = lc.check_sheet(text, AREA, boxes=[box])
+        hit = [f for f in found if f["kind"] == "leader-hidden"]
+        self.assertTrue(hit, [f["kind"] for f in found])
+        self.assertIn("100.0 mm under the pictorial", hit[0]["what"])
+        self.assertEqual(hit[0].get("waivable"), False)
+        self.assertEqual(lc.unwaivable(found), hit)
+        self.assertNotIn("leader-across-dimension",
+                         [f["kind"] for f in found])
+
+    def test_an_extension_line_is_a_fault_that_names_the_dimension(self):
+        """It was a warning until v0.15.0 (issue #29): a crossing the
+        engine now tries the feature's other edge to avoid, so one that
+        is left is a fault — and it says WHICH dimension, so a waiver can
+        name one crossing instead of a whole kind."""
         # beside the left foot, between the def point and the dim line
         text = sheet(self.DIM, self.leader((4.0, 115.0), (30.0, 115.0)))
         found = lc.check_sheet(text, AREA)
-        self.assertIn("leader-across-extension-line",
-                      [f["kind"] for f in found])
-        self.assertFalse([f for f in lc.faults(found)
-                          if f["kind"] == "leader-across-extension-line"])
+        hit = [f for f in found
+               if f["kind"] == "leader-across-extension-line"]
+        self.assertTrue(hit, [f["kind"] for f in found])
+        self.assertIn("the 80 mm dimension", hit[0]["what"])
+        self.assertEqual(lc.faults(found), hit)
+        self.assertEqual(lc.warnings(found), [])
 
-    def test_the_dimension_line_wins_when_a_leader_crosses_both(self):
+    def test_both_are_reported_when_a_leader_crosses_both(self):
+        """Every kind of ink a leader crosses is named, not the first one
+        found: a balloon that crossed a dimension on its way into the
+        pictorial was reported for the dimension alone (issue #30)."""
         text = sheet(self.DIM, self.leader((4.0, 115.0), (50.0, 150.0)))
         got = [f["kind"] for f in lc.check_sheet(text, AREA)]
         self.assertIn("leader-across-dimension", got)
-        self.assertNotIn("leader-across-extension-line", got)
+        self.assertIn("leader-across-extension-line", got)
 
     def test_tolerances_are_printed_millimetres_at_any_scale(self):
         # the same sheet drawn 1:2 — the leader still crosses the dim
@@ -416,16 +443,16 @@ class FanAgainstInkTest(unittest.TestCase):
         jobs = {1: object(), 2: object()}
         dim = [("a dimension line", object(),
                 [((80.0, 220.0), (320.0, 220.0))])]
-        got = draw._order_against_ink([2, 1], tips, 300.0, 270.0, 10.0,
-                                      jobs, dim)
+        got = draw._order_against_ink([2, 1], tips, 300.0,
+                                      [270.0, 260.0], jobs, dim)
         self.assertEqual(got, [1, 2])
 
     def test_an_order_with_nothing_to_gain_is_left_alone(self):
         tips = {1: (100.0, 260.0), 2: (100.0, 250.0)}
         jobs = {1: object(), 2: object()}
         self.assertEqual(
-            draw._order_against_ink([1, 2], tips, 300.0, 270.0, 10.0,
-                                    jobs, []),
+            draw._order_against_ink([1, 2], tips, 300.0,
+                                    [270.0, 260.0], jobs, []),
             [1, 2])
 
     def test_a_crossing_leader_is_never_traded_for_a_clean_dimension(self):
@@ -434,8 +461,8 @@ class FanAgainstInkTest(unittest.TestCase):
         jobs = {1: object(), 2: object()}
         dim = [("a dimension line", object(),
                 [((80.0, 230.0), (320.0, 230.0))])]
-        got = draw._order_against_ink([2, 1], tips, 300.0, 270.0, 10.0,
-                                      jobs, dim)
+        got = draw._order_against_ink([2, 1], tips, 300.0,
+                                      [270.0, 260.0], jobs, dim)
         self.assertEqual(got, [2, 1])
 
     def test_two_clean_dimensions_are_given_up_before_one_crossing(self):
@@ -448,8 +475,8 @@ class FanAgainstInkTest(unittest.TestCase):
         ink = [("a dimension line", object(),
                 [((125.0, 199.5), (125.0, 200.5)),
                  ((125.0, 189.5), (125.0, 190.5))])]
-        got = draw._order_against_ink([1, 2], tips, 150.0, 200.0, 10.0,
-                                      jobs, ink)
+        got = draw._order_against_ink([1, 2], tips, 150.0,
+                                      [200.0, 190.0], jobs, ink)
         self.assertEqual(got, [2, 1])
 
     def test_other_ink_is_grouped_by_what_it_is(self):

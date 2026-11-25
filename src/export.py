@@ -83,15 +83,27 @@ def main() -> None:
     # only knows that the boxes it placed do not overlap; this is read off
     # the finished sheet, and every one of these faults reached a vendor
     # once because nothing was reading it.
-    bad = []
+    bad, hard = [], []
     for sheet in meta["sheets"]:
         for f in sheet.get("layout_faults") or []:
-            bad.append(f"{sheet['drg_no']}: {f['kind'].upper()}: "
-                       f"{f['what']}")
-    if bad:
-        die("the sheets do not read cleanly:\n  " + "\n  ".join(bad)
-            + "\n  fix the layout and re-run /draw, or waive it in the "
-              "manifest's \"layout_waivers\"")
+            line = (f"{sheet['drg_no']}: {f['kind'].upper()}: "
+                    f"{f['what']}")
+            # a leader under the pictorial is not printed at all, so no
+            # waiver covers it: say so rather than point at a lever that
+            # does not work (issue #30)
+            (hard if f.get("waivable") is False else bad).append(line)
+    if bad or hard:
+        why = []
+        if bad:
+            why.append("fix the layout and re-run /draw, or waive it in "
+                       "the manifest's \"layout_waivers\"")
+        if hard:
+            why.append("no waiver covers a leader that is not printed: "
+                       "give the sheet room, drop the pictorial "
+                       "(\"pictorial\": false) or balloon that part in a "
+                       "detail view, then re-run /draw")
+        die("the sheets do not read cleanly:\n  " + "\n  ".join(bad + hard)
+            + "\n  " + "\n  ".join(why))
     warn = [f"{s['drg_no']}: {f['what']}" for s in meta["sheets"]
             for f in s.get("layout_warnings") or []]
     for line in warn:

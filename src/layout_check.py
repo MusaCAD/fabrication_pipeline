@@ -30,21 +30,45 @@ the engine's opinion of the sheet does not come into it. What it reports:
                     the cutting plane, or the pictorial box — ink that
                     belongs to something else entirely;
   leader-across-extension-line
-                    a leader crosses an extension line (a WARNING: it is
-                    sometimes the only way across a crowded sheet);
+                    a leader crosses an extension line, named by the
+                    dimension that draws it — a FAULT (issue #29), not
+                    the warning it used to be: the engine now tries the
+                    feature's other edge before it accepts one;
+  leader-through-arrowhead
+                    a leader runs through ANOTHER leader's arrowhead,
+                    where the two arrows meet and neither reads as an
+                    arrow any more (issue #29). The crossing is AT the
+                    other leader's end point, which is exactly where
+                    leader-crossing does not look;
+  leader-hidden     a leader runs UNDER the pictorial, whose stamped
+                    image is opaque, so that part of it is not printed
+                    at all (issue #30). Never waivable: a leader the
+                    vendor cannot see points at nothing;
   callout-column-narrow
                     a callout column too narrow for its own words, so
                     the note comes out one word a line;
+  annotation-crowded
+                    two annotations closer than the clearance the engine
+                    itself keeps between them, so they read as one block
+                    — a diameter dim's label dropped into a callout
+                    column, say (issue #29);
   datum-beside-wrong-callout
                     a datum box nearer another callout's text than its
-                    own, so the sheet names the wrong feature as the
-                    datum;
+                    own, or on that other callout's own LINE, so the
+                    sheet names the wrong feature as the datum;
   text-off-sheet    text outside the drawing area altogether;
   leaders-parallel  two leaders closer than 2 mm and running together (a
                     WARNING: it reads badly but says nothing false).
 
 Everything but the warning fails /export, as an unwaived value difference
-does, and `layout_waivers` in the manifest waives one by name.
+does, and `layout_waivers` in the manifest waives one by name — except
+leader-hidden, which no waiver covers.
+
+A balloon is named by its own NUMBER (issue #30). A balloon's LEADER
+carries no text of its own, so every finding on a sheet of them read "the
+leader of 'balloon'": a reviewer could not tell which crossing they were
+looking at, and one waiver string covered the lot, now and on every later
+redraw.
 
 What it does NOT see: a DIM's label, which MusaCAD composes at plot time
 (the value check reads those through --dump-dims, where the position is
@@ -73,6 +97,10 @@ PARALLEL_MM = 4.0
 CROSS_EPS = 0.5         # how far from its own ends a crossing has to be
 INK_TOL = 0.15          # ink may touch text by this much (pen width)
 ANGLE_SIN = 0.026       # sin(1.5 deg): "running along", not crossing
+ARROW_MM = 2.5          # a leader's arrowhead, when the sheet states no
+ARROW_HALF = 0.18       # dimstyle; half-width as a fraction of its length
+CROWD_MM = 0.8          # two annotations closer than this read as one
+HIDDEN_MM = 0.5         # this much of a leader under the pictorial is gone
 
 
 # How many fields each record carries BEFORE its seven-int property tail
@@ -279,6 +307,113 @@ def seg_in_rect(a, b, rect, tol) -> bool:
     return False
 
 
+def dim_styles(musa_text: str):
+    """(arrow size per DIMSTYLE index, DIMLFAC per index), read off the
+    sheet's own style records.
+
+    parse() skips both — they draw nothing themselves — but a LEADER's
+    arrowhead is drawn at its style's arrow size, and what a DIM measures
+    is multiplied by its style's DIMLFAC before it is printed, which is
+    how a detail view's dimensions read true (musa_writer.dimunits)."""
+    arrows, lfacs = [], {}
+    for line in musa_text.splitlines():
+        tok = line.split()
+        if not tok:
+            continue
+        try:
+            if tok[0] == "DIMSTYLE" and len(tok) > 2:
+                arrows.append(float(tok[2]))
+            elif tok[0] == "DIMUNITS" and len(tok) > 5:
+                lfacs[int(tok[1])] = float(tok[5])
+        except ValueError:
+            continue
+    return arrows, lfacs
+
+
+def arrowhead(tip, knee, size):
+    """The filled triangle MusaCAD draws at a leader's tip: apex ON the
+    tip, base `size` along the leader towards the knee, half-width
+    0.18*size (scene_snapshot.cpp hands the leader's own dimstyle arrow
+    size to append_arrowhead; core/dimension.cpp's proportions, the ones
+    draw.dim_arrowhead models for a lettered dim)."""
+    ux, uy = knee[0] - tip[0], knee[1] - tip[1]
+    ln = math.hypot(ux, uy)
+    if ln < 1e-9 or size <= 0.0:
+        return []
+    ux, uy = ux / ln, uy / ln
+    px, py = -uy, ux
+    bx, by = tip[0] + ux * size, tip[1] + uy * size
+    return [(tip[0], tip[1]),
+            (bx + px * size * ARROW_HALF, by + py * size * ARROW_HALF),
+            (bx - px * size * ARROW_HALF, by - py * size * ARROW_HALF)]
+
+
+def seg_meets_poly(a, b, poly) -> bool:
+    """Does the segment touch a filled polygon — crossing an edge, or
+    lying inside it?"""
+    if not poly:
+        return False
+    edges = list(zip(poly, poly[1:] + poly[:1]))
+    if any(segs_cross(a, b, p, q, 0.0) for p, q in edges):
+        return True
+    return any(_point_in_poly(poly, p) for p in (a, b))
+
+
+def inside_run(a, b, rect) -> float:
+    """How much of the segment lies INSIDE the rect (Liang-Barsky): what
+    an opaque stamp over that rect would hide."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, a[0] - rect[0]), (dx, rect[2] - a[0]),
+                 (-dy, a[1] - rect[1]), (dy, rect[3] - a[1])):
+        if abs(p) < 1e-12:
+            if q < 0.0:
+                return 0.0
+            continue
+        r = q / p
+        if p < 0.0:
+            t0 = max(t0, r)
+        else:
+            t1 = min(t1, r)
+    if t1 <= t0:
+        return 0.0
+    return (t1 - t0) * math.hypot(dx, dy)
+
+
+def balloon_numbers(recs, texts):
+    """[(centre, radius, number)] for every balloon on the sheet.
+
+    draw.balloons_fan draws the circle beside the knee and the number in
+    it, so the number is a short text whose middle lies inside an
+    annotation circle (issue #30)."""
+    out = []
+    for r in recs:
+        if not r.anno or r.kind != "CIRCLE":
+            continue
+        c, rad = (r.nums[0], r.nums[1]), r.nums[2]
+        for tr, ink in texts:
+            body = unescape(tr.content).strip()
+            if not body or len(body) > 4:
+                continue
+            mid = ((ink[0] + ink[2]) / 2.0, (ink[1] + ink[3]) / 2.0)
+            if math.dist(mid, c) <= rad:
+                out.append((c, rad, body))
+                break
+    return out
+
+
+def leader_name(content: str, knee, balloons) -> str:
+    """What to call this leader in a finding: its own label, else the
+    NUMBER of the balloon its knee carries (issue #30)."""
+    lab = mw.esc(unescape(content))[:18]
+    if lab:
+        return lab
+    for c, rad, num in balloons:
+        if math.dist(knee, c) <= rad * 1.2:
+            return f"balloon {num}"
+    return ""
+
+
 # -------------------------------------------------------------- the check
 
 SYMBOL_KINDS = ("POLYLINE", "CIRCLE", "ARC", "HATCH")
@@ -335,9 +470,21 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
             continue
         texts.append((r, ink))
 
-    leaders = [(tuple(r.nums[:2]), tuple(r.nums[2:4]),
-                mw.esc(unescape(r.content))[:18] or "balloon")
-               for r in recs if r.kind == "LEADER"]
+    balloons = balloon_numbers(recs, texts)
+    arrow_mm, lfacs = dim_styles(musa_text)
+    boxed = [rect_of(segments(r)) for r in recs
+             if r.anno and r.kind == "POLYLINE" and int(r.nums[1]) == 4]
+
+    leaders = []
+    for r in recs:
+        if r.kind != "LEADER":
+            continue
+        tip, knee = tuple(r.nums[:2]), tuple(r.nums[2:4])
+        style = int(r.nums[5]) if len(r.nums) > 5 else 0
+        size = arrow_mm[style] if 0 <= style < len(arrow_mm) else u(ARROW_MM)
+        leaders.append((tip, knee, leader_name(r.content, knee, balloons),
+                        arrowhead(tip, knee, size)))
+    dims, exts = dim_ink(recs, u(0.72), u(1.5), lfacs)
 
     geom = []
     for r in recs:
@@ -351,28 +498,34 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
 
     out = []
 
-    def add(kind, what, severity="fail"):
-        out.append({"kind": kind, "what": (where + ": " if where else "")
-                    + what, "severity": severity})
+    def add(kind, what, severity="fail", waivable=True):
+        f = {"kind": kind, "what": (where + ": " if where else "") + what,
+             "severity": severity}
+        if not waivable:
+            f["waivable"] = False
+        out.append(f)
+
+    def who(lab, tip) -> str:
+        """This leader, by name. A balloon carries its own number
+        (issue #30); a leader with no label at all is named by where its
+        arrow lands, which is all there is left to tell it by."""
+        return repr(lab) if lab else (
+            f"the leader landing at {tip[0] * unit_mm:.0f}, "
+            f"{tip[1] * unit_mm:.0f} mm")
 
     # 1. leaders crossing each other
     # by the PAIR, not by their labels: every balloon's leader carries
     # the same empty label, and keying on that reported one crossing for
     # a whole fan of them (issue #25)
-    for i, (t1, k1, l1) in enumerate(leaders):
-        for t2, k2, l2 in leaders[i + 1:]:
+    for i, (t1, k1, l1, _h1) in enumerate(leaders):
+        for t2, k2, l2, _h2 in leaders[i + 1:]:
             if segs_cross(t1, k1, t2, k2, u(CROSS_EPS)):
-                where = (f" (the one landing at {t1[0] * unit_mm:.0f}, "
-                         f"{t1[1] * unit_mm:.0f} mm)") if not l1 else ""
                 add("leader-crossing",
-                    f"the leaders of {l1 or 'a balloon'}{where} and "
-                    f"{l2 or 'a balloon'!r} cross each other"
-                    if not l1 else
-                    f"the leaders of {l1!r} and {l2 or 'a balloon'!r} "
+                    f"the leaders of {who(l1, t1)} and {who(l2, t2)} "
                     "cross each other")
 
     # 2. a leader running along drawn geometry
-    for t, k, lab in leaders:
+    for t, k, lab, _h in leaders:
         worst, which = 0.0, None
         lr = (min(t[0], k[0]) - u(ALONG_GAP), min(t[1], k[1]) - u(ALONG_GAP),
               max(t[0], k[0]) + u(ALONG_GAP), max(t[1], k[1]) + u(ALONG_GAP))
@@ -385,7 +538,7 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                 worst, which = run, (a, b)
         if worst > u(ALONG_MM):
             add("leader-on-outline",
-                f"the leader of {lab!r} runs along the outline for "
+                f"the leader of {who(lab, t)} runs along the outline for "
                 f"{worst * unit_mm:.1f} mm — the arrow cannot be told from "
                 "the part it points at")
 
@@ -412,47 +565,78 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                     f"{unescape(tr.content).strip()[:28]!r}")
                 break
 
+    # 3b. a DIMENSION's own ink over a label (issue #29): the shared
+    #     extension line of two location dims running through a callout's
+    #     words. A DIM's label is composed at plot time and is not on the
+    #     sheet, so the only ink here is the lines dimension.cpp draws
+    #     from the record — which is exactly what the reader sees.
+    seen: set = set()
+    for what, segs in (("a dimension line", dims),
+                       ("an extension line", exts)):
+        for a, b, dname in segs:
+            for tr, ink in texts:
+                # into the BODY of the label, not across the corner of
+                # its box: a line a quarter of a letter's height from the
+                # top of an "A" grazes the box and covers no glyph
+                if not seg_in_rect(a, b, ink,
+                                   max(u(INK_TOL), 0.25 * _text_h(tr))):
+                    continue
+                body = unescape(tr.content).strip()[:28]
+                if (what, dname, body) in seen:
+                    continue
+                seen.add((what, dname, body))
+                add("ink-on-text",
+                    f"{what} ({dname}) runs through the text {body!r}")
+
     # 4. a leader that reaches its feature through ANOTHER view
     views = view_clusters(geom, u(VIEW_GAP), u(VIEW_MIN))
-    for t, k, lab in leaders:
+    for t, k, lab, _h in leaders:
         own = _own_view(views, t, u(2.0))
         for i, (bb, segs) in enumerate(views):
             if i == own:
                 continue
             if any(segs_cross(t, k, a, b, 0.0) for a, b in segs):
                 add("leader-across-view",
-                    f"the leader of {lab!r} reaches its feature through "
-                    f"the view at ({bb[0] * unit_mm:.0f}, "
+                    f"the leader of {who(lab, t)} reaches its feature "
+                    f"through the view at ({bb[0] * unit_mm:.0f}, "
                     f"{bb[1] * unit_mm:.0f}) mm, which says nothing about "
                     "the part it points at — balloon or call it out in "
                     "the view that does")
                 break
 
-    # 5. a leader across ink that belongs to something else: a
-    #    dimension line, the cutting plane's arrows, the pictorial box
-    #    (a warning for an extension line, which a crowded sheet
-    #    sometimes leaves no way round)
-    dims, exts = dim_ink(recs, u(0.72), u(1.5))
+    # 5. a leader across ink that belongs to something else: a dimension
+    #    line, an extension line, the cutting plane's arrows, the
+    #    pictorial box. EVERY kind it crosses is reported, not the first
+    #    one found: a balloon that crossed a dimension line on its way
+    #    into the pictorial was reported for the dimension alone, and the
+    #    pictorial — which hides it altogether — went unsaid (issue #30).
     arrows = cut_arrows(recs)
     box_edges = []
     for b in boxes:
         pts = [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
-        box_edges += list(zip(pts, pts[1:] + pts[:1]))
-    for t, k, lab in leaders:
-        for what, segs, kind in (
-                ("a dimension line", dims, "leader-across-dimension"),
-                ("the cutting plane's arrow", arrows,
-                 "leader-across-dimension"),
-                ("the pictorial box", box_edges,
-                 "leader-across-dimension")):
-            if any(segs_cross(t, k, a, b, u(0.2)) for a, b in segs):
-                add(kind, f"the leader of {lab!r} crosses {what}")
-                break
-        else:
-            if any(segs_cross(t, k, a, b, u(0.2)) for a, b in exts):
-                add("leader-across-extension-line",
-                    f"the leader of {lab!r} crosses an extension line",
-                    severity="warn")
+        box_edges += [(p, q, "") for p, q in zip(pts, pts[1:] + pts[:1])]
+    for t, k, lab, _h in leaders:
+        # the pictorial's image is OPAQUE, so a leader that runs under it
+        # is not printed there at all: no waiver makes that readable
+        hidden = max((inside_run(t, k, b) for b in boxes), default=0.0)
+        if hidden > u(HIDDEN_MM):
+            add("leader-hidden",
+                f"the leader of {who(lab, t)} runs {hidden * unit_mm:.1f} "
+                "mm under the pictorial, which is stamped over it: that "
+                "much of the leader is not printed at all", waivable=False)
+        for kind, what, segs in (
+                ("leader-across-dimension", "a dimension line", dims),
+                ("leader-across-dimension", "the cutting plane's arrow",
+                 [(a, b, "") for a, b in arrows]),
+                ("leader-across-dimension", "the pictorial box",
+                 [] if hidden > u(HIDDEN_MM) else box_edges),
+                ("leader-across-extension-line", "an extension line",
+                 exts)):
+            for a, b, dname in segs:
+                if segs_cross(t, k, a, b, u(0.2)):
+                    add(kind, f"the leader of {who(lab, t)} crosses {what}"
+                        + (f" ({dname})" if dname else ""))
+                    break
 
     # 6. a callout column too narrow for its own words
     for first, lines in narrow_columns(recs, texts, u(1.0)):
@@ -467,10 +651,32 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
     for box, letter, own in datum_boxes(recs, texts):
         if own is None:
             continue                      # not hung on a callout's leader
+        # text READS ALONG A LINE, so the first question is which label
+        # this box sits after: a box on the line below, just past that
+        # line's words, reads as that line's however near its own callout
+        # may be in plain distance (issue #29).
+        h = box[3] - box[1]
+        mates = [(box[0] - ink[2], unescape(r.content).strip(), ink)
+                 for r, ink in texts
+                 if len(unescape(r.content).strip()) > 1
+                 and _line_share(box, ink) > h * 0.25
+                 and ink[2] <= box[0] + u(0.05)
+                 and box[0] - ink[2] <= 4.0 * h]
+        if mates:
+            gap, body, ink = min(mates)
+            if not _same_rect(ink, own):
+                add("datum-beside-wrong-callout",
+                    f"datum {letter} sits on the same LINE as "
+                    f"{body[:28]!r}, {gap * unit_mm:.1f} mm after its "
+                    f"words, so the sheet reads \"{body[:28]} "
+                    f"{letter}\" — its own callout is on another line")
+            continue
+        # sharing no label's line, it reads as whichever is nearest
+        # (issue #27)
         mine = rect_gap(box, own)
         for r, ink in texts:
             body = unescape(r.content).strip()
-            if len(body) <= 1 or ink is own:
+            if len(body) <= 1 or _same_rect(ink, own):
                 continue
             if rect_gap(box, ink) < mine - u(0.05):
                 add("datum-beside-wrong-callout",
@@ -497,26 +703,117 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
 
     # 9. leaders running parallel and close (a warning: nothing is wrong,
     #    it only reads as one line with two arrows)
-    for i, (t1, k1, l1) in enumerate(leaders):
-        for t2, k2, l2 in leaders[i + 1:]:
+    for i, (t1, k1, l1, _h1) in enumerate(leaders):
+        for t2, k2, l2, _h2 in leaders[i + 1:]:
             run = collinear_run(t1, k1, t2, k2, u(PARALLEL_GAP))
             if run > u(PARALLEL_MM):
                 add("leaders-parallel",
-                    f"the leaders of {l1!r} and {l2!r} run together for "
-                    f"{run * unit_mm:.1f} mm closer than {PARALLEL_GAP} mm",
-                    severity="warn")
+                    f"the leaders of {who(l1, t1)} and {who(l2, t2)} run "
+                    f"together for {run * unit_mm:.1f} mm closer than "
+                    f"{PARALLEL_GAP} mm", severity="warn")
+
+    # 10. a leader through ANOTHER leader's ARROWHEAD (issue #29). The
+    #     meeting point is the other leader's own end, which is where
+    #     check 1 deliberately does not look: a leader legitimately
+    #     touches the outline it points at and the knees of its
+    #     neighbours. Two arrowheads in one place say nothing at all.
+    for i, (t1, k1, l1, h1) in enumerate(leaders):
+        for j, (t2, _k2, l2, head) in enumerate(leaders):
+            if i == j or not head or not seg_meets_poly(t1, k1, head):
+                continue
+            near = math.dist(t1, t2) * unit_mm
+            if near <= ARROW_MM:
+                # the two arrows LAND in the same place. Each points at a
+                # feature of its own and the sheet cannot say which is
+                # which, so it is reported once for the pair.
+                if i < j:
+                    add("leader-through-arrowhead",
+                        f"the arrows of {who(l1, t1)} and {who(l2, t2)} "
+                        f"land {near:.2f} mm apart, so the two read as one "
+                        "arrow and the sheet does not say which feature "
+                        "each one names — draw that region as a detail, or "
+                        "point one of them somewhere clear")
+                continue
+            add("leader-through-arrowhead",
+                f"the leader of {who(l1, t1)} runs through the arrowhead "
+                f"of {who(l2, t2)}, where the two arrows meet and neither "
+                "reads as an arrow any more")
+
+    # 11. two annotations too close to read apart (issue #29): a
+    #     diameter dim's label that fell into a callout column lands
+    #     between two callouts and touches both. The threshold is the
+    #     clearance the ENGINE keeps between its own annotation claims,
+    #     so anything closer means some ink was understated — which is
+    #     the whole bug. A text inside an annotation BOX belongs to that
+    #     box (a frame's cells, a datum letter), and the frame's own ink
+    #     over a label is check 3's business.
+    for r in recs:
+        if r.kind != "LEADER":
+            continue
+        label = unescape(r.content).strip()
+        ink = text_ink(r)
+        if not label or ink is None or not in_area(ink) or furniture(ink):
+            continue
+        for tr, other in texts:
+            if tr is r or _same_rect(other, ink):
+                continue
+            body = unescape(tr.content).strip()
+            if not body or _in_a_box(other, boxed, u(INK_TOL)):
+                continue
+            gap = rect_gap(ink, other)
+            if gap >= u(CROWD_MM):
+                continue
+            # a line of this callout's OWN stack is never this close: the
+            # stack's leading is 0.8 of the text height, 2.5 printed mm
+            # (place_callouts' 1.8h pitch), so the gap tells them apart
+            add("annotation-crowded",
+                f"the label {label[:24]!r} and {body[:24]!r} are "
+                f"{gap * unit_mm:.2f} mm apart — closer than the "
+                f"{CROWD_MM} mm the engine keeps between two annotations, "
+                "so the two read as one block")
     return out
 
 
-def dim_ink(recs, ext_offset=0.72, ext_extension=1.5):
+def _text_h(r: Rec) -> float:
+    """A text record's own glyph height (MTEXT, TEXT and LEADER each
+    carry it in a field of their own)."""
+    idx = {"MTEXT": 3, "TEXT": 2, "LEADER": 4}.get(r.kind)
+    return r.nums[idx] if idx is not None and len(r.nums) > idx else 0.0
+
+
+def _in_a_box(ink, boxed, tol) -> bool:
+    """Does this text sit inside an annotation BOX — a frame's cell, a
+    datum letter? Such a text belongs to the box, which is drawn with it;
+    a box over somebody else's label is check 3's business."""
+    return any(bx is not None and bx[0] - tol <= ink[0]
+               and ink[2] <= bx[2] + tol and bx[1] - tol <= ink[1]
+               and ink[3] <= bx[3] + tol for bx in boxed)
+
+
+def _same_rect(a, b) -> bool:
+    return a is b or (a is not None and b is not None
+                      and all(abs(a[i] - b[i]) < 1e-9 for i in range(4)))
+
+
+def _line_share(a, b) -> float:
+    """How much of two rects' HEIGHT overlaps: how much they share a line
+    of text."""
+    return max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def dim_ink(recs, ext_offset=0.72, ext_extension=1.5, lfacs=None):
     """The dimension lines and extension lines a sheet's DIM records will
     draw, as MusaCAD draws them (core/dimension.cpp): the feet are the
     def points projected onto the dim line, and the extension lines run
     from just off each def point to just past its foot.
 
-    Returns (dimension lines, extension lines). A leader may not cross
-    the first; crossing the second is a warning, since a crowded sheet
-    sometimes leaves nothing else (issue #25)."""
+    Returns (dimension lines, extension lines), each segment as
+    (a, b, name) — the name being the dimension it belongs to, so a
+    finding can say WHICH one a leader crosses and a waiver can name that
+    one crossing (issue #29). A linear dim is named by what it measures:
+    the distance between its def points times its style's DIMLFAC, which
+    is the number the reader sees (`lfacs` maps style index -> DIMLFAC,
+    from dim_styles)."""
     dims, exts = [], []
     for r in recs:
         if r.kind != "DIM" or len(r.nums) < 7:
@@ -525,13 +822,16 @@ def dim_ink(recs, ext_offset=0.72, ext_extension=1.5):
         a = (r.nums[1], r.nums[2])
         b = (r.nums[3], r.nums[4])
         lp = (r.nums[5], r.nums[6])
+        style = int(r.nums[7]) if len(r.nums) > 7 else 0
+        lfac = (lfacs or {}).get(style, 1.0)
+        name = _dim_name(dtype, a, b, lfac)
         if dtype in (2, 3):
             # radius / diameter: the dim line is the leader MusaCAD draws
             # from the centre, and it has no extension lines
-            dims.append((a, b))
+            dims.append((a, b, name))
             continue
         if dtype != 0:
-            dims.append((a, b))
+            dims.append((a, b, name))
             continue
         d = (1.0, 0.0) if abs(a[1] - b[1]) <= abs(a[0] - b[0]) else (0.0, 1.0)
 
@@ -540,7 +840,7 @@ def dim_ink(recs, ext_offset=0.72, ext_extension=1.5):
             return (lp[0] + d[0] * t, lp[1] + d[1] * t)
 
         fa, fb = foot(a), foot(b)
-        dims.append((fa, fb))
+        dims.append((fa, fb, name))
         for p, f in ((a, fa), (b, fb)):
             vx, vy = f[0] - p[0], f[1] - p[1]
             ln = math.hypot(vx, vy)
@@ -548,8 +848,30 @@ def dim_ink(recs, ext_offset=0.72, ext_extension=1.5):
                 continue
             nx, ny = vx / ln, vy / ln
             exts.append(((p[0] + nx * ext_offset, p[1] + ny * ext_offset),
-                         (f[0] + nx * ext_extension, f[1] + ny * ext_extension)))
+                         (f[0] + nx * ext_extension,
+                          f[1] + ny * ext_extension), name))
     return dims, exts
+
+
+def _dim_name(dtype: int, a, b, lfac: float) -> str:
+    """What to call a dimension in a finding. A linear one is named by
+    what it measures — the distance between its own def points, which is
+    the one thing a DIM cannot misstate — and an angular or round one by
+    its kind, since its value is not a length."""
+    if dtype == 3:
+        return "a diameter dimension"
+    if dtype == 2:
+        return "a radius dimension"
+    if dtype == 4:
+        return "an angular dimension"
+    if dtype == 0 and abs(a[1] - b[1]) <= abs(a[0] - b[0]):
+        val = abs(b[0] - a[0]) * lfac
+    elif dtype == 0:
+        val = abs(b[1] - a[1]) * lfac
+    else:
+        val = math.dist(a, b) * lfac
+    shown = str(round(val)) if abs(val - round(val)) < 0.005 else f"{val:.2f}"
+    return f"the {shown} mm dimension"
 
 
 def cut_arrows(recs):
@@ -811,6 +1133,13 @@ def _point_in_poly(poly, p) -> bool:
 
 def faults(findings) -> list[dict]:
     return [f for f in findings if f.get("severity") != "warn"]
+
+
+def unwaivable(findings) -> list[dict]:
+    """The findings no manifest entry may waive (issue #30): a leader
+    hidden under the pictorial is not printed, and a waiver cannot make
+    the vendor see it."""
+    return [f for f in findings if f.get("waivable") is False]
 
 
 def warnings(findings) -> list[dict]:

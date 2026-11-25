@@ -88,7 +88,9 @@ upstream (/draw, /finalise).
 16. **Shaded pictorial**: every sheet has the shaded render inside its
     top-right corner box — image present (raster visible in the PDF),
     fully inside the box frame, white background, nothing intruding into
-    other content.
+    other content. A sheet whose manifest says `"pictorial": false` has
+    no box and no render: that is a crowded assembly sheet saying it has
+    no room for one (issue #30), not a missing stamp.
 
 17. **Leaders**: no leader crosses another, none runs along the outline
     it points at, and none reaches its feature through another view —
@@ -96,6 +98,12 @@ upstream (/draw, /finalise).
     three, so look for what a raster shows and it cannot: a leader
     arrowhead lost in the part's own line, a leader through a
     dimension's own text, an arrow that lands on the wrong edge.
+    The raster is also the only place to see a leader that DISAPPEARS:
+    the pictorial's image is stamped over the sheet and is opaque, so a
+    leader crossing that box is simply not there in print (issue #30).
+    The check calls it `leader-hidden` and no waiver covers it — if the
+    PDF shows a balloon whose leader stops at the pictorial's edge,
+    that is the fault, not a plotting artefact.
 
 ## Verdict format
 Present the FULL checklist (items 1-8) with per-sheet PASS/FAIL and

@@ -297,7 +297,8 @@ class UncrossTest(unittest.TestCase):
         pitch = self.REAL_PITCH
         tips = {i: (float(x), float(y))
                 for i, (x, y) in enumerate(self.REAL_TIPS)}
-        order = draw._uncross(list(tips), tips, kx, start, pitch)
+        rows = [start - i * pitch for i in range(len(tips))]
+        order = draw._uncross(list(tips), tips, kx, rows)
         self.assertEqual(sorted(order), sorted(tips), "a balloon was lost")
         for i in range(len(order) - 1):
             for j in range(i + 1, len(order)):
@@ -311,8 +312,9 @@ class UncrossTest(unittest.TestCase):
     def test_an_order_that_does_not_cross_is_left_alone(self):
         kx, start, pitch = 100.0, 100.0, 10.0
         tips = {"a": (20.0, 90.0), "b": (20.0, 60.0), "c": (20.0, 30.0)}
-        self.assertEqual(draw._uncross(["a", "b", "c"], tips, kx, start,
-                                       pitch), ["a", "b", "c"])
+        rows = [start - i * pitch for i in range(3)]
+        self.assertEqual(draw._uncross(["a", "b", "c"], tips, kx, rows),
+                         ["a", "b", "c"])
 
 
 if __name__ == "__main__":

@@ -408,6 +408,28 @@ def assembly_sheet_problems(m: dict) -> list[str]:
         if view not in set(have) | set(labels):
             out.append(f"{who}: balloon_in[{pid}] = {view!r} is not a view "
                        f"on this sheet ({', '.join(sorted(set(have) | set(labels)))})")
+    ed = asm.get("extent_dims")
+    if ed is not None and not isinstance(ed, (str, dict)):
+        out.append(f"{who}: extent_dims {ed!r} (want front, section, none "
+                   "or an object)")
+    elif ed is not None:
+        spec = {"view": ed} if isinstance(ed, str) else dict(ed)
+        view = spec.get("view") or "front"
+        if view not in ("front", "section", "none"):
+            out.append(f"{who}: extent_dims.view {view!r} (want front, "
+                       "section or none)")
+        elif view == "section" and "section" not in have:
+            out.append(f"{who}: extent_dims names the section view, which "
+                       "this sheet does not draw")
+        bad = [w for w in (spec.get("which") or ()) if w not in ("w", "h")]
+        if bad:
+            out.append(f"{who}: extent_dims.which {bad} (want w and/or h)")
+        if spec.get("width_side") not in (None, "top", "bottom"):
+            out.append(f"{who}: extent_dims.width_side "
+                       f"{spec['width_side']!r} (want top or bottom)")
+        if spec.get("height_side") not in (None, "left", "right"):
+            out.append(f"{who}: extent_dims.height_side "
+                       f"{spec['height_side']!r} (want left or right)")
     table = asm.get("parts_table") or {}
     if table.get("group_by", "none") not in ("none", "sub_assembly"):
         out.append(f"{who}: parts_table.group_by "

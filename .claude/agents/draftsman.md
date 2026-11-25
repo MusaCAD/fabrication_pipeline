@@ -61,4 +61,12 @@ render `pdftoppm -png -r 50` and LOOK at the image before declaring done.
 - Two views per part. A feature invisible in both views is reported to the
   main thread for the user to decide — never add a third view yourself.
 - Assembly sheet: front view, LEADER balloons carrying P.NO., parts table
-  rows above the title block via musa_writer.parts_row_records.
+  rows above the title block via musa_writer.parts_row_records. The
+  overall dimensions go on the view the manifest's `extent_dims` names
+  and the side of it it names: on a sheet whose balloon fan uses both
+  sides of the views, the front view's own gutters are the fan's
+  (issue #30).
+- A leader may not cross an extension line, run through another leader's
+  arrowhead, or pass under the pictorial box — the stamped image is
+  opaque, so that much of it is not printed at all. The first two are
+  waivable faults; the third is not (issue #29, #30).
