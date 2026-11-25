@@ -5,6 +5,92 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.14.0 — 2026-11-25
+
+The empty half of a widened sheet:
+[#28](https://github.com/MusaCAD/fabrication_pipeline/issues/28).
+
+### Fixed
+
+- **A widened title block was stretched, not moved** (#28). The revision
+  table, the parts row and the title block run from border to border on
+  the A4 sheet, and `tools/widen_template.py` moved only the ends at or
+  right of `LEFT_EDGE_X`. So each of those rules was stretched by the
+  whole widening — 1228 template units, 221 printed mm on A3 landscape —
+  and every A3 sheet went out with a row of empty cells across the top
+  and an empty box the size of a postcard beside the title block. They
+  hold nothing, they read as part of the title block, and they took a
+  band 221 mm wide at the top and the bottom of the sheet that the
+  drawing could have used. Both ends of those rules travel now and each
+  band is CLOSED on its new left edge (`furniture_band` /
+  `closing_rules`): the border runs through both bands and a corner mark
+  lies outside it, so neither is furniture and neither moves, and a band
+  that already carries its own left-hand side — the revision table does
+  — is not given a second one.
+
+### Added
+
+- **The room the furniture leaves is drawing area** (#28).
+  `common.sheet_geom` now returns `sheet_area` — the whole sheet inside
+  the border — and `blocks`, the title block and the revision table
+  reserved in it, beside the `drawing_area` it always returned, which
+  stays the band between them. On A3 landscape that is a strip 221 mm
+  wide over the full height of the sheet, 25% more drawing area, and it
+  is beside the title block where a notes block or a table belongs.
+  - The blocks are MEASURED off the template
+    (`musa_writer.template_furniture`), never assumed: a variant widened
+    before this fix has its rules stretched to the border, so its block
+    spans the sheet, is absorbed into the area's own edge, and the sheet
+    is the plain rect it always was. An A4 sheet likewise.
+  - `draw.Layout` takes `sheet_area` as its area, claims each block and
+    refuses any rect that overlaps one. So an annotation may use the
+    freed band, and nothing may land on the title block.
+  - `ctx.areas` is the band first and the whole sheet second, and that is
+    the order every free-space search follows (`_free_spot`,
+    `_lowest_free`, `place_notes`, `pictorial_box`). A sheet that fits as
+    it always did is drawn as it always was; the new room is for the one
+    that does not.
+  - The views, the parts rows and the balloon columns stay in the band
+    between the furniture. A view group centred in an L-shaped area has
+    no meaning, and the strip adds height beside the title block, not
+    width beside the drawing.
+- **The layout check knows the template's own furniture** (#28): the
+  title block's and the revision table's rules and text are furniture
+  rather than the drawing's ink, now that they are inside the area, and
+  an annotation that lands on them is reported as `text-off-sheet` —
+  which the old area test used to catch for free.
+- **A logo box belongs in the title block**:
+  `template_elements_off_sheet` measures it against that block, because
+  one in the drawing area would print under the views.
+
+### Upgrade steps
+
+1. `git -C <your pipeline clone> fetch --tags && git checkout v0.14.0`
+2. **Nothing changes until you regenerate your paper templates.** A
+   template widened by an older version keeps the sheet it had, and every
+   sheet of every set redraws byte for byte.
+3. To take the fix, regenerate each variant from your A4 title block and
+   redraw:
+   `python3 tools/widen_template.py <project>/fabrication/template/template_<co>.musa <same>_a3l.musa --paper A3 --landscape`
+   then `/draw` and `/export`. The title block and the revision table
+   come out at A4 width, closed on the left, and the drawing itself does
+   not move — on the sslxbt set the three A3-landscape part sheets change
+   in nothing but the template's own rules.
+4. A sheet that was failing for want of room — a notes block or a bend
+   table that would not fit — may now place it beside the title block.
+   That is the new band being used; the layout check reads it as drawing
+   area like any other.
+
+### Compatibility
+
+Every sheet of the four real sets — eleven sslxbt part sheets, the TPE
+assembly and its parts, amogha RES-41-LH-01 and
+`samples/out/RES-SAMPLE-01` — redraws byte for byte, the three A3
+sheets among them included, because their template was widened by the
+old script. Regenerated, those three change in their title block's own
+rules and in nothing else: every dimension, note, leader and view line
+is identical. The suite is 562 tests.
+
 ## v0.13.0 — 2026-11-25
 
 Four faults a finished sheet carried and nothing asked about:

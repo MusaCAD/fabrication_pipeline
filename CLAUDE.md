@@ -175,6 +175,34 @@ co-author line to git commits.
   report at 300 dpi; SheetContext.fx moves a title-block x with the right
   edge; sheets.json records each sheet's paper, export.py plots and
   re-checks it, and judge.area_mm judges the fit on it.
+  THE FURNITURE TRAVELS WHOLE (issue #28): the revision table, the parts
+  row and the title block run border to border on the A4 sheet, so moving
+  only their right-hand ends STRETCHED each of them by the whole widening
+  — 221 mm on A3 landscape — and the sheet went out with a row of empty
+  cells across the top and an empty box beside the title block, holding
+  nothing and reading as part of the title block. Both ends move now and
+  each band is CLOSED on its new left edge (widen_template.furniture_band
+  / closing_rules; the border runs through both bands and a corner mark
+  lies outside it, so neither is furniture and neither travels). The room
+  they leave is DRAWING AREA: common.sheet_geom returns `sheet_area` (the
+  whole sheet inside the border) and `blocks` (the furniture reserved in
+  it) beside the unchanged `drawing_area`, which stays the band between
+  them and is still where the views, the parts rows and the balloon
+  columns go. The blocks are MEASURED off the file
+  (musa_writer.template_furniture), so a variant widened before this —
+  rules stretched to the border — gives a block that spans the sheet, is
+  ABSORBED into the area's edge, and redraws byte for byte; an A4 sheet
+  likewise. draw.Layout takes `sheet_area` as its area, claims each block
+  and refuses a rect that overlaps one, so an annotation may use the
+  freed band and nothing may land on the title block; `ctx.areas` is the
+  band first and the whole sheet second, so every free-space search
+  (_free_spot, _lowest_free, place_notes, pictorial_box) keeps today's
+  answer where today's answer exists and uses the new room only when it
+  must. layout_check takes the blocks too: their own rules and text are
+  furniture, and an annotation that lands on them is `text-off-sheet`.
+  A logo box belongs IN the title block — mw.template_elements_off_sheet
+  measures it against that block, since one in the drawing area would
+  print under the views.
 
 ## Drawing style rules (locked with user, from reference/0982_001-1.pdf)
 - Per part: ONE sheet, TWO views. Front view (chosen per part at /finalise),

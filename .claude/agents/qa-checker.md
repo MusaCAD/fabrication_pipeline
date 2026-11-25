@@ -54,7 +54,10 @@ upstream (/draw, /finalise).
 9. **Centering**: the view group (views + dims) sits centered horizontally
    in the drawing area and vertically balanced between the parts table and
    revision table — not drifted into a margin. Verify on the rendered
-   image.
+   image. On a widened sheet the title block and the revision table keep
+   their A4 width and are CLOSED on their left-hand side: no empty cells
+   running across the sheet, and the band they leave may legitimately
+   carry a notes block, a table or a detail view.
 10. **Zero overlap / zero intrusion**: no dimension text over geometry or
     other dim text, no leader/callout crossing through a view illegibly,
     and NOTHING intruding into the title block, parts table, revision

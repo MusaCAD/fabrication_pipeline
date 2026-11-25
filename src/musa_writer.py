@@ -14,9 +14,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from common import (DEFAULT_PAPER, DRAWING_AREA, PAPER_PAINTABLE, S0,
-                    SHEET_GEOM_A4P, TEMPLATE, TEMPLATE_EXT_MAX,
-                    TEMPLATE_EXT_MIN, paper_key, sheet_geom)
+from common import (BLOCK_TOL, DEFAULT_PAPER, DRAWING_AREA, FRAME_INNER,
+                    PAPER_PAINTABLE, S0, SHEET_GEOM_A4P, TEMPLATE,
+                    TEMPLATE_EXT_MAX, TEMPLATE_EXT_MIN, furniture_bands,
+                    paper_key, sheet_geom)
 
 P = "0 7 255 255 255 0 25"  # default 7-int property tail: layer 0, ByLayer
 # annotation tail: explicit MAGENTA (flags 6 = linetype+lineweight ByLayer,
@@ -237,10 +238,25 @@ def template_elements_off_sheet(path: Path, tol: float = 0.01) -> list[str]:
                        f"{y1:.1f}) is outside the sheet — it would print "
                        "nowhere (is it entered in the A4 template's units?)")
         else:
+            # the logo belongs IN the title block, which is the block the
+            # sheet reserves for it: a box in the drawing area would
+            # print under the views, and on a widened sheet the pipeline
+            # moves it with the right edge, so it is measured against the
+            # title block's own rect (issue #28)
+            geom = template_geom(path)
+            tb = template_furniture(path, geom["widen"])[0]
+            bx1 = x1 + geom["widen"][0]
+            if not (tb[0] - tol <= x0 + geom["widen"][0] and bx1 <= tb[2] + tol
+                    and tb[1] - tol <= y0 and y1 <= tb[3] + tol):
+                out.append(
+                    f"the logo box ({x0:.1f}, {y0:.1f})-({x1:.1f}, "
+                    f"{y1:.1f}) is outside the title block "
+                    f"({tb[0]:.1f}, {tb[1]:.1f})-({tb[2]:.1f}, "
+                    f"{tb[3]:.1f}) — it would print over the drawing")
             # and where it really STAMPS: on a widened sheet the box
             # travels with the right edge, so a box already moved by the
             # widening is moved twice and lands off the paper (issue #15)
-            ctx = SheetContext(1, 1, geom=template_geom(path), template=path)
+            ctx = SheetContext(1, 1, geom=geom, template=path)
             st = ctx.logo_stamp()
             if st:
                 sx, sy, sw, sh = st["rect"]
@@ -298,6 +314,58 @@ def template_logo(path: Path | None = None) -> dict | None:
     if not (x1 > x0 and y1 > y0):
         raise ValueError(f"template logo box is empty: {d['box']}")
     return {"png": png, "box": (x0, y0, x1, y1), "px": png_size(png)}
+
+
+def _geom_points(r) -> list:
+    """A geometry record's points (text is left out, as template_bbox
+    leaves it out: a glyph's extent depends on the font)."""
+    if r.kind == "LINE":
+        return [(r.nums[0], r.nums[1]), (r.nums[2], r.nums[3])]
+    if r.kind in ("CIRCLE", "ARC"):
+        cx, cy, rad = r.nums[0], r.nums[1], r.nums[2]
+        return [(cx - rad, cy - rad), (cx + rad, cy + rad)]
+    if r.kind == "POLYLINE":
+        return [(r.nums[i], r.nums[i + 1])
+                for i in range(0, len(r.nums), 2)]
+    return []
+
+
+def template_furniture(path: Path | None = None,
+                       widen=(0.0, 0.0)) -> list:
+    """Where the title block and the revision table really sit, in
+    template units — one rect per band, measured from the file.
+
+    They live in the two bands the drawing area leaves inside the border,
+    and on a widened sheet they keep their A4 width and travel with the
+    right edge, so each one's LEFT edge is wherever its rules start
+    (issue #28). Measured rather than assumed, because a variant widened
+    before that existed has its rules STRETCHED to the border: its block
+    then spans the sheet and the sheet is the rect it always was.
+
+    A band's own rules are what bound it: the frame and the corner marks
+    are not furniture, and they are told apart by lying across both bands
+    (the border) or outside the border altogether (the marks).
+    """
+    dx, dy = widen
+    da = (DRAWING_AREA[0], DRAWING_AREA[1],
+          DRAWING_AREA[2] + dx, DRAWING_AREA[3] + dy)
+    recs = parse_template(path)
+    out = []
+    for _name, y0, y1 in furniture_bands(da, (dx, dy)):
+        xs = []
+        for r in recs:
+            pts = _geom_points(r)
+            if not pts:
+                continue
+            if not all(y0 - BLOCK_TOL <= y <= y1 + BLOCK_TOL
+                       for _x, y in pts):
+                continue        # the border runs through both bands
+            if not all(da[0] - BLOCK_TOL <= x <= da[2] + BLOCK_TOL
+                       for x, _y in pts):
+                continue        # a corner mark sits outside the border
+            xs += [x for x, _y in pts]
+        out.append((min(xs) if xs else da[0], y0, da[2], y1))
+    return out
 
 
 def template_bbox(path: Path | None = None) -> tuple:
@@ -414,7 +482,8 @@ def template_geom(path: Path | None = None) -> dict:
             raise ValueError(
                 f"{path.name}: {w:.1f} x {h:.1f} mm does not fit "
                 f"{paper} {orient} ({pw} x {ph} mm)")
-    geom = sheet_geom(paper=paper, orientation=orient, widen=(dx, dy), s0=S0)
+    geom = sheet_geom(paper=paper, orientation=orient, widen=(dx, dy),
+                      s0=S0, blocks=template_furniture(path, (dx, dy)))
     _GEOM_CACHE[key] = geom
     return geom
 
@@ -491,6 +560,23 @@ class SheetContext:
         da = self.geom["drawing_area"]
         self.draw_area = (self.tx(da[0]), self.ty(da[1]),
                           self.tx(da[2]), self.ty(da[3]))
+        # the whole area inside the border, and the furniture reserved in
+        # it: on a widened sheet the title block and the revision table
+        # keep their A4 width, so the band each leaves at the left is
+        # drawing area too (issue #28). They are the same rect on an A4
+        # sheet, and `areas` is then one pass, so nothing moves.
+        sa = self.geom.get("sheet_area", da)
+        self.sheet_area = (self.tx(sa[0]), self.ty(sa[1]),
+                           self.tx(sa[2]), self.ty(sa[3]))
+        self.blocks = tuple(
+            (name, (self.tx(b[0]), self.ty(b[1]),
+                    self.tx(b[2]), self.ty(b[3])))
+            for name, b in self.geom.get("blocks", ()))
+        # where a block of annotation may be looked for, in order: the
+        # band between the furniture first, so a sheet that fits as it
+        # always did is drawn as it always was, and then the whole sheet
+        self.areas = ((self.draw_area,) if self.sheet_area == self.draw_area
+                      else (self.draw_area, self.sheet_area))
         self.entities: list[str] = []
         self.dimstyles: list[str] = []
         # DIMUNITS records (one per style that needs a non-default linear

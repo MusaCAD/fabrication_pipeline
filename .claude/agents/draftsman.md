@@ -35,6 +35,12 @@ dense outside dimensioning, ANSI31 hatch, filled RES title block).
   state its own PAPER (manifest `"paper": "A3L"`, drawn on that paper's
   template): the title block then prints at the same size and the drawing
   area is what grows. ctx.paper / ctx.orientation say which.
+  On such a sheet the title block and the revision table keep their A4
+  width at the right edge, so ctx.sheet_area (the whole sheet inside the
+  border, with ctx.blocks reserved in it) is bigger than ctx.draw_area
+  (the band between them). Views, parts rows and balloon columns belong
+  in the band; ctx.areas is the band first, the whole sheet second, and
+  that is the order every free-space search uses.
 - Annotation sizes use ctx.mm(h) so they print at constant paper mm.
 - The stated title-block SCALE must equal the plotted scale exactly.
 

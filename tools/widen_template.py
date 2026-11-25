@@ -12,6 +12,16 @@ title block, parts table and revision table travel with the right edge and
 the top, and the left-hand corner marks stay where they are. That is all
 this does, to the template's own coordinates.
 
+The furniture travels WHOLE (issue #28). The revision table, the parts
+row and the title block run from border to border on the A4 sheet, so
+moving only their right-hand ends stretched each of them by the whole
+widening — about 221 mm on A3 landscape — and left a row of empty cells
+across the top of the sheet and an empty box beside the title block,
+holding nothing and reading as part of the title block. Both ends of
+those rules move now, each band is CLOSED on its new left edge, and the
+space they leave is drawing area (common.sheet_geom's `sheet_area` and
+`blocks`, measured back off the file by musa_writer.template_furniture).
+
 The result needs no sidecar: src/musa_writer.template_geom measures the
 widening from the file and works out which paper it is. A logo sidecar
 (`<stem>.logo.json`) is rewritten alongside, its box moved with the title
@@ -27,8 +37,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from common import (DRAWING_AREA, PAPER_PAINTABLE, S0, TEMPLATE_EXT_MAX,
-                    TEMPLATE_EXT_MIN)
+from common import (BLOCK_TOL, DRAWING_AREA, FRAME_INNER, PAPER_PAINTABLE,
+                    S0, TEMPLATE_EXT_MAX, TEMPLATE_EXT_MIN, furniture_bands)
 
 # x below this belongs to the sheet's LEFT edge: the trim frame's left side
 # and the left-hand corner marks, which stay put while the sheet widens.
@@ -51,6 +61,70 @@ def widening(paper: str, orientation: str) -> tuple[float, float]:
     return (dx if dx >= MIN_WIDEN else 0.0, dy if dy >= MIN_WIDEN else 0.0)
 
 
+def point_indices(tok) -> list | None:
+    """The (x index, y index) of every point a record carries, or None for
+    a record that holds no coordinates."""
+    key = tok[0]
+    if key == "LINE":
+        return [(1, 2), (3, 4)]
+    if key in ("CIRCLE", "ARC", "MTEXT"):
+        return [(1, 2)]
+    if key == "POLYLINE":
+        return [(3 + 2 * j, 4 + 2 * j) for j in range(int(tok[2]))]
+    return None
+
+
+def furniture_band(pts) -> int | None:
+    """Which furniture band this record belongs to, or None.
+
+    A band's own rules lie wholly inside one band and inside the border.
+    The border itself runs through BOTH bands and the corner marks lie
+    outside it, so neither is furniture and neither travels with it."""
+    for i, (_name, y0, y1) in enumerate(furniture_bands(DRAWING_AREA)):
+        if all(y0 - BLOCK_TOL <= y <= y1 + BLOCK_TOL for _x, y in pts) \
+                and all(FRAME_INNER[0] - BLOCK_TOL <= x
+                        <= FRAME_INNER[2] + BLOCK_TOL for x, _y in pts):
+            return i
+    return None
+
+
+def closing_rules(text: str, dx: float) -> list[str]:
+    """The vertical rule each furniture band needs on its new left edge.
+
+    On the A4 sheet the border closes these bands; once they move right
+    each one needs a left-hand side of its own, or the title block and
+    the revision table print as open boxes. A band that already carries
+    that rule — the revision table does — travels with it and needs
+    nothing, so nothing is drawn twice.
+    """
+    if not dx:
+        return []
+    left = FRAME_INNER[0] + dx
+    bands = furniture_bands(DRAWING_AREA)
+    rules = []
+    for raw in text.split("\n"):
+        tok = raw.split()
+        if not tok or tok[0] != "LINE":
+            continue
+        nums = [float(v) for v in tok[1:5]]
+        band = furniture_band([(nums[0], nums[1]), (nums[2], nums[3])])
+        if band is not None:
+            rules.append((band, nums, " ".join(tok[5:12])))
+    out = []
+    for band, (_name, y0, y1) in enumerate(bands):
+        mine = [(nums, props) for b, nums, props in rules if b == band]
+        if not mine:
+            continue                   # the band draws nothing to close
+        if any(abs(nums[0] - FRAME_INNER[0]) < BLOCK_TOL
+               and abs(nums[2] - FRAME_INNER[0]) < BLOCK_TOL
+               and min(nums[1], nums[3]) <= y0 + BLOCK_TOL
+               and max(nums[1], nums[3]) >= y1 - BLOCK_TOL
+               for nums, _p in mine):
+            continue                   # it has a left-hand side already
+        out.append(f"LINE {left!r} {y0!r} {left!r} {y1!r} {mine[0][1]}")
+    return out
+
+
 def widen_text(text: str, dx: float, dy: float) -> str:
     """The template's records with the sheet widened by (dx, dy)."""
     out = []
@@ -59,27 +133,35 @@ def widen_text(text: str, dx: float, dy: float) -> str:
         if not tok:
             out.append(raw)
             continue
-        key = tok[0]
+        idx = point_indices(tok)
+        if idx is None:
+            out.append(raw)
+            continue
+        band = furniture_band([(float(tok[xi]), float(tok[yi]))
+                               for xi, yi in idx])
+
         def move(xi, yi):
             """One point: it travels with the right edge and the top edge
-            if it belongs to them, and stays otherwise."""
-            if dx and float(tok[xi]) >= LEFT_EDGE_X:
+            if it belongs to them, and stays otherwise. Furniture travels
+            WHOLE, both ends of every rule, so the title block keeps its
+            A4 width instead of being stretched (issue #28)."""
+            if dx and (band is not None or float(tok[xi]) >= LEFT_EDGE_X):
                 tok[xi] = repr(float(tok[xi]) + dx)
             if dy and float(tok[yi]) >= TOP_EDGE_Y:
                 tok[yi] = repr(float(tok[yi]) + dy)
 
-        if key == "LINE":
-            move(1, 2)
-            move(3, 4)
-        elif key in ("CIRCLE", "ARC", "MTEXT"):
-            move(1, 2)
-        elif key == "POLYLINE":
-            for j in range(int(tok[2])):
-                move(3 + 2 * j, 4 + 2 * j)
-        else:
-            out.append(raw)
-            continue
+        for xi, yi in idx:
+            move(xi, yi)
         out.append(" ".join(tok))
+    # the bands are closed on their new left edge, before END
+    rules = closing_rules(text, dx)
+    if rules:
+        for i, raw in enumerate(out):
+            if raw.strip() == "END":
+                out[i:i] = rules
+                break
+        else:
+            out += rules
     return "\n".join(out)
 
 

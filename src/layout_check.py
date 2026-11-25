@@ -285,7 +285,7 @@ SYMBOL_KINDS = ("POLYLINE", "CIRCLE", "ARC", "HATCH")
 
 
 def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
-                where="", boxes=()) -> list[dict]:
+                where="", boxes=(), blocks=()) -> list[dict]:
     """Every layout fault this sheet carries.
 
     `draw_area` is the sheet's own drawing area and `unit_mm` how many
@@ -293,17 +293,33 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
     here is in PRINTED millimetres whatever the scale. `table_band` is the
     parts table's rows and `boxes` the pictorial box: both are the
     pipeline's own furniture rather than the drawing's ink, and a frame
-    the pipeline drew is not a view of the part."""
+    the pipeline drew is not a view of the part.
+
+    `blocks` is the TEMPLATE's furniture inside the drawing area, as
+    (name, rect): on a widened sheet the title block and the revision
+    table keep their A4 width and the area is the whole sheet inside the
+    border, so their own rules and text are inside it and are not the
+    drawing's ink — while an annotation that lands on them is a fault
+    the old area test used to catch for free (issue #28)."""
     recs = parse(musa_text)
     u = lambda mm: mm / unit_mm if unit_mm else mm        # noqa: E731
 
     def in_area(rect):
         return rect is not None and overlaps(rect, draw_area)
 
+    def on_block(rect):
+        """The template furniture this rect lies on, if any."""
+        for name, b in blocks:
+            if rect is not None and overlaps(rect, b):
+                return name
+        return None
+
     def furniture(rect):
         if rect is None:
             return False
         if table_band is not None and overlaps(rect, table_band):
+            return True
+        if on_block(rect):
             return True
         pad = u(1.5)
         return any(b[0] - pad <= rect[0] and rect[2] <= b[2] + pad
@@ -463,7 +479,8 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                     "feature as the datum")
                 break
 
-    # 8. text outside the drawing area
+    # 8. text outside the drawing area — or on the template's own
+    #    furniture inside it, which is not drawing area either (#28)
     for r, ink in ((r, text_ink(r)) for r in recs if r.kind in TEXT_KINDS):
         if ink is None or not r.anno:
             continue
@@ -473,6 +490,10 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
             add("text-off-sheet",
                 f"{unescape(r.content).strip()[:28]!r} is outside the "
                 "drawing area")
+        elif on_block(ink):
+            add("text-off-sheet",
+                f"{unescape(r.content).strip()[:28]!r} is over the "
+                f"{on_block(ink)}")
 
     # 9. leaders running parallel and close (a warning: nothing is wrong,
     #    it only reads as one line with two arrows)

@@ -44,6 +44,15 @@ S0 = 0.180175
 # table (bottom edge y=1516.995), inside the side borders — template units.
 DRAWING_AREA = (58.544651860946026, 460.0832555520592,
                 1044.425593134758, 1516.9949415656047)
+# The inner border the title block draws — the sheet's own area, which the
+# drawing area and the two furniture bands (the title block below it, the
+# revision table above it) divide between them. Measured from
+# templates/template.musa's border polyline.
+FRAME_INNER = (58.54465186094603, 100.40853796523515,
+               1044.4509433448256, 1630.5684260003345)
+# A furniture block within this of the area's own left and right edges
+# still spans it, in template units (0.1 unit = 18 micrometres printed).
+BLOCK_TOL = 0.1
 
 # What the harness can actually paint on, per paper and orientation, in mm
 # at 300 dpi — musa_plot's OWN numbers (its summary line prints
@@ -79,8 +88,18 @@ def fit_factor(ext_w: float, ext_h: float, paper="A4",
     return min(pw / ext_w, ph / ext_h)
 
 
+def furniture_bands(drawing_area, widen=(0.0, 0.0)):
+    """The two bands the drawing area leaves inside the border, as
+    (name, y0, y1) in template units: the title block below it and the
+    revision table above it."""
+    dy = widen[1]
+    return (("title block", FRAME_INNER[1], drawing_area[1]),
+            ("revision table", drawing_area[3], FRAME_INNER[3] + dy))
+
+
 def sheet_geom(ext_min=None, ext_max=None, drawing_area=None, paper="A4",
-               orientation="portrait", s0=None, widen=(0.0, 0.0)) -> dict:
+               orientation="portrait", s0=None, widen=(0.0, 0.0),
+               blocks=None) -> dict:
     """One sheet's geometry in TEMPLATE UNITS plus its paper.
 
     `widen` is how much bigger than the default template this one is: the
@@ -90,6 +109,19 @@ def sheet_geom(ext_min=None, ext_max=None, drawing_area=None, paper="A4",
     A4-portrait title block is built. Everything else — the row pitch, the
     text sizes, the left border — is untouched, so both papers print the
     same title block at the same size.
+
+    `blocks` is where that furniture really sits, measured from the
+    template (musa_writer.template_furniture). A widened title block
+    keeps its A4 width and travels with the right edge, so the band it
+    leaves at the LEFT is drawing area too, and the sheet's area is the
+    whole inner border with the title block and the revision table
+    reserved in it (issue #28). A block that still spans the area from
+    edge to edge — an A4 sheet, or a variant widened before this existed
+    and so stretched to the border — is ABSORBED into the area's own
+    edge instead, and the sheet is the plain rect it always was.
+    Returns `sheet_area` (what may be drawn in) and `blocks` as
+    (name, rect) pairs; `drawing_area` stays the band between them, which
+    is where the views, the parts rows and the balloon columns belong.
     """
     dx, dy = widen
     ext_min = tuple(ext_min or TEMPLATE_EXT_MIN)
@@ -97,6 +129,18 @@ def sheet_geom(ext_min=None, ext_max=None, drawing_area=None, paper="A4",
                                 TEMPLATE_EXT_MAX[1] + dy))
     da = tuple(drawing_area or (DRAWING_AREA[0], DRAWING_AREA[1],
                                 DRAWING_AREA[2] + dx, DRAWING_AREA[3] + dy))
+    bands = furniture_bands(da, (dx, dy))
+    if blocks is None:
+        blocks = [(da[0], y0, da[2], y1) for _n, y0, y1 in bands]
+    area = [da[0], FRAME_INNER[1], da[2], FRAME_INNER[3] + dy]
+    keep = []
+    for (name, y0, y1), b in zip(bands, blocks):
+        if b[0] <= da[0] + BLOCK_TOL and b[2] >= da[2] - BLOCK_TOL:
+            # it spans the sheet: the area simply stops at it
+            area[1] = max(area[1], y1) if y1 <= da[1] + BLOCK_TOL else area[1]
+            area[3] = min(area[3], y0) if y0 >= da[3] - BLOCK_TOL else area[3]
+            continue
+        keep.append((name, (b[0], y0, b[2], y1)))
     paper, orientation = str(paper).upper(), str(orientation)
     if s0 is None:
         s0 = (S0 if (paper, orientation) == DEFAULT_PAPER and not dx and not dy
@@ -104,6 +148,7 @@ def sheet_geom(ext_min=None, ext_max=None, drawing_area=None, paper="A4",
                               ext_max[1] - ext_min[1], paper, orientation))
     return {"paper": paper, "orientation": orientation, "s0": s0,
             "ext_min": ext_min, "ext_max": ext_max, "drawing_area": da,
+            "sheet_area": tuple(area), "blocks": tuple(keep),
             "widen": (dx, dy)}
 
 

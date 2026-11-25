@@ -914,22 +914,28 @@ def _free_spot(ctx, layout, w, h, zones=(), prefer_top=True):
     the gutters are still empty at this point and a block parked in one
     takes a dimension's only spot). Scans the upper sheet first and from the
     right, where the reference drawings put a detail; the bottom band is the
-    last resort."""
-    ax0, ay0, ax1, ay1 = ctx.draw_area
+    last resort.
+
+    The band between the furniture is searched first and the whole sheet
+    only if nothing fits there (`ctx.areas`), so a sheet that fits as it
+    always did is drawn as it always was, and the space a widened title
+    block leaves at the left is there for the one that does not
+    (issue #28)."""
     pad, step = ctx.mm(3.0), ctx.mm(4.0)
-    ny = max(0, int((ay1 - pad - h - (ay0 + pad)) / step))
-    nx = max(0, int((ax1 - pad - w - (ax0 + pad)) / step))
-    rows = range(ny, -1, -1) if prefer_top else range(ny + 1)
-    for j in rows:
-        yy = ay0 + pad + j * step
-        for i in range(nx, -1, -1):
-            xx = ax0 + pad + i * step
-            r = (xx, yy, xx + w, yy + h)
-            if not layout.inside(r) or layout.collides(r):
-                continue
-            if any(Layout._overlap(r, z, 0.0) for z in zones):
-                continue
-            return r
+    for ax0, ay0, ax1, ay1 in ctx.areas:
+        ny = max(0, int((ay1 - pad - h - (ay0 + pad)) / step))
+        nx = max(0, int((ax1 - pad - w - (ax0 + pad)) / step))
+        rows = range(ny, -1, -1) if prefer_top else range(ny + 1)
+        for j in rows:
+            yy = ay0 + pad + j * step
+            for i in range(nx, -1, -1):
+                xx = ax0 + pad + i * step
+                r = (xx, yy, xx + w, yy + h)
+                if not layout.inside(r) or layout.collides(r):
+                    continue
+                if any(Layout._overlap(r, z, 0.0) for z in zones):
+                    continue
+                return r
     return None
 
 
@@ -1112,7 +1118,13 @@ class Layout:
 
     def __init__(self, ctx: mw.SheetContext):
         self.ctx = ctx
-        self.area = ctx.draw_area
+        # the whole sheet inside the border, with the title block and the
+        # revision table reserved in it: on a widened sheet each of them
+        # keeps its A4 width, so the band it leaves at the left is
+        # drawing area too (issue #28). On an A4 sheet the two are the
+        # same rect and there are no blocks, so nothing here changes.
+        self.area = ctx.sheet_area
+        self.blocks = tuple(getattr(ctx, "blocks", ()))
         self.claims: list[tuple] = []   # (x0,y0,x1,y1,label,kind)
         # every leader drawn so far, as (tip, knee, label): a bounding box
         # cannot tell a leader crossing another from one running beside it,
@@ -1137,6 +1149,8 @@ class Layout:
         self.faults: list[str] = []
         self.flips: list[str] = []      # dims moved to the view's near edge
         self.nudges = 0
+        for name, b in self.blocks:
+            self.claim(b, name, "reserved")
 
     @staticmethod
     def _overlap(a, b, pad):
@@ -1145,7 +1159,12 @@ class Layout:
 
     def inside(self, r) -> bool:
         ax0, ay0, ax1, ay1 = self.area
-        return (r[0] >= ax0 and r[1] >= ay0 and r[2] <= ax1 and r[3] <= ay1)
+        if not (r[0] >= ax0 and r[1] >= ay0
+                and r[2] <= ax1 and r[3] <= ay1):
+            return False
+        # the title block and the revision table are inside the sheet's
+        # own area and are not drawing area (issue #28)
+        return not any(self._overlap(r, b, 0.0) for _n, b in self.blocks)
 
     def collides(self, r, ignore=()) -> bool:
         pad = self.ctx.mm(0.8)
@@ -3830,50 +3849,67 @@ def place_notes(ctx, layout, notes, rows_h):
     # manifest notes may arrive pre-numbered ("1. BREAK ...") — strip any
     # leading ordinal so this block's own numbering is the single source
     notes = [re.sub(r"^\d+\.\s*", "", t) for t in notes]
-    ax0, ay0, ax1, ay1 = ctx.draw_area
-    y_floor = ay0 + rows_h + ctx.mm(2.0)
     step = ctx.mm(4.0)
-    best = None
-    for hi, hmm in enumerate(NOTES_HEIGHTS):
-        h = ctx.mm(hmm)
-        lh = 1.55 * h
-        for li, limit in enumerate(NOTES_LIMITS):
-            lines = []
-            for i, t in enumerate(notes, start=1):
-                wrapped = _wrap(t, limit)
-                lines.append(f"{i}. {wrapped[0]}")
-                lines += [f"   {c}" for c in wrapped[1:]]
-            rows = list(reversed(lines)) + ["NOTES:"]   # bottom-up, as emitted
-            height = (len(rows) - 1) * lh + h
-            width = max(mw.glyph_ink_w(t, h) for t in rows)
-            if width > ax1 - ax0 - ctx.mm(6.0) or height > ay1 - y_floor:
-                continue
-            ny = int((ay1 - ctx.mm(3.0) - height - y_floor) / step)
-            nx = int((ax1 - ctx.mm(3.0) - width - ax0 - ctx.mm(3.0)) / step)
-            spot = None
-            for j in range(max(0, ny) + 1):        # lowest band first
-                yy = y_floor + j * step
-                # frame-anchored spots first (house style), then a sweep
-                xs = [ax0 + ctx.mm(3.0), ax1 - width - ctx.mm(3.0)]
-                xs += [ax0 + ctx.mm(3.0) + k * step
-                       for k in range(1, max(0, nx) + 1)]
-                for xx in xs:
-                    r = (xx, yy, xx + width, yy + height)
-                    if layout.inside(r) and not layout.collides(r):
-                        spot = r
+
+    def search(area):
+        """The best spot in ONE area, or None: every wrap width at every
+        height, lowest band first."""
+        ax0, ay0, ax1, ay1 = area
+        y_floor = (ay0 + rows_h + ctx.mm(2.0) if area == ctx.draw_area
+                   else ay0 + ctx.mm(3.0))
+        best = None
+        for hi, hmm in enumerate(NOTES_HEIGHTS):
+            h = ctx.mm(hmm)
+            lh = 1.55 * h
+            for li, limit in enumerate(NOTES_LIMITS):
+                lines = []
+                for i, t in enumerate(notes, start=1):
+                    wrapped = _wrap(t, limit)
+                    lines.append(f"{i}. {wrapped[0]}")
+                    lines += [f"   {c}" for c in wrapped[1:]]
+                # bottom-up, as emitted
+                rows = list(reversed(lines)) + ["NOTES:"]
+                height = (len(rows) - 1) * lh + h
+                width = max(mw.glyph_ink_w(t, h) for t in rows)
+                if width > ax1 - ax0 - ctx.mm(6.0) or height > ay1 - y_floor:
+                    continue
+                ny = int((ay1 - ctx.mm(3.0) - height - y_floor) / step)
+                nx = int((ax1 - ctx.mm(3.0) - width - ax0
+                          - ctx.mm(3.0)) / step)
+                spot = None
+                for j in range(max(0, ny) + 1):        # lowest band first
+                    yy = y_floor + j * step
+                    # frame-anchored spots first (house style), then a sweep
+                    xs = [ax0 + ctx.mm(3.0), ax1 - width - ctx.mm(3.0)]
+                    xs += [ax0 + ctx.mm(3.0) + k * step
+                           for k in range(1, max(0, nx) + 1)]
+                    for xx in xs:
+                        r = (xx, yy, xx + width, yy + height)
+                        if layout.inside(r) and not layout.collides(r):
+                            spot = r
+                            break
+                    if spot:
                         break
-                if spot:
-                    break
-            if spot is None:
-                continue
-            # the block belongs in the LOWEST free band of the sheet; only
-            # inside one band does a bigger character height, then the house
-            # column width, decide. Choosing the first fit instead sent a
-            # sheet's notes up a side band as a narrow tall column while the
-            # bottom band sat empty (round-8 QA, sheet 03).
-            key = (round((spot[1] - y_floor) / ctx.mm(8.0)), hi, li)
-            if best is None or key < best[0]:
-                best = (key, spot, rows, h, lh)
+                if spot is None:
+                    continue
+                # the block belongs in the LOWEST free band of the sheet; only
+                # inside one band does a bigger character height, then the house
+                # column width, decide. Choosing the first fit instead sent a
+                # sheet's notes up a side band as a narrow tall column while the
+                # bottom band sat empty (round-8 QA, sheet 03).
+                key = (round((spot[1] - y_floor) / ctx.mm(8.0)), hi, li)
+                if best is None or key < best[0]:
+                    best = (key, spot, rows, h, lh)
+        return best
+
+    best = None
+    # the band between the furniture first, then the whole sheet: a
+    # widened title block leaves room beside itself, and the notes may
+    # have it when the band cannot hold them (issue #28)
+    for area in ctx.areas:
+        best = search(area)
+        if best is not None:
+            break
     if best is None:
         layout.unresolved.append("notes-block")
         return []
@@ -3993,19 +4029,27 @@ def place_variants_table(ctx, layout, part, rows_h):
 
 def _lowest_free(ctx, layout, width, height, y_floor):
     """Lowest, then leftmost, free rectangle of this size in the drawing
-    area — the same search rule the notes block uses."""
-    ax0, ay0, ax1, ay1 = ctx.draw_area
+    area — the same search rule the notes block uses.
+
+    The band between the furniture first, then the whole sheet (issue
+    #28): `y_floor` keeps the block above the parts rows, which only the
+    band has, and in the sheet's own area the rows are a claim like
+    everything else."""
     step = ctx.mm(4.0)
-    ny = int((ay1 - ctx.mm(3.0) - height - y_floor) / step)
-    nx = int((ax1 - ctx.mm(3.0) - width - ax0 - ctx.mm(3.0)) / step)
-    for j in range(max(0, ny) + 1):
-        yy = y_floor + j * step
-        xs = [ax0 + ctx.mm(3.0), ax1 - width - ctx.mm(3.0)]
-        xs += [ax0 + ctx.mm(3.0) + k * step for k in range(1, max(0, nx) + 1)]
-        for xx in xs:
-            r = (xx, yy, xx + width, yy + height)
-            if layout.inside(r) and not layout.collides(r):
-                return r
+    for area in ctx.areas:
+        ax0, ay0, ax1, ay1 = area
+        floor = y_floor if area == ctx.draw_area else ay0 + ctx.mm(3.0)
+        ny = int((ay1 - ctx.mm(3.0) - height - floor) / step)
+        nx = int((ax1 - ctx.mm(3.0) - width - ax0 - ctx.mm(3.0)) / step)
+        for j in range(max(0, ny) + 1):
+            yy = floor + j * step
+            xs = [ax0 + ctx.mm(3.0), ax1 - width - ctx.mm(3.0)]
+            xs += [ax0 + ctx.mm(3.0) + k * step
+                   for k in range(1, max(0, nx) + 1)]
+            for xx in xs:
+                r = (xx, yy, xx + width, yy + height)
+                if layout.inside(r) and not layout.collides(r):
+                    return r
     return None
 
 
@@ -5175,31 +5219,41 @@ def pictorial_box(ctx, layout, png=None, zones=(), floor=None):
     (read from the PNG's IHDR, never assumed) that fits the box interior,
     centred in it. Stretching the image to the box would be a non-uniform
     scale, which this pipeline does not do — anywhere.
+    The band between the furniture is searched first and the whole sheet
+    only if no size fits there, so a widened sheet keeps the box in the
+    same corner as before and the room beside the title block is a last
+    resort before the box is simply parked (issue #28).
     Returns (records, stamp_rect)."""
-    ax0, ay0, ax1, ay1 = ctx.draw_area
     pad, step = ctx.mm(2.0), ctx.mm(3.0)
-    base_y = ay0 + pad if floor is None else floor + pad
     spot = None
-    for w_mm, h_mm in PICTORIAL_SIZES:
-        w, hh = ctx.mm(w_mm), ctx.mm(h_mm)
-        rows = [ay1 - pad - hh, base_y]          # top band first, then bottom
-        n = max(0, int((ax1 - pad - w - ax0 - pad) / step))
-        for yy in rows:
-            for k in range(n + 1):               # slide right -> left
-                xx = ax1 - pad - w - k * step
-                r = (xx - ctx.mm(1.0), yy - ctx.mm(1.0),
-                     xx + w + ctx.mm(1.0), yy + hh + ctx.mm(1.0))
-                if not layout.inside(r) or any(Layout._overlap(r, z, 0.0)
-                                               for z in zones):
-                    continue
-                spot = (xx, yy, w, hh)
-                break
+    for area in ctx.areas:
+        ax0, ay0, ax1, ay1 = area
+        base_y = (ay0 + pad if floor is None or area != ctx.draw_area
+                  else floor + pad)
+        for w_mm, h_mm in PICTORIAL_SIZES:
+            w, hh = ctx.mm(w_mm), ctx.mm(h_mm)
+            rows = [ay1 - pad - hh, base_y]      # top band first, then bottom
+            n = max(0, int((ax1 - pad - w - ax0 - pad) / step))
+            for yy in rows:
+                for k in range(n + 1):           # slide right -> left
+                    xx = ax1 - pad - w - k * step
+                    r = (xx - ctx.mm(1.0), yy - ctx.mm(1.0),
+                         xx + w + ctx.mm(1.0), yy + hh + ctx.mm(1.0))
+                    if not layout.inside(r) or layout.collides(r) \
+                            or any(Layout._overlap(r, z, 0.0)
+                                   for z in zones):
+                        continue
+                    spot = (xx, yy, w, hh)
+                    break
+                if spot:
+                    break
             if spot:
                 break
         if spot:
             break
     if spot is None:      # nowhere clear: keep the house corner, smallest box
         w, hh = ctx.mm(PICTORIAL_SIZES[-1][0]), ctx.mm(PICTORIAL_SIZES[-1][1])
+        ax1, ay1 = ctx.draw_area[2], ctx.draw_area[3]
         spot = (ax1 - pad - w, ay1 - pad - hh, w, hh)
     x0, y0, w, hh = spot
     x1, y1 = x0 + w, y0 + hh
@@ -6175,9 +6229,10 @@ def sheet_layout_check(ctx, path: Path, waivers=None):
     #22). Returns (live faults, waived, warnings)."""
     box = getattr(ctx, "_pictorial_box", None)
     found = layout_check.check_sheet(
-        path.read_text(), ctx.draw_area, ctx.num / ctx.den,
+        path.read_text(), ctx.sheet_area, ctx.num / ctx.den,
         table_band=getattr(ctx, "_table_band", None),
-        boxes=[box] if box else ())
+        boxes=[box] if box else (),
+        blocks=getattr(ctx, "blocks", ()))
     live, waived_ = verify.waived(layout_check.faults(found), waivers)
     return live, waived_, layout_check.warnings(found)
 

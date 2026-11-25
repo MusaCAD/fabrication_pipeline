@@ -37,6 +37,12 @@ block (`"templates": {"A3L": "/abs/path.musa"}`, made from the A4 one with
 `tools/widen_template.py`). One set may mix them — an A3-landscape
 assembly sheet among A4 part sheets — with the title block the same
 printed size on every sheet and all the extra paper going to the drawing.
+On a widened sheet the revision table and the title block keep their A4
+width and travel with the right edge, each closed on its new left-hand
+side, and the band they leave — 221 mm over the full height on A3
+landscape — is drawing area: the views, the parts rows and the balloon
+columns stay in the band between them, and a notes block, a table or a
+detail that the band cannot hold goes there instead of failing the sheet.
 
 
 - Per part: front view + full section (or an agreed alternative view),
@@ -156,7 +162,8 @@ a leader running along the outline it points at, reaching its feature
 through another view, or crossing a dimension line, a sight arrow or the
 pictorial box, a symbol or balloon lying on text, a datum box sitting
 nearer another callout than the one it belongs to, a callout column so
-narrow the note comes out one word a line, text outside the drawing area,
+narrow the note comes out one word a line, text outside the drawing area
+or on the title block,
 and — as warnings — two leaders running together closer than 2 mm and a
 leader across an extension line.
 
