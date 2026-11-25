@@ -37,8 +37,12 @@ The run ends with TWO CHECKS, both read off the finished sheets:
   compared with what the sheet prints;
 - the LAYOUT CHECK (src/layout_check.py): how the sheet looks — leaders
   crossing each other, a leader running along the outline it points at,
-  a symbol or balloon lying on text, text outside the drawing area, and
-  (as a warning only) two leaders running together closer than 2 mm.
+  through another view, or across a dimension line, a sight arrow or the
+  pictorial box, a symbol or balloon lying on text, a datum box nearer
+  another callout than its own, a callout column so narrow its note comes
+  out one word a line, text outside the drawing area, and (as warnings
+  only) two leaders running together closer than 2 mm and a leader across
+  an extension line.
 
 Both are printed and recorded in sheets.json. /export will refuse
 anything but the warning, so fix the manifest or the sheet — or waive one

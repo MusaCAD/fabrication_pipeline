@@ -7,16 +7,22 @@ Run pipeline stage 5 (export):
 1. Run `python3 src/export.py`. It REFUSES to run if /draw's value check
    found a difference between the manifest and a sheet that nobody
    waived (issue #14), or if its layout check found a fault on a
-   finished sheet — a crossing leader, a leader on an outline, ink on
-   text, text off the sheet (issue #22). Report them to the user rather
+   finished sheet — a crossing leader, a leader on an outline or across
+   a dimension line, a sight arrow or the pictorial box, ink on text, a
+   datum box beside the wrong callout, a callout column one word wide,
+   text off the sheet (issues #22, #25, #27). Report them to the user rather
    than waiving them yourself. Otherwise it plots every sheet from
    output/musa/sheets.json via tools/bin/musa_plot (QT_QPA_PLATFORM=offscreen)
    at the sheet's manifest scale on the paper that sheet states (A4
    portrait unless its manifest entry says otherwise), verifies the
    effective
-   mm_per_unit equals the stated scale, writes one PDF per sheet to
-   output/pdf/<DRG_NO>.pdf, merges them into output/pdf/print_set.pdf with
-   pdfunite, and records output/pdf/export.json.
+   mm_per_unit equals the stated scale, writes one PDF per SHEET to
+   output/pdf/ — <DRG_NO>.pdf for a drawing of one sheet,
+   <DRG_NO>_SH1.pdf / _SH2.pdf plus the merged <DRG_NO>.pdf for one that
+   runs to two (issue #24) — merges every sheet into
+   output/pdf/print_set.pdf with pdfunite, and records
+   output/pdf/export.json. Delivery copies the DRAWINGS and the print
+   set, not the loose sheet files.
 2. If tools/bin/musa_plot is missing, build it first: `tools/build.sh`.
 3. After export, ALWAYS run the qa-checker subagent on output/pdf/ — it
    verifies each sheet's stated paper, aspect ratio, one sheet per

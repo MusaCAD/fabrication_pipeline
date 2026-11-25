@@ -22,6 +22,14 @@ co-author line to git commits.
   manifest "deliver_to" copies the final sheet PDFs + print_set there on
   /export (e.g. /home/pranay/projects/lisocl2/fabrication/). output/ stays
   a per-run working area only.
+  ONE PDF PER SHEET (issue #24): a drawing that runs to two sheets has two
+  entries in sheets.json under ONE drawing number, so each is plotted to
+  its own file — `<DRG>_SH1.pdf`, `<DRG>_SH2.pdf` (export.sheet_pdf_name,
+  by the sheet's own `sheet_of` when it states one, else by order) — and
+  the drawing's `<DRG>.pdf` is those merged in sheet order. The print set
+  carries every SHEET once in sheets.json order; delivery takes the
+  DRAWINGS and the print set, not the loose sheets. A one-sheet drawing
+  keeps its plain `<DRG>.pdf` exactly as before.
 - MusaCAD gaps found while drafting are FILED UPSTREAM (gh issue on
   MusaCAD/MusaCAD) — see memory musacad-gap-issues; workarounds live in the
   harness (e.g. --min-lw 0.30 floors hairline text strokes, MusaCAD
@@ -106,6 +114,17 @@ co-author line to git commits.
 - Parser is STRICT: exact token counts; TEXT/MTEXT need content + font lines
   (font line mandatory in v14, empty = stroke font); file starts
   `MUSACAD 14`, ends `END`; unknown record key kills the whole file.
+- A TIE ROUNDS ONE WAY ON EVERY PAPER (issue #26): def points are placed
+  full size at offsets that differ per paper, so a value exactly halfway
+  between two printed ones (362.625 at two places) landed either side of
+  the boundary depending on where the view sat, and glibc's `%.2f` rounds
+  an exact tie half-to-EVEN — one model, one manifest, two different
+  numbers on A4 and A3. draw.snap_value/snap_def_points move the far def
+  point by a micrometre on a TIE ONLY (TIE_WINDOW), so the measurement is
+  a hair past the boundary and rounds half AWAY FROM ZERO wherever the
+  sheet puts it; every other dimension is left exactly as it was, down to
+  the byte. A detail view's DIMLFAC is applied before the test, so what is
+  snapped is the value the reader sees.
 - DIM entities always display the measured def-point distance (cannot fake).
   The ONE honest lever is `DIMUNITS idx lunit frac rnd lfac aunit adec+1 alt
   altu altd altf altrnd post apost` (15 tokens exactly, v40): its `lfac`
@@ -428,6 +447,22 @@ co-author line to git commits.
   leader crosses another), and the layout check reports it on the finished
   sheet. Balloons are one fan per side across every view that shares the
   column, settled by exchanging ANY crossing pair, not only neighbours.
+  THE OTHER INK (issue #25): a dimension LINE, the cutting plane's sight
+  arrows and the pipeline's own pictorial frame are not claims, so nothing
+  used to be asked about them — and a diameter leader ran clean through a
+  sight arrow, two arrowheads meeting. `Layout.dim_lines` / `ext_lines`
+  (recorded by _claim_dim_ink from dim_segments, MusaCAD's own geometry)
+  and `Layout.keep_off` (the sight arrows, the pictorial box) carry them
+  as SEGMENTS; `Layout.crossing_ink` names what a rung would cross and
+  `crosses_extension` asks about the extension lines, which only rank a
+  rung — a crowded sheet sometimes has no way round one. Balloons are
+  ORDERED against that ink rather than stepped round it
+  (draw.other_ink + `_order_against_ink`): out of its fan slot a balloon
+  crosses its neighbours, which says something false about the part, so an
+  ink crossing costs 1 and a leader crossing 10. A callout column narrower
+  than its own longest word comes out ONE WORD A LINE and its leader then
+  crosses the view to reach it: that is a fault naming the words, because
+  the fix is a shorter note or a bigger sheet, not another knee.
 - THE LAYOUT CHECK (issue #22, src/layout_check.py, run inside /draw):
   what the manifest states is the value check's business; this one reads
   how the sheet LOOKS, off the finished .musa, because the engine only
@@ -437,9 +472,16 @@ co-author line to git commits.
   another view (issue #20 — the views are found by clustering the
   sheet's own ink, since a sheet does not say which ink is which view
   and does not have to: the views are drawn MIN_VIEW_GAP apart), a
-  symbol / triangle / frame / balloon lying on text, annotation text
-  outside the drawing area, and — as a WARNING — two leaders running
-  together closer than 2 mm. /draw prints them and records them per
+  symbol / triangle / frame / balloon lying on text, a leader across a
+  dimension line, a sight arrow or the pictorial box (`dim_ink` rebuilds
+  both lines from the DIM records, `cut_arrows` reads the filled triangle
+  in the drawing's own ink with the shaft behind it), a callout column
+  that came out one word a line (`narrow_columns`, anchored to a LEADER's
+  knee so a table's cells are not read as somebody's note), a datum box
+  nearer another callout than its own (`datum_boxes`, the triangle's tip
+  being the vertex FARTHEST from the box), annotation text outside the
+  drawing area, and — as WARNINGS — two leaders running together closer
+  than 2 mm and a leader across an extension line. /draw prints them and records them per
   sheet; /export refuses everything but the warning unless a manifest
   `"layout_waivers"` entry names it. Tolerances are in PRINTED
   millimetres at any scale; the parts-table band and the pictorial box
@@ -525,6 +567,14 @@ composition/rework), qa-checker (verify PDFs after every /export).
   landing past the text (ISO 1101 5.3) when the shoulder is crowded; it
   never reaches back over the letter in its own box, and its ink is
   claimed like every other annotation's.
+  A BOX READS AS THE NEAREST LABEL'S (issue #27): the triangle was on the
+  right leader but the box one line below, 1.4 mm from the next callout's
+  text and 4.0 mm from its own — read as printed, the sheet named the
+  wrong feature as the datum. A spot is legal only when the datum's OWN
+  callout is the nearest text to it (draw.datum_on_landing `mine`, which
+  measures with `rect_gap` against `Layout.anno_clearance(ignore=stack)`);
+  when no spot is, the sheet fails and says so, because a datum on the
+  wrong feature is worse than no datum at all.
   A target naming a view edge (bottom_face / short_edge /
   long_edge) marks a SURFACE. A datum on a FEATURE OF SIZE — a bore or a
   spigot, whose datum is its AXIS — uses `"target": "<kind>_r<radius>"`

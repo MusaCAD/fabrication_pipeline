@@ -152,10 +152,13 @@ dropped fit class or a model coordinate printed as a dimension is named,
 with the sheet it is on.
 
 The LAYOUT check reads how the sheet looks: leaders crossing each other,
-a leader running along the outline it points at or reaching its feature
-through another view, a symbol or balloon lying on text, text outside the
-drawing area, and — as a warning — two leaders running together closer
-than 2 mm.
+a leader running along the outline it points at, reaching its feature
+through another view, or crossing a dimension line, a sight arrow or the
+pictorial box, a symbol or balloon lying on text, a datum box sitting
+nearer another callout than the one it belongs to, a callout column so
+narrow the note comes out one word a line, text outside the drawing area,
+and — as warnings — two leaders running together closer than 2 mm and a
+leader across an extension line.
 
 /export refuses to run on anything either of them finds that the manifest
 does not waive (`"value_waivers"`, `"layout_waivers"`).

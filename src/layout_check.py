@@ -25,6 +25,20 @@ the engine's opinion of the sheet does not come into it. What it reports:
   leader-across-view a leader reaches its feature THROUGH another view,
                     so it points at the part across ink that says nothing
                     about it;
+  leader-across-dimension
+                    a leader crosses a dimension LINE, or the arrows of
+                    the cutting plane, or the pictorial box — ink that
+                    belongs to something else entirely;
+  leader-across-extension-line
+                    a leader crosses an extension line (a WARNING: it is
+                    sometimes the only way across a crowded sheet);
+  callout-column-narrow
+                    a callout column too narrow for its own words, so
+                    the note comes out one word a line;
+  datum-beside-wrong-callout
+                    a datum box nearer another callout's text than its
+                    own, so the sheet names the wrong feature as the
+                    datum;
   text-off-sheet    text outside the drawing area altogether;
   leaders-parallel  two leaders closer than 2 mm and running together (a
                     WARNING: it reads badly but says nothing false).
@@ -326,16 +340,20 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                     + what, "severity": severity})
 
     # 1. leaders crossing each other
-    seen = set()
+    # by the PAIR, not by their labels: every balloon's leader carries
+    # the same empty label, and keying on that reported one crossing for
+    # a whole fan of them (issue #25)
     for i, (t1, k1, l1) in enumerate(leaders):
         for t2, k2, l2 in leaders[i + 1:]:
             if segs_cross(t1, k1, t2, k2, u(CROSS_EPS)):
-                key = tuple(sorted((l1, l2)))
-                if key in seen:
-                    continue
-                seen.add(key)
+                where = (f" (the one landing at {t1[0] * unit_mm:.0f}, "
+                         f"{t1[1] * unit_mm:.0f} mm)") if not l1 else ""
                 add("leader-crossing",
-                    f"the leaders of {l1!r} and {l2!r} cross each other")
+                    f"the leaders of {l1 or 'a balloon'}{where} and "
+                    f"{l2 or 'a balloon'!r} cross each other"
+                    if not l1 else
+                    f"the leaders of {l1!r} and {l2 or 'a balloon'!r} "
+                    "cross each other")
 
     # 2. a leader running along drawn geometry
     for t, k, lab in leaders:
@@ -394,7 +412,58 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                     "the view that does")
                 break
 
-    # 5. text outside the drawing area
+    # 5. a leader across ink that belongs to something else: a
+    #    dimension line, the cutting plane's arrows, the pictorial box
+    #    (a warning for an extension line, which a crowded sheet
+    #    sometimes leaves no way round)
+    dims, exts = dim_ink(recs, u(0.72), u(1.5))
+    arrows = cut_arrows(recs)
+    box_edges = []
+    for b in boxes:
+        pts = [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
+        box_edges += list(zip(pts, pts[1:] + pts[:1]))
+    for t, k, lab in leaders:
+        for what, segs, kind in (
+                ("a dimension line", dims, "leader-across-dimension"),
+                ("the cutting plane's arrow", arrows,
+                 "leader-across-dimension"),
+                ("the pictorial box", box_edges,
+                 "leader-across-dimension")):
+            if any(segs_cross(t, k, a, b, u(0.2)) for a, b in segs):
+                add(kind, f"the leader of {lab!r} crosses {what}")
+                break
+        else:
+            if any(segs_cross(t, k, a, b, u(0.2)) for a, b in exts):
+                add("leader-across-extension-line",
+                    f"the leader of {lab!r} crosses an extension line",
+                    severity="warn")
+
+    # 6. a callout column too narrow for its own words
+    for first, lines in narrow_columns(recs, texts, u(1.0)):
+        add("callout-column-narrow",
+            f"the callout {first[:20]!r} is coming out one word a line ("
+            + " / ".join(lines[:4])
+            + ") — the column beside the views is narrower than its own "
+              "words, and its leader has to cross the view to reach it; "
+              "this sheet wants a bigger paper")
+
+    # 7. a datum box that reads as another callout's
+    for box, letter, own in datum_boxes(recs, texts):
+        if own is None:
+            continue                      # not hung on a callout's leader
+        mine = rect_gap(box, own)
+        for r, ink in texts:
+            body = unescape(r.content).strip()
+            if len(body) <= 1 or ink is own:
+                continue
+            if rect_gap(box, ink) < mine - u(0.05):
+                add("datum-beside-wrong-callout",
+                    f"datum {letter} sits nearer {body[:28]!r} than the "
+                    "callout it belongs to, so the sheet names that "
+                    "feature as the datum")
+                break
+
+    # 8. text outside the drawing area
     for r, ink in ((r, text_ink(r)) for r in recs if r.kind in TEXT_KINDS):
         if ink is None or not r.anno:
             continue
@@ -405,7 +474,7 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                 f"{unescape(r.content).strip()[:28]!r} is outside the "
                 "drawing area")
 
-    # 6. leaders running parallel and close (a warning: nothing is wrong,
+    # 9. leaders running parallel and close (a warning: nothing is wrong,
     #    it only reads as one line with two arrows)
     for i, (t1, k1, l1) in enumerate(leaders):
         for t2, k2, l2 in leaders[i + 1:]:
@@ -415,6 +484,114 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                     f"the leaders of {l1!r} and {l2!r} run together for "
                     f"{run * unit_mm:.1f} mm closer than {PARALLEL_GAP} mm",
                     severity="warn")
+    return out
+
+
+def dim_ink(recs, ext_offset=0.72, ext_extension=1.5):
+    """The dimension lines and extension lines a sheet's DIM records will
+    draw, as MusaCAD draws them (core/dimension.cpp): the feet are the
+    def points projected onto the dim line, and the extension lines run
+    from just off each def point to just past its foot.
+
+    Returns (dimension lines, extension lines). A leader may not cross
+    the first; crossing the second is a warning, since a crowded sheet
+    sometimes leaves nothing else (issue #25)."""
+    dims, exts = [], []
+    for r in recs:
+        if r.kind != "DIM" or len(r.nums) < 7:
+            continue
+        dtype = int(r.nums[0])
+        a = (r.nums[1], r.nums[2])
+        b = (r.nums[3], r.nums[4])
+        lp = (r.nums[5], r.nums[6])
+        if dtype in (2, 3):
+            # radius / diameter: the dim line is the leader MusaCAD draws
+            # from the centre, and it has no extension lines
+            dims.append((a, b))
+            continue
+        if dtype != 0:
+            dims.append((a, b))
+            continue
+        d = (1.0, 0.0) if abs(a[1] - b[1]) <= abs(a[0] - b[0]) else (0.0, 1.0)
+
+        def foot(p):
+            t = (p[0] - lp[0]) * d[0] + (p[1] - lp[1]) * d[1]
+            return (lp[0] + d[0] * t, lp[1] + d[1] * t)
+
+        fa, fb = foot(a), foot(b)
+        dims.append((fa, fb))
+        for p, f in ((a, fa), (b, fb)):
+            vx, vy = f[0] - p[0], f[1] - p[1]
+            ln = math.hypot(vx, vy)
+            if ln < 1e-9:
+                continue
+            nx, ny = vx / ln, vy / ln
+            exts.append(((p[0] + nx * ext_offset, p[1] + ny * ext_offset),
+                         (f[0] + nx * ext_extension, f[1] + ny * ext_extension)))
+    return dims, exts
+
+
+def cut_arrows(recs):
+    """The cutting plane's sight arrows: a filled triangle in the
+    DRAWING's own ink (the datum triangles and the dimension arrowheads
+    are annotation ink), with the thick shaft that carries it."""
+    heads, out = [], []
+    for r in recs:
+        if r.anno or r.kind != "HATCH" or len(r.nums) != 1 \
+                or len(r.nums[0]) != 3 or "SOLID" not in r.content.upper():
+            continue
+        tri = r.nums[0]
+        tip = tri[0]
+        base = ((tri[1][0] + tri[2][0]) / 2.0, (tri[1][1] + tri[2][1]) / 2.0)
+        heads.append((tip, base))
+    shafts = [seg for r in recs if r.kind == "LINE" and not r.anno
+              for seg in segments(r)]
+    for tip, base in heads:
+        far = base
+        for a, b in shafts:
+            for p, q in ((a, b), (b, a)):
+                if math.dist(p, base) < math.dist(tip, base) * 1.2 \
+                        and math.dist(q, base) > math.dist(far, base):
+                    far = q
+        out.append((tip, far))
+    return out
+
+
+def narrow_columns(recs, texts, tol):
+    """Callout stacks that came out one word a line (issue #25).
+
+    A column narrower than the note's own longest word wraps it to a word
+    a line, and the leaders then reach across the view to get to it. The
+    sheet shows it plainly: a leader's own note, stacked under its knee,
+    three or more lines of one word each.
+
+    A column of MTEXTs is only read as a callout when it hangs off a
+    LEADER's knee — a table's cells line up the same way and are nobody's
+    note."""
+    out = []
+    for r in recs:
+        if r.kind != "LEADER":
+            continue
+        knee = (r.nums[2], r.nums[3])
+        first = unescape(r.content).strip()
+        lines = [(knee[1], first)] if first else []
+        for t, ink in texts:
+            if t.kind != "MTEXT":
+                continue
+            body = unescape(t.content).strip()
+            if not body or not (0.0 < ink[0] - knee[0] < 4.0 * tol):
+                continue
+            if knee[1] - 12.0 * tol < ink[1] <= knee[1] + tol:
+                lines.append((ink[1], body))
+        if len(lines) < 3:
+            continue
+        lines.sort(reverse=True)
+        run = 0
+        for _y, body in lines:
+            run = run + 1 if len(body.split()) == 1 else 0
+            if run >= 3:
+                out.append((first, [b for _y2, b in lines]))
+                break
     return out
 
 
@@ -498,6 +675,77 @@ def _seg_dist(a, b, p):
     t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * vx
                                                + (p[1] - a[1]) * vy) / L2))
     return math.dist(p, (a[0] + t * vx, a[1] + t * vy))
+
+
+def datum_boxes(recs, texts):
+    """Every datum box on the sheet, with the triangle it hangs off and
+    the leader that triangle sits on (issue #27).
+
+    A datum box is a square drawn in annotation ink with one letter in
+    it; the triangle at the end of its stem is what says WHICH feature
+    is the datum, and the leader that triangle sits on is that feature's
+    own callout. Returns [(box rect, letter, own label ink or None)]."""
+    out = []
+    squares = []
+    for r in recs:
+        if not r.anno or r.kind != "POLYLINE" or int(r.nums[1]) != 4:
+            continue
+        pts = [(r.nums[2 + 2 * i], r.nums[3 + 2 * i]) for i in range(4)]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        w, h = max(xs) - min(xs), max(ys) - min(ys)
+        if w < 1e-9 or abs(w - h) > 1e-6:
+            continue
+        squares.append((min(xs), min(ys), max(xs), max(ys)))
+    if not squares:
+        return out
+    tris = [r.nums[0] for r in recs
+            if r.kind == "HATCH" and r.anno and len(r.nums) == 1
+            and len(r.nums[0]) == 3 and "SOLID" in r.content.upper()]
+    leaders = [(tuple(r.nums[:2]), tuple(r.nums[2:4]),
+                unescape(r.content).strip(), text_ink(r))
+               for r in recs if r.kind == "LEADER"]
+    for box in squares:
+        letter = None
+        for r, ink in texts:
+            body = unescape(r.content).strip()
+            if len(body) == 1 and body.isalpha() \
+                    and box[0] <= (ink[0] + ink[2]) / 2 <= box[2] \
+                    and box[1] <= (ink[1] + ink[3]) / 2 <= box[3]:
+                letter = body
+        if letter is None:
+            continue                      # a frame cell, not a datum box
+        tri = min((t for t in tris),
+                  key=lambda t: min(_dist(box, q) for q in t),
+                  default=None)
+        own = None
+        if tri is not None:
+            # the triangle POINTS at the feature, so its tip is the
+            # vertex farthest from the box its stem comes from
+            tip = max(tri, key=lambda q: _dist(box, q))
+            for a, b, body, ink in leaders:
+                if not body or ink is None:
+                    continue
+                # on the leader itself (set back along it, issue #17), or
+                # in line with its landing past the text (ISO 1101 5.3)
+                in_line = abs(tip[1] - b[1]) < 1e-6 and tip[0] >= b[0] - 1e-6
+                if in_line or _seg_dist(a, b, tip) < 0.5:
+                    own = ink
+                    break
+        out.append((box, letter, own))
+    return out
+
+
+def _dist(rect, p):
+    dx = max(rect[0] - p[0], 0.0, p[0] - rect[2])
+    dy = max(rect[1] - p[1], 0.0, p[1] - rect[3])
+    return math.hypot(dx, dy)
+
+
+def rect_gap(a, b) -> float:
+    dx = max(b[0] - a[2], 0.0, a[0] - b[2])
+    dy = max(b[1] - a[3], 0.0, a[1] - b[3])
+    return math.hypot(dx, dy)
 
 
 def _name(r: Rec, filled: bool) -> str:

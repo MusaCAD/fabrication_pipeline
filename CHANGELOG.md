@@ -5,6 +5,135 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.13.0 — 2026-11-25
+
+Four faults a finished sheet carried and nothing asked about:
+[#24](https://github.com/MusaCAD/fabrication_pipeline/issues/24),
+[#25](https://github.com/MusaCAD/fabrication_pipeline/issues/25),
+[#26](https://github.com/MusaCAD/fabrication_pipeline/issues/26) and
+[#27](https://github.com/MusaCAD/fabrication_pipeline/issues/27).
+
+### Fixed
+
+- **/export plotted sheet 2 over sheet 1** (#24). A drawing that runs to
+  two sheets — a continuation sheet for the parts table, or details on
+  `"sheet": 2` — has two entries in sheets.json under ONE drawing number,
+  and each was named after the drawing, so the second plot overwrote the
+  first and the print set was built from that list of paths: it carried
+  SHEET 2 OF 2 twice and SHEET 1 OF 2 not at all. The page count was
+  right and every check before the plot passed, because each sheet's
+  .musa was correct; only the PDF written for it was lost. Each sheet now
+  gets its own file — `<DRG>_SH1.pdf`, `<DRG>_SH2.pdf`
+  (`export.sheet_pdf_name`, by the sheet's own `sheet_of` when it states
+  one, else by the order they were drawn) — and the drawing's `<DRG>.pdf`
+  is those merged in sheet order. The print set carries every SHEET once;
+  delivery takes the DRAWINGS and the print set, not the loose sheets. A
+  one-sheet drawing keeps its plain `<DRG>.pdf`, byte for byte.
+- **A tie rounded one way on A4 and the other way on A3** (#26). A
+  362.625 mm tube printed `362.63` on A4 portrait and `362.62` on A3
+  landscape, from one model and one manifest, and `--dump-dims` measured
+  362.625 both times. Def points are placed full size at offsets that
+  differ per paper, so the last bits of the subtraction land either side
+  of the rounding boundary depending on where the view sits — and glibc's
+  `%.2f` rounds an exact tie half-to-EVEN, which is neither of the two
+  rules a drawing office uses. `draw.snap_value` / `snap_def_points` now
+  move the far def point by a micrometre on a TIE ONLY, so the
+  measurement is a hair past the boundary and rounds half AWAY FROM ZERO
+  wherever the sheet puts it. A detail view's DIMLFAC is applied before
+  the test, so what is snapped is the value the reader sees. Every other
+  dimension is untouched, down to the byte: in the four real sets exactly
+  two def points move, both on a tie, and both labels are the ones those
+  sheets already printed on A4 — it is the A3 redraw that used to
+  disagree.
+- **A datum box sat beside the wrong callout** (#27). On a turned part at
+  1:1 the triangle was on its own callout's leader, but the BOX one line
+  below — 1.4 mm from `2 x M4 THRU WALL, 180%%d APART` and 4.0 mm from
+  its own `%%c46.7 (SPIGOT)`. A box reads as belonging to the nearest
+  label, so as printed the sheet named the M4 holes as datum A. A spot is
+  legal now only when the datum's OWN callout is the nearest text to it
+  (`datum_on_landing`'s `mine`, measuring with the new `rect_gap`
+  against `Layout.anno_clearance(ignore=stack)`), and when no spot is,
+  the sheet fails and says why — a datum on the wrong feature is worse
+  than no datum at all.
+- **A leader could run through the sheet's other ink** (#25). The engine
+  knew about views, leaders and text boxes; a dimension LINE, the cutting
+  plane's sight arrows and the pipeline's own pictorial frame were not
+  claims, so nothing was ever asked about them — and a diameter leader
+  left its circle, turned, and ran straight through a sight arrow, two
+  arrowheads meeting so that neither reads as pointing at anything.
+  `Layout.dim_lines` / `ext_lines` (recorded by `_claim_dim_ink` from
+  `dim_segments`, which is MusaCAD's own dimension geometry) and
+  `Layout.keep_off` (the sight arrows, the pictorial box) carry that ink
+  as SEGMENTS; `Layout.crossing_ink` names what a rung of the ladder
+  would cross, and `crosses_extension` asks about the extension lines,
+  which only rank a rung — a crowded sheet sometimes has no way round
+  one. Balloons are ORDERED against that ink rather than stepped round it
+  (`draw.other_ink` + `_order_against_ink`): out of its fan slot a
+  balloon crosses its neighbours, which says something false about the
+  part, so an ink crossing costs 1 and a leader crossing 10.
+
+### Added
+
+- **The layout check reads all four** (#25, #27), off the finished .musa
+  as the rest of it does:
+  - `leader-across-dimension` — a leader across a dimension line, a
+    sight arrow or the pictorial box. `dim_ink` rebuilds the dimension
+    line and its two extension lines from the DIM records (the feet are
+    the def points projected onto the dim line, as `core/dimension.cpp`
+    computes them), and `cut_arrows` reads the filled triangle that is in
+    the DRAWING's ink rather than the annotation's, with the shaft behind
+    it;
+  - `leader-across-extension-line` — a WARNING, for the same reason the
+    engine only ranks it;
+  - `callout-column-narrow` — a note coming out one word a line, which
+    says the column beside the views is narrower than the note's own
+    longest word and its leader has to cross the view to reach it. The
+    fix is a shorter note or a bigger sheet, not another knee, so the
+    fault names the words. A column is only read as a callout when it
+    hangs off a LEADER's knee: a variants table's cells line up the same
+    way and are nobody's note;
+  - `datum-beside-wrong-callout` — a box nearer another callout's text
+    than its own, with the text it would be read against. `datum_boxes`
+    takes the triangle's tip to be the vertex FARTHEST from the box,
+    which is the end that touches the feature.
+- A crossing leader is reported per PAIR now, with coordinates when a
+  leader has no label: every balloon's leader carries the same empty
+  label, so a fan of sixteen crossing pairs used to report as one.
+
+### Upgrade steps
+
+1. `git -C <your pipeline clone> fetch --tags && git checkout v0.13.0`
+2. **Re-run `/draw`, then `/export`.** Nothing in the manifest format
+   changed; all four fixes are in the engine, the checks and the plot.
+3. **Expect new layout findings on an assembly sheet that carries both
+   dimensions and a big balloon fan.** They are real: a balloon leader
+   really does cross the overall-length dimension when the fan spans the
+   sheet above the view. The sheet's options are a shorter dimension set
+   (`assembly_sheet.front_extent_dims: false` — the parts table carries
+   the sizes), a bigger paper, or a `layout_waivers` entry naming the
+   finding. The engine orders the fan to take as few as it can; it will
+   not trade a leader crossing for one of these.
+4. **Check the file names your delivery folder gets** (#24): a two-sheet
+   drawing now delivers one `<DRG>.pdf` of two pages, and
+   `<DRG>_SH1.pdf` / `<DRG>_SH2.pdf` stay in `output/pdf/` as the working
+   copies. An older run's single-page `<DRG>.pdf` in the delivery folder
+   is overwritten by the two-page one.
+5. **Nothing to re-issue for #26.** Two def points move by a micrometre
+   in the four real sets, and both dimensions print the label they
+   printed before — they were already rounding away from zero on A4
+   portrait. What changes is that they do so on A3 as well, where one of
+   them came out a hundredth lower.
+
+### Compatibility
+
+Every sheet of the four real sets — eleven sslxbt part sheets, the TPE
+assembly and its parts, amogha RES-41-LH-01 and
+`samples/out/RES-SAMPLE-01` — redraws byte for byte except the four that
+carried a fault: two sslxbt part sheets whose length was exactly on the
+rounding boundary (#26), one whose datum box moves to its own callout
+(#27), and one whose diameter leader now goes round the sight arrow
+instead of through it (#25). The suite is 524 tests.
+
 ## v0.12.0 — 2026-11-24
 
 What the checks were still missing, and what a model file shows when you

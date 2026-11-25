@@ -14,6 +14,7 @@ qa-checker.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,38 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (OUTPUT_MUSA_DIR, OUTPUT_PDF_DIR, die, read_json,
                     run_musa_plot, write_json)
+
+
+def sheet_pdf_name(sheet: dict, sheets_of: dict) -> str:
+    """What this sheet's PDF is called (issue #24).
+
+    A drawing of one sheet keeps the drawing number, as every set drawn
+    so far does. A drawing of several gets one file per sheet —
+    `<DRG>_SH1`, `<DRG>_SH2` — because they are different pages and a
+    file can only hold one of them; the sheets are merged back into
+    `<DRG>.pdf` for delivery, in order."""
+    drg = sheet["drg_no"]
+    mates = sheets_of.get(drg) or [sheet]
+    if len(mates) < 2:
+        return drg
+    # by identity: two sheets of one drawing differ only in their file
+    i = next((k for k, m in enumerate(mates) if m is sheet), 0) + 1
+    of = sheet.get("sheet_of")
+    if of and len(of) == 2:
+        i = int(of[0])
+    return f"{drg}_SH{i}"
+
+
+def merge(pdfs, out: Path) -> None:
+    """pdfunite, with the one-file case taken as a copy: pdfunite needs
+    at least two inputs."""
+    if len(pdfs) == 1:
+        shutil.copy2(pdfs[0], out)
+        return
+    r = subprocess.run(["pdfunite"] + [str(p) for p in pdfs] + [str(out)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"pdfunite failed: {r.stderr}")
 
 
 def main() -> None:
@@ -70,10 +103,18 @@ def main() -> None:
     if waived:
         print(f"values: {waived} difference(s) waived in the manifest")
 
+    # one PDF per SHEET (issue #24). A drawing that runs to two sheets
+    # has two entries under one DRG NO., and naming both after the
+    # drawing plotted the second over the first: the print set then
+    # carried sheet 2 twice and sheet 1 not at all, with the page count
+    # still right, so nothing looked wrong until somebody read the pages.
+    sheets_of = {}
+    for s in meta["sheets"]:
+        sheets_of.setdefault(s["drg_no"], []).append(s)
     exported = []
     for sheet in meta["sheets"]:
         num, den = (int(x) for x in sheet["scale"].split(":"))
-        pdf = OUTPUT_PDF_DIR / (sheet["drg_no"] + ".pdf")
+        pdf = OUTPUT_PDF_DIR / (sheet_pdf_name(sheet, sheets_of) + ".pdf")
         stamp = None
         st = sheet.get("stamp")
         if st:
@@ -119,21 +160,31 @@ def main() -> None:
                          "mm_per_unit": eff, "plot": info["raw"]})
         print(f"exported {pdf.name}  ({sheet['scale']}, {paper} {orient})")
 
+    # the print set: every sheet once, in the order they were drawn
     merged = OUTPUT_PDF_DIR / "print_set.pdf"
-    cmd = ["pdfunite"] + [s["pdf"] for s in exported] + [str(merged)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        die(f"pdfunite failed: {r.stderr}")
+    merge([s["pdf"] for s in exported], merged)
     print(f"print set: {merged}  ({len(exported)} sheets)")
+    # and one PDF per DRAWING, holding its sheets in order: that is what
+    # goes to the vendor, and a two-sheet drawing is two pages of it
+    delivered = []
+    for drg, mates in sheets_of.items():
+        pdfs = [s["pdf"] for s in exported if s["drg_no"] == drg]
+        if len(pdfs) < 2:
+            delivered += pdfs
+            continue
+        whole = OUTPUT_PDF_DIR / f"{drg}.pdf"
+        merge(pdfs, whole)
+        delivered.append(str(whole))
+        print(f"drawing {whole.name}: {len(pdfs)} sheets in one file")
     dest = read_json(OUTPUT_MUSA_DIR / "sheets.json").get("deliver_to")
     if dest:
-        import shutil
         d = Path(dest)
         d.mkdir(parents=True, exist_ok=True)
-        for sheet in exported:
-            shutil.copy2(sheet["pdf"], d)
+        for pdf in delivered:
+            shutil.copy2(pdf, d)
         shutil.copy2(merged, d)
-        print(f"delivered {len(exported)} sheets + print_set -> {d}")
+        print(f"delivered {len(delivered)} drawing(s) "
+              f"({len(exported)} sheets) + print_set -> {d}")
     write_json(OUTPUT_PDF_DIR / "export.json",
                {"sheets": exported, "print_set": str(merged)})
 
