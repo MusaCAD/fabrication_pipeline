@@ -25,6 +25,11 @@ the engine's opinion of the sheet does not come into it. What it reports:
   leader-across-view a leader reaches its feature THROUGH another view,
                     so it points at the part across ink that says nothing
                     about it;
+  leader-across-own-view
+                    a SIZE leader that crosses the view it points into,
+                    where the near end of the very edge its arrow sits on
+                    — the same feature — would have crossed nothing
+                    (issue #33);
   leader-across-dimension
                     a leader crosses a dimension LINE, or the arrows of
                     the cutting plane, or the pictorial box — ink that
@@ -100,7 +105,18 @@ ANGLE_SIN = 0.026       # sin(1.5 deg): "running along", not crossing
 ARROW_MM = 2.5          # a leader's arrowhead, when the sheet states no
 ARROW_HALF = 0.18       # dimstyle; half-width as a fraction of its length
 CROWD_MM = 0.8          # two annotations closer than this read as one
+# ... and so do two closer than this FRACTION of their height, whatever
+# the sheet's text size: the lines of one callout's own stack stand 0.8
+# of a height apart, so a stranger nearer than half of that is read as
+# one of them (issue #33, draw.ANNO_READ_FRAC)
+CROWD_FRAC = 0.4
 HIDDEN_MM = 0.5         # this much of a leader under the pictorial is gone
+# A size leader that could have landed on the near end of the very edge
+# it points at, and crosses this much more of the drawing by not doing so
+# (issue #33)
+LONG_WAY_CROSS = 3      # ink crossings away from its own arrow, at least
+LONG_WAY_SAVE = 2       # ... of which the near end would save this many
+LONG_WAY_MOVE = 2.0     # and the arrow has to move this far to get there
 
 
 # How many fields each record carries BEFORE its seven-int property tail
@@ -308,40 +324,54 @@ def seg_in_rect(a, b, rect, tol) -> bool:
 
 
 def dim_styles(musa_text: str):
-    """(arrow size per DIMSTYLE index, DIMLFAC per index), read off the
-    sheet's own style records.
+    """(arrow size per DIMSTYLE index, DIMLFAC per index, arrow TYPE per
+    index), read off the sheet's own style records.
 
     parse() skips both — they draw nothing themselves — but a LEADER's
-    arrowhead is drawn at its style's arrow size, and what a DIM measures
-    is multiplied by its style's DIMLFAC before it is printed, which is
-    how a detail view's dimensions read true (musa_writer.dimunits)."""
-    arrows, lfacs = [], {}
+    arrowhead is drawn at its style's arrow size and in its shape (a
+    balloon that ends inside a part's own cut area ends in a DOT, issue
+    #32), and what a DIM measures is multiplied by its style's DIMLFAC
+    before it is printed, which is how a detail view's dimensions read
+    true (musa_writer.dimunits)."""
+    arrows, lfacs, types = [], {}, []
     for line in musa_text.splitlines():
         tok = line.split()
         if not tok:
             continue
         try:
-            if tok[0] == "DIMSTYLE" and len(tok) > 2:
+            if tok[0] == "DIMSTYLE" and len(tok) > 3:
                 arrows.append(float(tok[2]))
+                types.append(int(tok[3]))
             elif tok[0] == "DIMUNITS" and len(tok) > 5:
                 lfacs[int(tok[1])] = float(tok[5])
         except ValueError:
             continue
-    return arrows, lfacs
+    return arrows, lfacs, types
 
 
-def arrowhead(tip, knee, size):
-    """The filled triangle MusaCAD draws at a leader's tip: apex ON the
-    tip, base `size` along the leader towards the knee, half-width
-    0.18*size (scene_snapshot.cpp hands the leader's own dimstyle arrow
-    size to append_arrowhead; core/dimension.cpp's proportions, the ones
-    draw.dim_arrowhead models for a lettered dim)."""
+def arrowhead(tip, knee, size, kind=0):
+    """The terminator MusaCAD draws at a leader's tip.
+
+    `kind` is the style's ArrowType (core/properties.hpp). 0, the house
+    style, is a filled triangle: apex ON the tip, base `size` along the
+    leader towards the knee, half-width 0.18*size (scene_snapshot.cpp
+    hands the leader's own dimstyle arrow size to append_arrowhead;
+    core/dimension.cpp's proportions, the ones draw.dim_arrowhead models
+    for a lettered dim). 3 is the DOT a balloon ends in when it lands
+    inside its part's own cut area (issue #32) — a filled diamond of
+    radius 0.35*size about the tip, dimension.cpp's own."""
     ux, uy = knee[0] - tip[0], knee[1] - tip[1]
     ln = math.hypot(ux, uy)
     if ln < 1e-9 or size <= 0.0:
         return []
     ux, uy = ux / ln, uy / ln
     px, py = -uy, ux
+    if kind == 3:
+        r = size * 0.35
+        return [(tip[0] + px * r, tip[1] + py * r),
+                (tip[0] + ux * r, tip[1] + uy * r),
+                (tip[0] - px * r, tip[1] - py * r),
+                (tip[0] - ux * r, tip[1] - uy * r)]
     bx, by = tip[0] + ux * size, tip[1] + uy * size
     return [(tip[0], tip[1]),
             (bx + px * size * ARROW_HALF, by + py * size * ARROW_HALF),
@@ -471,7 +501,7 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
         texts.append((r, ink))
 
     balloons = balloon_numbers(recs, texts)
-    arrow_mm, lfacs = dim_styles(musa_text)
+    arrow_mm, lfacs, arrow_type = dim_styles(musa_text)
     boxed = [rect_of(segments(r)) for r in recs
              if r.anno and r.kind == "POLYLINE" and int(r.nums[1]) == 4]
 
@@ -482,8 +512,9 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
         tip, knee = tuple(r.nums[:2]), tuple(r.nums[2:4])
         style = int(r.nums[5]) if len(r.nums) > 5 else 0
         size = arrow_mm[style] if 0 <= style < len(arrow_mm) else u(ARROW_MM)
+        kind = arrow_type[style] if 0 <= style < len(arrow_type) else 0
         leaders.append((tip, knee, leader_name(r.content, knee, balloons),
-                        arrowhead(tip, knee, size)))
+                        arrowhead(tip, knee, size, kind)))
     dims, exts = dim_ink(recs, u(0.72), u(1.5), lfacs)
 
     geom = []
@@ -638,6 +669,46 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
                         + (f" ({dname})" if dname else ""))
                     break
 
+    # 5b. a size leader taking the long way round its own feature
+    #     (issue #33): a diameter anchored on the FAR edge of the
+    #     cylinder it names, so its shaft crosses the outline, the centre
+    #     line and every hidden line between — where the near end of the
+    #     same drawn edge is the same feature and crosses nothing. Only a
+    #     leader that names a SIZE is asked: a note's arrow means the
+    #     spot it was put on.
+    for t, k, lab, _h in leaders:
+        if "%%c" not in (lab or ""):
+            continue
+        home = None
+        for r in recs:
+            if r.anno or r.kind not in ("LINE", "POLYLINE", "ARC", "CIRCLE"):
+                continue
+            segs = segments(r)
+            if not segs or min(_seg_dist(a, b, t) for a, b in segs) > u(0.5):
+                continue
+            if home is None or len(segs) > len(home):
+                home = segs
+        if home is None:
+            continue
+        alt = min((_near_pt(a, b, k) for a, b in home),
+                  key=lambda p: math.dist(p, k))
+        if math.dist(alt, t) < u(LONG_WAY_MOVE):
+            continue                      # it IS the near end
+
+        def crossed(p, knee=k):
+            return sum(1 for a, b in geom
+                       if _seg_dist(a, b, p) > u(LONG_WAY_MOVE)
+                       and segs_cross(p, knee, a, b, 0.0))
+
+        now, then = crossed(t), crossed(alt)
+        if now < LONG_WAY_CROSS or now - then < LONG_WAY_SAVE:
+            continue
+        add("leader-across-own-view",
+            f"the leader of {who(lab, t)} crosses its own view {now} "
+            f"times on the way out, where the end of the same edge "
+            f"{math.dist(alt, t) * unit_mm:.0f} mm away crosses it "
+            f"{then} — point it at the nearer end of the feature (`at`)")
+
     # 6. a callout column too narrow for its own words
     for first, lines in narrow_columns(recs, texts, u(1.0)):
         add("callout-column-narrow",
@@ -747,6 +818,7 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
     #     the whole bug. A text inside an annotation BOX belongs to that
     #     box (a frame's cells, a datum letter), and the frame's own ink
     #     over a label is check 3's business.
+    crowded: set = set()
     for r in recs:
         if r.kind != "LEADER":
             continue
@@ -760,17 +832,30 @@ def check_sheet(musa_text: str, draw_area, unit_mm=1.0, table_band=None,
             body = unescape(tr.content).strip()
             if not body or _in_a_box(other, boxed, u(INK_TOL)):
                 continue
+            # the engine's own clearance, or — bigger on any ordinary
+            # sheet — the fraction of a text height at which a stranger
+            # starts reading as a line of the column it fell into
+            # (issue #33): the %%c75.50 of a diameter dim dropped between
+            # two callouts sat at exactly the 0.8 mm the engine keeps,
+            # and printed as the middle line of their note
             gap = rect_gap(ink, other)
-            if gap >= u(CROWD_MM):
+            if gap >= max(u(CROWD_MM), CROWD_FRAC * _text_h(r)):
                 continue
             # a line of this callout's OWN stack is never this close: the
             # stack's leading is 0.8 of the text height, 2.5 printed mm
-            # (place_callouts' 1.8h pitch), so the gap tells them apart
+            # (place_callouts' 1.8h pitch), so the gap tells them apart.
+            # Two labels that are both LEADERS' meet twice here, and it
+            # is one pair crowding one spot either way round
+            pair = tuple(sorted((label[:24], body[:24])))
+            if pair in crowded:
+                continue
+            crowded.add(pair)
             add("annotation-crowded",
                 f"the label {label[:24]!r} and {body[:24]!r} are "
                 f"{gap * unit_mm:.2f} mm apart — closer than the "
-                f"{CROWD_MM} mm the engine keeps between two annotations, "
-                "so the two read as one block")
+                f"{max(CROWD_MM, CROWD_FRAC * _text_h(r) * unit_mm):.2f} mm "
+                "two annotations need to read apart, so they read as one "
+                "block")
     return out
 
 
@@ -1010,6 +1095,15 @@ def _own_view(views, tip, pad):
     return min(range(len(views)),
                key=lambda i: min(_seg_dist(a, b, tip)
                                  for a, b in views[i][1]))
+
+
+def _near_pt(a, b, p):
+    """The point of segment a-b nearest p."""
+    vx, vy = b[0] - a[0], b[1] - a[1]
+    L2 = vx * vx + vy * vy
+    t = 0.0 if L2 == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * vx
+                                               + (p[1] - a[1]) * vy) / L2))
+    return (a[0] + t * vx, a[1] + t * vy)
 
 
 def _seg_dist(a, b, p):

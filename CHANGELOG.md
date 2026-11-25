@@ -5,6 +5,161 @@ All notable changes to this project. Versions follow
 when the drawing output or the manifest format gains something, the patch
 number for fixes.
 
+## v0.16.0 — 2026-11-25
+
+A detail that hatches like its section, a balloon that lands on its own
+part, and a leader that leaves by the near edge:
+[#31](https://github.com/MusaCAD/fabrication_pipeline/issues/31),
+[#32](https://github.com/MusaCAD/fabrication_pipeline/issues/32),
+[#33](https://github.com/MusaCAD/fabrication_pipeline/issues/33).
+
+### Fixed
+
+- **An assembly's DETAIL views hatched every cut part alike** (#31). In
+  the section each part had its own hatch and neighbours were told apart
+  (ISO 128-50); in a detail of that same section all twenty hatch groups
+  came out at one angle and one spacing, so a plug and the tube it
+  closes, a printed cradle and the shell around it, and a stack of three
+  thin discs at 5:1 each read as one solid. The cause was one line:
+  `detail_job` rebuilt each group as `{"outer", "holes"}` and dropped the
+  instance it was cut from, so the colouring saw one unnamed part. The
+  name travels through the clip now, and `draw.detail_hatches` hands the
+  groups to `assembly_hatches` with the SECTION's own colouring — one
+  part reads the same in both views, which is what lets the reader pair
+  them, and it is safe because clipping to the circle only shrinks the
+  cut areas, so every pair that meets inside it already met in the
+  section. The THIN_SOLID rule runs again at the DETAIL's own scale,
+  which is the point of drawing it: a 0.4 mm cut filled solid in the
+  section is hatched in the enlargement. A part sheet's section has one
+  part and no instances; its details are hatched exactly as before.
+- **A balloon on a part whose every edge is shared pointed at its axis**
+  (#32). A thin tube closed in on every side — its outside against the
+  bore around it, its own bore a tenth of a millimetre off the part
+  inside it, both ends against neighbours — draws no ink that is its
+  alone at 1:5, so the arrow fell back to the instance's bounding-box
+  CENTRE, which for a tube is a point inside the part running through
+  it. Nothing reported it. The landing is a ladder now: ink that is this
+  instance's own and no other's; failing that a DOT inside its own cut
+  area (ISO 6433 — a leader that ends within the outline of the thing it
+  names ends in a dot, drawn through a dimstyle whose arrow type is 3);
+  failing that the same ink test again at a quarter of a millimetre. A
+  landing that is only a shared edge, or that centre, is a FAULT naming
+  the balloon and its levers. A thin cut takes the deepest point it has:
+  a 0.3 mm wall holds no point a millimetre clear of its walls, and that
+  tube is the part the fallback exists for.
+- **The balloon plan took the first view that HELD the part** (#32),
+  whether or not it drew any of it — so a logger buried in the hull was
+  ballooned on the outside view, where its arrow had nothing of its own
+  to land on. Thirteen of that sheet's twenty-six balloons were landing
+  that way. `draw.balloon_plan` ranks the candidate views by what the
+  arrow could land on there (`landing_kind`), and the manifest's own
+  `balloon_in`, or a detail that lists the part, is still kept whatever
+  it costs.
+- **A nested detail's letter stood in a row with the others** (#32). A
+  small region deep inside a view — detail D's 1.2 mm circle, drawn
+  INSIDE detail C's — had nothing free within its own ring, so the
+  letter walked its ladder out to the view's edge and landed 7 mm away,
+  beside C's letter, naming neither. The letter is now kept within the
+  ring its own circle asks for; where nothing near is free it is tried
+  again OVER the view, as a section letter may be, provided it lands
+  clear of the view's ink; and only then does the old ladder run, with a
+  thin line TYING the letter to its circle.
+- **A diameter leader could cross its whole view** (#33). On a 1:2 tube
+  and a 1:1 short tube the outside-diameter callout's arrow stayed on
+  the TOP edge, where the `at` put it, and the leader ran diagonally
+  down across the view — through the centre line, through the hidden
+  bore lines — to a column at the height of the view's lower half. The
+  strict pass accepted it because nothing it tested was crossed:
+  extension lines, arrowheads and other leaders were, the view's own
+  ink was not. `draw.view_ink_crossings` counts what a rung would cross,
+  discounting the ink at the arrow itself, and ranks it with the other
+  ink — so the near end of the same drawn edge, which is the same
+  feature, is taken while it is clear.
+- **A diameter dim's label fell into a callout column** (#33) at exactly
+  the 0.8 mm the engine keeps between its own claims, and printed as the
+  middle line of two other notes. The dim_circles fallback asks for
+  READING ROOM first — a rung that leaves its label 0.4 of a text height
+  clear of every other annotation, and keeps its leader off the view it
+  points into — and takes the old rung only when no such rung exists.
+
+### Added
+
+- **The sheet is composed every way and the best one kept** (#33).
+  Keeping a callout off its own view's ink moves its arrow, and every
+  annotation placed after it settles around the moved one: on a crowded
+  sheet that can trade one long leader for a crossing, or push a callout
+  onto a frame's arrowhead. It also interacts with the extension-line
+  pass of #29 — a callout steered off an extension line may dive across
+  the view instead, while one kept off the view clears the extension
+  line too. So `build_part_sheet` draws every combination of the two and
+  keeps the one that READS best: `draw.sheet_quality`, the LAYOUT
+  CHECK's own count of faults on the finished sheet, then
+  `leader_quality` (crossings, outline runs, other ink, view ink). A tie
+  keeps the earlier pass, and `balance_regresses` holds the same line —
+  a sheet does not become better by being centred. On the project's own
+  set that took four part sheets' crossings of their own views from 66,
+  11, 8 and 1 to 5, 10, 3 and 0 — and the assembly's from 150 to 126,
+  where the balloons moved too — left the sheets it could not improve
+  exactly as they were, and changed nothing else.
+- **The whole dimension is seeded, not the segment crossed** (#33).
+  `crossed_dim_ink` (was `crossed_ext_lines`) returns every segment of
+  any dimension a callout's leader is left crossing — its line and its
+  extension lines alike. Seeded with the one segment it crossed, a
+  callout stepped a rung and landed on the next extension line along,
+  which is the same dimension saying the same thing.
+- **Two faults the check could not see** (#33):
+  - `leader-across-own-view`: a SIZE leader (its label carries `%%c`)
+    that crosses the view it points into three times or more, where the
+    near end of the very edge its arrow sits on would cross two fewer.
+    The alternative is read off the drawn ink, so the check names what
+    moving the arrow would save. A note is never asked: its arrow means
+    the spot it was put on;
+  - `annotation-crowded` at a threshold that follows the text:
+    `max(0.8 mm, 0.4 x the label's own height)`, which on an ordinary
+    sheet is 1.28 mm. Half the leading between the lines of one
+    callout's stack is what two strangers need to read apart. One pair
+    is reported once, not once each way round.
+- **`musa_writer.dimstyle(arrow_type=...)`**: core/properties.hpp's
+  ArrowType — 0 filled (the house style), 1 tick, 2 open, 3 DOT. Only
+  the sheets that need a dot write the extra style, so every other sheet
+  writes the dimstyles it always did.
+
+### Upgrade steps
+
+1. `git -C <your pipeline clone> fetch --tags && git checkout v0.16.0`
+2. `/draw` and read the new findings. Two kinds are new:
+   - **`leader-across-own-view`** names a size callout whose arrow is on
+     the far edge of its feature. The engine moves it where it can; one
+     it cannot move stops /export until a `layout_waivers` entry names
+     it, and the fix the finding suggests is usually a two-word manifest
+     change — `"at": [<the near end>, <the same edge>]`.
+   - **`annotation-crowded`** now fires at 1.28 mm rather than 0.8 mm on
+     a 3.2 mm label. A crowded diameter label is usually cured by making
+     that diameter a callout of its own.
+3. An assembly sheet reports a **`balloon-<pid>`** fault for every part
+   that no view can point at. /draw prints these under `placement:` —
+   they are not findings on the sheet, because the sheet cannot say
+   which ink is which part — and records them per sheet in sheets.json.
+   Give such a part a detail view and list it in the detail's
+   `balloons`, or name a view in `balloon_in`. The balloons themselves
+   move to the view that can point at them, which changes the fan —
+   look at the sheet.
+4. Nothing else moves: a sheet with no crossing to avoid, no crowded
+   label and no balloon with nowhere to land redraws byte for byte.
+
+### Compatibility
+
+Of the four real sets — eleven sslxbt part sheets, the TPE assembly and
+its parts, amogha RES-41-LH-01 and `samples/out/RES-SAMPLE-01` — eleven
+of the sixteen sheets redraw byte for byte, the TPE assembly and the
+sample among them. The five that change are the ones that had the fault:
+four moved a callout's arrow to the near end of its own edge (their
+crossings of their own views falling 8→1, 8→0, 26→23 and 9→8) and one
+moved a diameter label out of a callout column. The set's layout
+findings go from thirteen to eleven, and the two that remain are the two
+the engine could not improve — both now named, with the `at` that would
+cure them. The suite is 731 tests.
+
 ## v0.15.0 — 2026-11-25
 
 Where a leader may not go, and a balloon that says which one it is:

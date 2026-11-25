@@ -74,7 +74,9 @@ detail that the band cannot hold goes there instead of failing the sheet.
   weight computed from the model, parts row).
 - Per assembly: NTS isometric HLR wireframe (or an orthographic view with
   a section, hatched part by part so neighbours can be told apart and
-  leaving shafts, screws and pins uncut), enlarged detail views, one
+  leaving shafts, screws and pins uncut), enlarged detail views — hatched
+  the same way as the section they come from, so a part reads the same in
+  both, and with each letter beside its own circle — one
   circled balloon per part number across the whole sheet — in two columns,
   one each side of the view, when one cannot hold them all; in the view
   its own leader can reach without crossing another; and on the
@@ -110,10 +112,17 @@ detail that the band cannot hold goes there instead of failing the sheet.
   other points — the far end of the drawn edge, or the silhouette line on
   the other side of the same circle — before any crossing is accepted,
   and because the overall dimensions are placed after the callouts, the
-  sheet is composed once more with the extension lines the first pass
-  found. A balloon fan passes over the knee rows whose leaders would meet
-  a sight arrow or disappear under the pictorial, and says so when the
-  column is too short to.
+  sheet is composed again with the dimensions the first pass found, and
+  again with the callouts kept off the ink of their own view — a
+  diameter anchored on the far edge of a cylinder crosses the outline,
+  the centre line and every hidden line on its way out, where the near
+  end of the same edge crosses nothing. Every combination of the two is
+  drawn and the sheet the layout check likes best is the one kept. A balloon
+  fan passes over the knee rows whose leaders would meet a sight arrow or
+  disappear under the pictorial, and says so when the column is too short
+  to; its arrows land on ink that is their own part's and no other's, or
+  on a dot inside that part's own cut area (ISO 6433), and a balloon with
+  neither is reported rather than pointed at the part's axis.
 
 ## Requirements
 
@@ -172,10 +181,13 @@ a leader running along the outline it points at, reaching its feature
 through another view, or crossing a dimension line, an extension line, a
 sight arrow or the pictorial box, a leader through another leader's
 arrowhead (or two arrows landing in one place), a leader running UNDER
-the pictorial, whose stamped image is opaque, a symbol or balloon lying
-on text, a dimension's own line through a label, two annotations too
-close to read apart, a datum box sitting nearer another callout than the
-one it belongs to or on that callout's own line, a callout column so
+the pictorial, whose stamped image is opaque, a size leader that crosses
+the view it points into where the near end of its own feature would not,
+a symbol or balloon lying on text, a dimension's own line through a
+label, two annotations too close to read apart — closer than half the
+leading between the lines of one note — a datum box sitting nearer
+another callout than the one it belongs to or on that callout's own
+line, a callout column so
 narrow the note comes out one word a line, text outside the drawing area
 or on the title block, and — as a warning — two leaders running together
 closer than 2 mm. Each finding names the leader, and a balloon by its own

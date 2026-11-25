@@ -126,7 +126,8 @@ def hatch(loops, pattern: str = "ANSI31", *, scale: float = 1.0,
 def dimstyle(text_height: float, arrow_size: float, *, precision: int = 0,
              name: str = "Standard", color=None,
              ext_offset: float | None = None,
-             ext_extension: float | None = None) -> str:
+             ext_extension: float | None = None,
+             arrow_type: int = 0) -> str:
     """Full 26-token DIMSTYLE (shorter forms silently lose fields).
     color=(r,g,b) sets ALL four color slots explicitly (dim/ext/text/arrow);
     None keeps ByLayer. Both extension-line fields of core/dimension.cpp:189
@@ -134,7 +135,13 @@ def dimstyle(text_height: float, arrow_size: float, *, precision: int = 0,
     `ext_offset` is the gap from the def point to where the extension line
     STARTS (raise it for an ISO 129-1 interrupted extension line) and
     `ext_extension` its overshoot past the dim line (cut it back when a
-    value too wide for its own span would otherwise be printed through)."""
+    value too wide for its own span would otherwise be printed through).
+
+    `arrow_type` is core/properties.hpp's ArrowType: 0 filled triangle
+    (the house style), 1 tick, 2 open, 3 DOT — the terminator ISO 6433
+    asks for on a leader that ends inside the outline of the part it
+    points at, which is where an assembly balloon has to end when the
+    part draws no edge of its own (issue #32)."""
     if color is None:
         cols = "1 255 255 255 " * 4
     else:
@@ -142,7 +149,7 @@ def dimstyle(text_height: float, arrow_size: float, *, precision: int = 0,
         cols = f"0 {r} {g} {b} " * 4
     eo = 0.6 * text_height / 2.5 if ext_offset is None else ext_offset
     ee = 1.25 * text_height / 2.5 if ext_extension is None else ext_extension
-    return (f"DIMSTYLE {n(text_height)} {n(arrow_size)} 0 "
+    return (f"DIMSTYLE {n(text_height)} {n(arrow_size)} {int(arrow_type)} "
             f"{n(eo)} {n(ee)} "
             f"{precision} 1 25 {cols}{name}")
 

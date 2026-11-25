@@ -104,6 +104,17 @@ upstream (/draw, /finalise).
     The check calls it `leader-hidden` and no waiver covers it — if the
     PDF shows a balloon whose leader stops at the pictorial's edge,
     that is the fault, not a plotting artefact.
+    Two more to look for by eye (issues #32, #33): a BALLOON whose arrow
+    lands on a line that belongs to the part NEXT to it, or in the
+    middle of nothing — a balloon that ends in a filled dot inside a
+    hatched area is correct, ISO 6433, and one that ends on an axis is
+    not; and a size leader that crosses its own view to reach a column
+    it could have reached from the near end of the same edge.
+18. **Detail views of an assembly section**: each cut part hatched
+    separately, the same way it is hatched in the section itself, and
+    every detail letter beside its own circle — a letter tied to its
+    circle by a thin line is correct where the region is small
+    (issue #31, #32).
 
 ## Verdict format
 Present the FULL checklist (items 1-8) with per-sheet PASS/FAIL and

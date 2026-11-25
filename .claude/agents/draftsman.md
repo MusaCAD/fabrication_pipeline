@@ -70,3 +70,15 @@ render `pdftoppm -png -r 50` and LOOK at the image before declaring done.
   arrowhead, or pass under the pictorial box — the stamped image is
   opaque, so that much of it is not printed at all. The first two are
   waivable faults; the third is not (issue #29, #30).
+- A SIZE leader leaves its feature by the end nearest its column: one
+  anchored on the far edge crosses the whole view, and the near end of
+  the same drawn edge is the same feature (issue #33). The engine ranks
+  the rungs by it and composes the sheet both ways, keeping the one the
+  layout check likes better.
+- A balloon's arrow lands on ink that is its part's and no other's, or
+  on a DOT inside that part's own cut area (ISO 6433) — never on the
+  instance's centre, which for a tube is its axis. A part no view can
+  point at is reported with its number (issue #32).
+- A detail of an assembly SECTION is hatched part by part, in the
+  section's own colouring, with the thin-cut rule applied again at the
+  detail's scale (issue #31).

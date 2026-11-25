@@ -250,6 +250,17 @@ co-author line to git commits.
     section must not cut along their length — shafts, rods, screws, nuts,
     pins, O-rings — resolved to instance paths and passed to fc_project as
     `section_exempt`, which leaves those parts whole inside the cut.
+    A DETAIL of that section is hatched the same way (issue #31):
+    draw.detail_job carries each group's `instance` through the clip and
+    draw.detail_hatches sends it to assembly_hatches with the SECTION's
+    own colouring, so one part reads the same in both views and the
+    reader can pair them — safe, because clipping to the circle only
+    shrinks the cut areas, so every pair that meets inside it already met
+    in the section. The THIN_SOLID test runs again at the DETAIL's own
+    scale, which is the point of drawing it: a 0.4 mm cut filled solid in
+    the section is hatched at 1:1 in the enlargement. A part sheet's
+    section has one part and no instances, and its details keep the plain
+    ANSI31 hatch, byte for byte.
   - `extent_dims` — WHICH VIEW carries the overall dimensions, and on
     which side of it (issue #30): `"front"` (the default, today's sheet
     exactly), `"section"`, `"none"`, or {view, which: ["w"|"h"],
@@ -272,13 +283,44 @@ co-author line to git commits.
     continuation sheet is made for the details even when the table fits. An assembly detail
     reserves only DETAIL_ASSEMBLY_PAD_MM of clearance: it carries no
     dimensions of its own, only balloons.
+    THE LETTER BELONGS TO ITS OWN CIRCLE (issue #32): it is placed within
+    the ring that circle asks for (DETAIL_LETTER_NEAR_MM, or a third of
+    the radius on a big one). A small region deep inside a view — or one
+    NESTED in another detail's circle, which is where this was found —
+    has nothing free that near, so the same rings are tried again OVER
+    the view, where a letter may sit as a section letter does provided it
+    lands clear of the view's own ink; and only then does the old ladder
+    run, with a thin line TYING the letter to its circle so it still
+    names that region and not the detail it sits beside.
   - BALLOONS: ONE per P.NO. on the whole sheet, never one per instance —
     a part with qty 4 is one balloon. draw.balloon_plan picks the view
     that shows it best (manifest `balloon_in`, else the detail that lists
-    it, else the section, else the front view) and every view's balloons
-    share ONE knee column, so the leaders cannot cross between views. A
-    P.NO. no view shows fails the sheet: the table would claim a part the
-    drawing does not point at.
+    it, else the view whose arrow has something of the part's own to land
+    on) and every view's balloons share ONE knee column, so the leaders
+    cannot cross between views. A P.NO. no view shows fails the sheet:
+    the table would claim a part the drawing does not point at.
+    WHERE THE ARROW MAY LAND (issue #32): ink that is that instance's own
+    and no other's, a cell clear of every neighbour (draw.own_ink_spot);
+    failing that, a DOT inside its own cut area (ISO 6433,
+    draw.cut_area_spots + the "Dot" dimstyle, arrow_type 3), which is the
+    one place on the sheet that is this part and nothing else; failing
+    that, the same ink test again at a quarter of a millimetre. NEVER the
+    instance's bounding-box centre, which for a tube is its axis, inside
+    the part running through it — a thin tube closed in on every side
+    fell back to it in silence and the balloon pointed at the wrong part.
+    A landing that is only a shared edge, or that centre, is a FAULT
+    naming the balloon, with the levers (a detail view, `balloon_in`).
+    /draw prints the engine's own faults under `placement:` and records
+    them per sheet: the finished sheet cannot report this one for
+    itself, since it does not say which ink is which part.
+    The PLAN asks the same question first: the front view used to be
+    taken whenever it HELD the part, so a logger buried in the hull was
+    ballooned on the outside view, which draws none of it;
+    draw.landing_kind ranks the views by what the arrow could land on
+    there, and a `balloon_in` or a detail that lists the part is still
+    kept whatever it costs. A thin cut gets its dot at the deepest point
+    it has: a 0.3 mm wall holds no point a millimetre clear of its walls,
+    and that tube is the part this fallback exists for.
     A balloon leader never crosses a view it does not point into
     (issue #20): every knee is tested against the other views' ink
     (draw.crosses_other_view), and a balloon the section was in the way
@@ -492,6 +534,11 @@ co-author line to git commits.
   lying on the outline it points at is no longer an arrow) and
   `Layout.leader_crossings` the transverse ones. The level knee is still
   tried first, so a leader that was already clear keeps what it had.
+  The dim_circles fallback asks for READING ROOM before it takes a rung
+  (issue #33): its label is a stranger in the callout column, so a rung
+  that leaves it ANNO_READ_FRAC of its own height clear of every other
+  annotation — and keeps its leader off the view it points into — is
+  taken first, and only then the rung it would have taken before.
   A knee also belongs BESIDE its own view (KNEE_BESIDE_MM): stepping
   further lands it in the next view's column, which its leader then has
   to cross. When the first pass leaves a callout with nowhere clean,
@@ -539,13 +586,41 @@ co-author line to git commits.
   them, so the callouts are placed BEFORE the overall dimensions — and
   when a callout chose its knee, the extension lines of the length
   dimensions did not exist. The engine cannot avoid what is not there, so
-  the first pass is what tells it: `draw.crossed_ext_lines` reads those
+  the first pass is what tells it: `draw.crossed_dim_ink` reads those
   segments off the finished layout, build_part_sheet composes ONCE MORE
   with them as ink to keep off (`ext_ahead`, carried through the balance
   loop by `shift_segs`, since seeded ink travels with the view group),
   and the pass that crosses fewer of them wins. On the real sheets that
   moved four callouts — three onto a clean knee and one onto the
-  feature's other edge — and took their crossings to nil.
+  feature's other edge — and took their crossings to nil. The WHOLE of
+  each dimension is seeded, its line and its extension lines alike
+  (issue #33): seeded with the one segment it crossed, a callout stepped
+  a rung and landed on the next one along, which is the same dimension
+  saying the same thing (`_ink_dim` reads the two names as one).
+  ITS OWN VIEW'S INK (issue #33): a diameter anchored on the TOP edge of
+  a cylinder with its column on the right ran diagonally down across the
+  whole view — through the centre line, through the hidden bores — and
+  the strict pass accepted it, because extension lines, arrowheads and
+  other leaders were tested and the view's own ink was not. From the
+  BOTTOM edge at the end nearest the column — the same circle, one of
+  `feature_edge_anchors` — it crosses nothing. `draw.view_ink_crossings`
+  counts what a rung would cross, discounting the ink at the arrow
+  itself (the feature it names), and ranks it with the other ink.
+  It is ANOTHER COMPOSITION, not a new rule in the first: stepping one
+  arrow moves every callout placed after it, which on a crowded sheet
+  trades a long leader for a crossing. And it INTERACTS with the seeded
+  pass above — a callout steered off an extension line may dive across
+  the view instead, while one kept off the view clears the extension
+  line too — so build_part_sheet draws every combination of the two
+  (seeds on/off x view-ink on/off) and keeps the one that READS best:
+  `draw.sheet_quality`, the layout check's own count of faults on the
+  finished sheet, then `leader_quality` (crossings, outline runs, other
+  ink, view ink). A tie keeps the earlier pass, so a sheet nothing
+  improves is the sheet it always was — and `balance_regresses` holds
+  the same line, since a sheet does not become better by being centred.
+  On the project's own set that took four part sheets' crossings of
+  their own views from 66, 11, 8 and 1 to 5, 10, 3 and 0, and the
+  assembly's from 150 to 126, and changed nothing else.
 - THE LAYOUT CHECK (issue #22, src/layout_check.py, run inside /draw):
   what the manifest states is the value check's business; this one reads
   how the sheet LOOKS, off the finished .musa, because the engine only
@@ -609,6 +684,26 @@ co-author line to git commits.
                                   may be in plain distance. Only a box
                                   sharing nobody's line is judged by
                                   distance (#27's rule).
+  AND THIS ROUND (issue #33):
+    leader-across-own-view        a SIZE leader (its label carries %%c)
+                                  that crosses the view it points into
+                                  LONG_WAY_CROSS times or more, where the
+                                  near end of the very edge its arrow
+                                  sits on — the same feature, found off
+                                  the drawn ink — crosses LONG_WAY_SAVE
+                                  fewer. A note is never asked: its
+                                  arrow means the spot it was put on;
+    annotation-crowded            now `max(CROWD_MM, CROWD_FRAC x the
+                                  label's own height)`, which on an
+                                  ordinary sheet is 1.28 mm rather than
+                                  0.8: the diameter dim's %%c75.50 that
+                                  fell into a callout column sat at
+                                  exactly the clearance the engine keeps
+                                  between claims and printed as the
+                                  middle line of their note. Half the
+                                  leading of a callout's own stack is
+                                  what two strangers need to read apart,
+                                  and one pair is reported once.
 - SIDE-BY-SIDE SECTIONS (issue #13): with `projection: right|left` and
   leaders on BOTH views, each view gets its OWN callout column — the
   inner view's in the inter-view gap, the outer view's outside the group

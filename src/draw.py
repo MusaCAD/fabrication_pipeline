@@ -899,8 +899,17 @@ def detail_job(parent: dict, spec: dict, k: float) -> dict:
             continue
         sc = lambda lp: [[(x - cen[0]) * k, (y - cen[1]) * k] for x, y in lp]
         holes = [clip_loop_to_circle(h, cen, r) for h in g.get("holes", [])]
-        groups.append({"outer": sc(outer),
-                       "holes": [sc(h) for h in holes if len(h) >= 3]})
+        grp = {"outer": sc(outer),
+               "holes": [sc(h) for h in holes if len(h) >= 3]}
+        # WHOSE cut area this is, carried through the clip (issue #31): an
+        # assembly detail hatches each part as the section does, and
+        # without the name every group here was one unnamed instance and
+        # took one style, so two parts that meet inside the circle read
+        # as one solid. A part sheet's section has no instances and the
+        # key stays absent, exactly as it was.
+        if g.get("instance"):
+            grp["instance"] = g["instance"]
+        groups.append(grp)
     rk = r * k
     return {"visible": xf(parent.get("visible", [])),
             "hidden": xf(parent.get("hidden", [])),
@@ -1012,11 +1021,27 @@ def detail_sheet(spec) -> int:
         return 1
 
 
+DETAIL_LETTER_NEAR_MM = 2.0     # how far past its own circle a detail's
+                                # letter may sit and still read as its
+
+
 def detail_marker(ctx, layout, spec, parent_job, parent_off, sheet=None):
     """The circle round the region on the PARENT view, with its letter.
 
     The circle is ink laid over the view BY DESIGN (it encloses features),
-    so it is not collision-tested; the letter is, like every other label."""
+    so it is not collision-tested; the letter is, like every other label.
+
+    And the letter has to stay NEXT TO its own circle (issue #32). A
+    letter is placed clear of the view's claim, which a big circle at the
+    edge of a view leaves room for — but a small one deep inside it, or
+    one NESTED in another detail's circle, has nothing free anywhere near,
+    and the ladder walked out to its last rung: a 1.2 mm circle with its
+    letter 7 mm away, in a row with the letter of the detail it sits
+    inside, naming neither. So a spot further out than the circle's own
+    ring is taken only when the letter can be put nowhere nearer; before
+    that, the near rings are tried again OVER the view, where a letter
+    may go as a section letter does, as long as it lands clear of the
+    view's own drawn ink."""
     cen = spec["center"]
     r = float(spec["radius"])
     label = str(spec.get("label", "B"))
@@ -1041,9 +1066,51 @@ def detail_marker(ctx, layout, spec, parent_job, parent_off, sheet=None):
                           (px if math.cos(a) > 0 else px - tw),
                           py - h / 2 if abs(math.sin(a)) < 0.3 else
                           (py if math.sin(a) > 0 else py - h)))
-    rect = layout.place(cands, tw, h, f"detail-letter-{label}")
+    name = f"detail-letter-{label}"
+    # "next to its circle": within the ring the circle itself asks for —
+    # a couple of millimetres, or a third of its radius on a big one
+    near = r + gap + max(ctx.mm(DETAIL_LETTER_NEAR_MM), 0.35 * r)
+
+    def beside(rect):
+        return _seg_rect_dist((cx, cy), (cx, cy), rect) <= near
+
+    rect = layout.place([c for c in cands if beside((c[0], c[1],
+                                                     c[0] + tw, c[1] + h))],
+                        tw, h, name)
+    if rect is None:
+        layout.unresolved.pop()
+        # over the view, but in a gap in its ink: the letter belongs to
+        # the region it circles, and a view's claim is a box, not its ink
+        ink = prim_segments(parent_job.get("visible", []), parent_off) \
+            + prim_segments(parent_job.get("hidden", []), parent_off)
+        for x, y in cands:
+            cand = (x, y, x + tw, y + h)
+            if not beside(cand) or not layout.inside(cand):
+                continue
+            if layout.collides(cand, ignore=("view",)):
+                continue
+            if any(_seg_rect_dist(a, b, cand) < ctx.mm(0.5) for a, b in ink):
+                continue
+            layout.claim(cand, name)
+            rect = cand
+            break
+    tie = False
+    if rect is None:
+        # nowhere near it is free — a small circle deep inside a crowded
+        # view. The letter then goes where it can be read and a thin line
+        # TIES it to its circle, so it still names that region and not
+        # the detail it happens to sit beside
+        rect = layout.place(cands, tw, h, name)
+        tie = rect is not None
     if rect is None:
         return recs                       # already recorded as unresolved
+    if tie:
+        # from the circle's edge to the side of the letter it faces
+        lx = min(max(cx, rect[0]), rect[2])
+        ly = min(max(cy, rect[1]), rect[3])
+        ang = math.atan2(ly - cy, lx - cx)
+        recs.append(mw.line((cx + r * math.cos(ang), cy + r * math.sin(ang)),
+                            (lx, ly), mw.P_ANNO))
     recs.append(mw.mtext((rect[0], rect[1]), label, h, attach=3,
                          props=mw.P_ANNO))
     return recs
@@ -1140,6 +1207,9 @@ class Layout:
         # leader has no business crossing either
         self.keep_off: list[tuple] = []
         self.unresolved: list[str] = []
+        # the views' own drawn ink, set by the composer: what a finished
+        # pass is weighed against when two of them are compared (#33)
+        self.geom: list = []
         # placed, but not as it should be: a leader with nowhere clean to
         # go is still DRAWN — a dropped callout tells the vendor nothing,
         # while a crossing one tells them something imperfectly — and the
@@ -1398,6 +1468,26 @@ def dim_style_index(ctx, ext_offset=EXT_OFFSET, ext_extension=EXT_EXTENSION,
                         ext_extension=ctx.mm(ext_extension)))
         if abs(lfac - 1.0) > 1e-9:
             ctx.dimunits.append(mw.dimunits(idx, lfac))
+        ctx._dimstyle_index[key] = idx
+    return idx
+
+
+def dot_style_index(ctx):
+    """Index of a DIMSTYLE whose leader ends in a filled DOT instead of an
+    arrowhead (issue #32).
+
+    ISO 6433: a leader that ends INSIDE the outline of the part it refers
+    to ends in a dot, not an arrow — which is where a balloon has to end
+    when the part shares every edge it draws. The style is otherwise the
+    house one, and it is only created on the sheets that use it, so every
+    other sheet writes the dimstyles it always did."""
+    key = ("dot",)
+    idx = ctx._dimstyle_index.get(key)
+    if idx is None:
+        idx = len(ctx.dimstyles)
+        ctx.dimstyles.append(
+            mw.dimstyle(ctx.mm(3.0), ctx.mm(2.5), color=(255, 0, 255),
+                        name="Dot", arrow_type=3))
         ctx._dimstyle_index[key] = idx
     return idx
 
@@ -1784,6 +1874,35 @@ def leader_runs_along(ctx, geom, tip, knee) -> float:
     return worst
 
 
+VIEW_INK_OWN_MM = 2.5       # ink this near the arrow is the feature's own
+# Two annotations closer than this FRACTION of their text height read as
+# one block: the lines of one callout's own stack stand 0.8 of a height
+# apart (place_callouts' 1.8h pitch), so a stranger nearer than half of
+# that is read as one of them (issue #33).
+ANNO_READ_FRAC = 0.4
+
+
+def view_ink_crossings(ctx, segs, tip, knee) -> int:
+    """How many drawn lines of its OWN view this leader crosses on its way
+    out, not counting the ink at the arrow itself (issue #33).
+
+    A leader that leaves its feature through the shortest way out crosses
+    the silhouette it comes from and nothing else. One that starts on the
+    far side of the part — a diameter anchored on the TOP edge with its
+    column on the right — crosses the whole view: the outline, the centre
+    line and every hidden line between, and arrives saying that it points
+    at all of them. That is what this counts, so a rung from the feature's
+    near edge is preferred while one exists."""
+    n = 0
+    own = ctx.mm(VIEW_INK_OWN_MM)
+    for a, b in segs:
+        if _seg_pt_dist(a, b, tip) <= own:
+            continue
+        if _segs_cross(tip, knee, a, b, 0.0):
+            n += 1
+    return n
+
+
 def _claim_leader_ink(ctx, layout, tip, knee, label):
     """Claim a thin corridor of small rects along a leader's tip->knee
     segment (sampled — a diagonal's single bbox would over-claim) so later
@@ -2073,35 +2192,52 @@ def dim_circles(ctx, layout, job, off, suppress=(), limit=4, lfac=1.0,
             # the near column is taken, as a callout's does (issue #18:
             # one column of knees is not enough once a leader may not
             # cross another)
-            for kdx, dy in ((kdx, dy)
-                            for kdx in (8.0, 16.0, 24.0)
-                            for dy in (8.0, -8.0, 14.0, -14.0, 20.0, -20.0,
-                                       26.0, -26.0, 0.0)):
-                kx = vrect[2] + ctx.mm(kdx)
-                ky = cy + ctx.mm(dy)
-                # the LEADER's label sits with its BASELINE on the knee
-                ink = mw.leader_text_ink((kx, ky), label, h, ctx.mm(2.5))
-                ang = math.atan2(ky - cy, kx - cx)
-                tip = (cx + c["r"] * math.cos(ang),
-                       cy + c["r"] * math.sin(ang))
-                if geom and leader_runs_along(ctx, geom, tip,
-                                              (kx, ky)) > COLLINEAR_OK:
-                    continue             # along an outline (issue #18)
-                if layout.leader_crossing(tip, (kx, ky)):
-                    continue
-                if layout.crossing_ink(tip, (kx, ky)):
-                    continue             # a dim line, a sight arrow, the
-                                         # pictorial box (issue #25)
-                r = layout.place([(ink[0], ink[1])], ink[2] - ink[0],
-                                 ink[3] - ink[1], f"dim-{label}")
-                if r is not None:
-                    recs.append(mw.leader(tip, (kx, ky), label, h,
-                                     props=mw.P_ANNO))
-                    _claim_leader_ink(ctx, layout, tip, (kx, ky),
-                                      f"dim-{label}")
-                    rects[key] = r
-                    placed = r
+            # ... and READING room first (issue #33): this label is a
+            # stranger in the callout column, and dropped between two
+            # notes at the bare 0.8 mm the engine keeps between claims it
+            # reads as a line of whichever it is nearest — the column's
+            # own notes stand 2.5 mm apart. So a rung that leaves it
+            # ANNO_READ_FRAC of its own height clear of every other
+            # annotation is taken first, and one that crosses the view it
+            # points into is passed over while a cleaner one is left.
+            for strict in (True, False):
+                if placed is not None:
                     break
+                for kdx, dy in ((kdx, dy)
+                                for kdx in (8.0, 16.0, 24.0)
+                                for dy in (8.0, -8.0, 14.0, -14.0, 20.0,
+                                           -20.0, 26.0, -26.0, 0.0)):
+                    kx = vrect[2] + ctx.mm(kdx)
+                    ky = cy + ctx.mm(dy)
+                    # the LEADER's label sits with its BASELINE on the knee
+                    ink = mw.leader_text_ink((kx, ky), label, h, ctx.mm(2.5))
+                    ang = math.atan2(ky - cy, kx - cx)
+                    tip = (cx + c["r"] * math.cos(ang),
+                           cy + c["r"] * math.sin(ang))
+                    if geom and leader_runs_along(ctx, geom, tip,
+                                                  (kx, ky)) > COLLINEAR_OK:
+                        continue         # along an outline (issue #18)
+                    if layout.leader_crossing(tip, (kx, ky)):
+                        continue
+                    if layout.crossing_ink(tip, (kx, ky)):
+                        continue         # a dim line, a sight arrow, the
+                                         # pictorial box (issue #25)
+                    if strict:
+                        if layout.anno_clearance(ink) < ANNO_READ_FRAC * h:
+                            continue
+                        if geom and view_ink_crossings(ctx, geom, tip,
+                                                       (kx, ky)):
+                            continue
+                    r = layout.place([(ink[0], ink[1])], ink[2] - ink[0],
+                                     ink[3] - ink[1], f"dim-{label}")
+                    if r is not None:
+                        recs.append(mw.leader(tip, (kx, ky), label, h,
+                                         props=mw.P_ANNO))
+                        _claim_leader_ink(ctx, layout, tip, (kx, ky),
+                                          f"dim-{label}")
+                        rects[key] = r
+                        placed = r
+                        break
         if placed is not None:
             del layout.unresolved[mark:]
         else:
@@ -2383,7 +2519,7 @@ def fan_order(ctx, callouts, view_jobs, offs, by_view=True):
 
 
 def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
-                   limits=None, geom=(), ext_ahead=()):
+                   limits=None, geom=(), ext_ahead=(), avoid_view_ink=False):
     """Leader callouts (fit specs, hole callouts) landing in the right-hand
     band. A callout carries either a single "text" or a "lines" stack
     (ASME Y14.5 hole note: optional per-line "sym" prefix glyph, cbore /
@@ -2414,6 +2550,8 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
     h = ctx.mm(3.2)
     recs, rects, suppress, lands = [], {}, {}, {}
     anchors: list = []
+    view_ink: dict = {}      # each view's own drawn ink, measured once
+
     for co in callouts:
         spec_lines = co.get("lines") or [{"text": co["text"]}]
         lines = spec_lines
@@ -2434,6 +2572,15 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
         # stated one leaves the leader clean (issue #29)
         here = [anchor]
         mnb, mxb = job["bounds"]
+
+        def own_ink(view=view, job=job):
+            """This view's drawn ink, visible and hidden."""
+            if view not in view_ink:
+                view_ink[view] = (
+                    prim_segments(job.get("visible", []), offs[view])
+                    + prim_segments(job.get("hidden", []), offs[view]))
+            return view_ink[view]
+
         s = 1.2 * h                      # prefix glyph cell side
         gap = 0.45 * h                   # glyph-to-text gap
         lh = 1.8 * h                     # line pitch (glyph cells breathe)
@@ -2509,11 +2656,19 @@ def place_callouts(ctx, layout, callouts, view_jobs, offs, reserve=None,
             ext = layout.crosses_extension(tip, knee) or any(
                 _segs_cross(tip, knee, a, b, 0.0) for a, b in ext_ahead)
             clash = layout.arrow_clash(tip, knee)
+            # ... and its OWN VIEW's ink is ranked the same way (issue
+            # #33): a leader that dives across the view, through the
+            # centre line and the hidden bores, ranks below one that
+            # leaves the feature by the near edge, and the strict pass
+            # turns it down while any rung or any other point of the same
+            # feature avoids it
+            vink = (view_ink_crossings(ctx, own_ink(), tip, knee)
+                    if avoid_view_ink else 0)
             bad = along > COLLINEAR_OK or crossed or over
             return ((0 if not bad else 1) if beside else 2,
                     len(crossed) + (1 if over else 0),
                     round(along / ctx.mm(1.0), 1),
-                    (1 if ext else 0) + (1 if clash else 0)), \
+                    (1 if ext else 0) + (1 if clash else 0) + vink), \
                 along, (crossed[0] if crossed else
                         (f"over:{over}" if over else
                          (f"head:{clash}" if clash else None)))
@@ -4527,20 +4682,95 @@ def _cells_of(segs, cell):
     return out
 
 
+BALLOON_DOT_INSET_MM = 0.9      # how far inside its own cut area a dot
+                                # terminator sits, printed
+
+
+def cut_area_spots(ctx, job, off, name):
+    """Points well inside this instance's OWN cut area, as (x, y) in sheet
+    coordinates (issue #32).
+
+    A part closed in on every side — a thin tube against the bore around
+    it and the shaft inside it — draws no edge of its own, and a balloon
+    has nowhere to put its arrow. In a SECTION it still has an area of its
+    own: the hatch groups carry the instance they were cut from. ISO 6433
+    ends such a leader with a DOT inside the outline, which is what the
+    sheet draws.
+
+    The candidates are a grid over each group, inside the outer loop and
+    outside every island, kept by how far they stand from the boundary:
+    the dot's own clearance where the area is wide enough for it, and
+    otherwise the DEEPEST points the area has. A cut 0.3 mm thick holds
+    no point a millimetre clear of its walls, and that thin tube is
+    exactly the part this fallback exists for — the dot is centred in
+    its own hatching and says which part it means, which is what the
+    reader needs. Measured once per view and kept on the job: the fan
+    asks for a landing many times over."""
+    cache = job.setdefault("_cut_spots", {})
+    key = (name, round(off[0], 6), round(off[1], 6))
+    if key in cache:
+        return cache[key]
+    inset = ctx.mm(BALLOON_DOT_INSET_MM)
+    out: list = []
+    deepest: list = []           # (clearance, point), when none is clear
+    for g in job.get("hatch_groups", []):
+        if g.get("instance") != name:
+            continue
+        outer = [(x + off[0], y + off[1]) for x, y in g["outer"]]
+        holes = [[(x + off[0], y + off[1]) for x, y in h]
+                 for h in g.get("holes", [])]
+        edges = [(outer[i], outer[(i + 1) % len(outer)])
+                 for i in range(len(outer))]
+        for h in holes:
+            edges += [(h[i], h[(i + 1) % len(h)]) for i in range(len(h))]
+        x0, y0, x1, y1 = _loop_rect(outer)
+        # a grid fine enough to find the middle of a thin wall and coarse
+        # enough to stay cheap: at least four rows across the narrow way,
+        # never more than two dozen either way
+        nx = min(24, max(4, int((x1 - x0) / inset)))
+        ny = min(24, max(4, int((y1 - y0) / inset)))
+        for i in range(nx + 1):
+            for j in range(ny + 1):
+                p = (x0 + (x1 - x0) * i / nx, y0 + (y1 - y0) * j / ny)
+                if not _point_in_poly(outer, p):
+                    continue
+                if any(_point_in_poly(h, p) for h in holes):
+                    continue
+                clear = min(_seg_pt_dist(a, b, p) for a, b in edges)
+                if clear >= inset:
+                    out.append(p)
+                elif clear > 0.0:
+                    deepest.append((clear, p))
+    if not out and deepest:
+        best = max(c for c, _p in deepest)
+        out = [p for c, p in deepest if c >= best * 0.8]
+    cache[key] = out
+    return out
+
+
 def balloon_landing(ctx, asm_job, off, k, knee):
-    """Where balloon k's arrow should land: a point on ASSEMBLY-VISIBLE ink
-    that lies on instance k's own projected edges and on NO other instance's
-    — so the terminator sits on an edge that belongs to that part alone —
-    snapped exactly onto that edge, and chosen nearest the knee so the
-    leader is short. Falls back to the instance centre if the parts share
-    every visible edge. (Round-7 DEF-C: landing on the projected bbox centre
-    left both arrows floating in the bore region, reading as transposed.)"""
+    """Where balloon k's arrow lands — the point alone, for the orderings
+    that only need to know where the fan points (balloons_land says what
+    kind of terminator it is)."""
+    return balloons_land(ctx, asm_job, off, k, knee)[0]
+
+
+BALLOON_INK_CELL_MM = 0.8       # ink within a cell of another part's is
+BALLOON_FINE_CELL_MM = 0.25     # not this part's alone; the second pass
+                                # asks the same question a quarter of a
+                                # millimetre at a time
+
+
+def own_ink_spot(ctx, asm_job, off, k, knee, cell_mm):
+    """The point nearest `knee` on ASSEMBLY-VISIBLE ink that lies on
+    instance k's own projected edges and NOT within a cell of any other
+    instance's — the ink that is this part and nothing else, to the
+    tolerance `cell_mm` states. None when it draws no such ink."""
     insts = asm_job.get("instances", [])
     own = prim_segments(insts[k].get("edges", []), off)
     if not own:
-        c = insts[k]["center"]
-        return (c[0] + off[0], c[1] + off[1])
-    cell = ctx.mm(0.8)
+        return None
+    cell = ctx.mm(cell_mm)
     own_cells = _cells_of(own, cell)
     other_cells = set()
     for j, inst in enumerate(insts):
@@ -4563,8 +4793,7 @@ def balloon_landing(ctx, asm_job, off, k, knee):
             if bestd is None or d < bestd:
                 best, bestd = p, d
     if best is None:
-        c = insts[k]["center"]
-        return (c[0] + off[0], c[1] + off[1])
+        return None
     # snap exactly onto the owning edge
     snap, sd = best, None
     for a, b in own:
@@ -4577,6 +4806,58 @@ def balloon_landing(ctx, asm_job, off, k, knee):
         if sd is None or d < sd:
             snap, sd = q, d
     return snap
+
+
+def balloons_land(ctx, asm_job, off, k, knee):
+    """Where balloon k's terminator goes, and what KIND it is.
+
+    First choice: ink that is instance k's own and no other's, a cell's
+    width clear of every neighbour, nearest the knee so the leader is
+    short ("edge").
+
+    A part closed in on every side has no such ink. In a section it still
+    has an AREA of its own, so the leader ends in a DOT inside it
+    ("area", ISO 6433: a leader that ends within the outline of the thing
+    it names ends in a dot). That is the one place on the sheet which is
+    this part and nothing else.
+
+    Failing that, the same ink test again at a quarter of a millimetre:
+    a part whose own edge runs a hair from its neighbour's is still drawn
+    there, and an arrow on it is a great deal better than the next
+    fallback.
+
+    And if the view draws nothing of this part at all, the landing is its
+    own (shared) edge, or last of all the instance centre — which for a
+    tube is its AXIS, a point inside the part through it. Both are
+    reported by the caller as a fault naming the balloon (issue #32); the
+    sheet used to take that centre in silence."""
+    insts = asm_job.get("instances", [])
+    own = prim_segments(insts[k].get("edges", []), off)
+    if not own:
+        c = insts[k]["center"]
+        return (c[0] + off[0], c[1] + off[1]), "centre"
+    spot = own_ink_spot(ctx, asm_job, off, k, knee, BALLOON_INK_CELL_MM)
+    if spot is not None:
+        return spot, "edge"
+    spots = cut_area_spots(ctx, asm_job, off, insts[k].get("name"))
+    if spots:
+        return min(spots, key=lambda p: math.hypot(p[0] - knee[0],
+                                                   p[1] - knee[1])), "area"
+    spot = own_ink_spot(ctx, asm_job, off, k, knee, BALLOON_FINE_CELL_MM)
+    if spot is not None:
+        return spot, "edge"
+    # its own edges, shared as they are, still lie ON the part — the axis
+    # does not. Reported either way.
+    here, hd = None, None
+    for a, b in own:
+        for p in (a, b, ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)):
+            d = math.hypot(p[0] - knee[0], p[1] - knee[1])
+            if hd is None or d < hd:
+                here, hd = p, d
+    if here is not None:
+        return here, "shared"
+    c = insts[k]["center"]
+    return (c[0] + off[0], c[1] + off[1]), "centre"
 
 
 BALLOON_TEXT_MM = 3.5            # P.NO. height; the circle is 1.4 x it
@@ -4956,7 +5237,11 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
             next_y = min(rows[rank], next_y)
         for dy in [4.0 * step for step in range(0, 25)]:
             ky = next_y - ctx.mm(dy)
-            tip = fixed.get(i) or balloon_landing(ctx, job, o, k, (kx, ky))
+            # the KIND of landing is a property of the part — whether it
+            # draws ink of its own at all — so it reads the same from any
+            # knee, including the one a split fan fixed it from
+            spot, kind = balloons_land(ctx, job, o, k, (kx, ky))
+            tip = fixed.get(i) or spot
             across = crosses_other_view(tip, (kx, ky), inks, job) \
                 if inks else None
             if across:
@@ -4980,8 +5265,12 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
                 layout.unresolved.pop()
             if r is not None:
                 # leader with empty text (arrow + line), then the circled
-                # item number — standard balloon style
-                recs.append(mw.leader(tip, (kx, ky), "", h, props=mw.P_ANNO))
+                # item number — standard balloon style. A leader that ends
+                # INSIDE the part's own cut area ends in a dot instead
+                # (ISO 6433, issue #32)
+                recs.append(mw.leader(tip, (kx, ky), "", h, props=mw.P_ANNO,
+                                      style=(dot_style_index(ctx)
+                                             if kind == "area" else 0)))
                 _claim_leader_ink(ctx, layout, tip, (kx, ky),
                                   f"balloon-{pid}-{rank}")
                 recs.append(mw.circle((kx + sgn * brad, ky), brad,
@@ -4990,6 +5279,22 @@ def balloons_fan(ctx, layout, asm_job, off, items, start_y=None,
                                          mw.P_ANNO))
                 next_y = ky - 2 * brad - ctx.mm(2.5 if dense else 4.0)
                 placed = r
+                if kind in ("shared", "centre"):
+                    # nowhere on this view is this part and nothing else:
+                    # the arrow is on ink it shares with its neighbour, or
+                    # (worse) on the instance's own centre, which for a
+                    # tube is its axis — inside the part through it
+                    layout.faults.append(
+                        f"balloon-{pid}: this view draws no ink that is "
+                        "this part's alone"
+                        + (" and it is not cut in the section, so the "
+                           "arrow has nothing of its own to land on"
+                           if kind == "centre" else
+                           ", so its arrow lands on an edge it shares "
+                           "with its neighbour")
+                        + " — draw that region as a detail view and "
+                          "balloon the part there, or point the balloon "
+                          "at a view that shows it (`balloon_in`)")
                 why = knee_spoilt(ctx, tip, (kx, ky), step_off, hide)
                 if why:
                     # fan_rows could not skip this row — the column is not
@@ -5062,14 +5367,21 @@ def hatch_styles_by_instance(groups, clearance):
     return colour
 
 
-def assembly_hatches(ctx, sec_job, s_off):
+def assembly_hatches(ctx, sec_job, s_off, styles=None):
     """Section hatch for an ASSEMBLY: one hatch per cut part, neighbours
-    distinguished, very thin cuts filled solid. Returns (records, report)."""
+    distinguished, very thin cuts filled solid. Returns (records, report).
+
+    `styles` is a colouring already decided elsewhere — the SECTION's own,
+    handed to a detail view of it (issue #31), so one part is hatched the
+    same way in both and the reader pairs them by eye. It is safe for the
+    detail as well: clipping to the circle only shrinks the cut areas, so
+    every pair that meets inside it already met in the section."""
     groups = sec_job.get("hatch_groups", [])
     if not groups:
         return [], {}
     ox, oy = s_off
-    styles = hatch_styles_by_instance(groups, ctx.mm(0.5))
+    if styles is None:
+        styles = hatch_styles_by_instance(groups, ctx.mm(0.5))
     thin = ctx.mm(THIN_SOLID_MM)
     recs, solid = [], []
     for g in groups:
@@ -5090,16 +5402,56 @@ def assembly_hatches(ctx, sec_job, s_off):
                   "solid_filled": sorted(set(solid))}
 
 
+def detail_hatches(ctx, job, off, styles=None):
+    """Hatch a DETAIL view's cut areas (issue #31).
+
+    A detail of an assembly SECTION carries the instances its groups came
+    from, so it is hatched the way the section is: one hatch per cut part,
+    in the SECTION's own colouring, and the THIN_SOLID test applied again
+    — at the detail's own scale, which is the point of drawing it. A
+    region filled solid in the section because it printed 0.4 mm thick is
+    hatched here, where it prints 2 mm thick.
+
+    A part sheet's section has one part and no instances; its details keep
+    the plain ANSI31 hatch, byte for byte. Returns (records, report)."""
+    if any(g.get("instance") for g in job.get("hatch_groups", [])):
+        return assembly_hatches(ctx, job, off, styles=styles)
+    return section_hatches(ctx, job, off), {}
+
+
 # ------------------------------------------------------ assembly balloons
 
-def balloon_plan(m, views, id_by_path):
+LANDING_RANK = {"edge": 0, "area": 1, "shared": 2, "centre": 3}
+
+
+def landing_kind(ctx, job, off, k):
+    """What kind of terminator instance k can have in this view — ink of
+    its own ("edge"), its own cut area ("area"), a shared edge, or
+    nothing but its centre. The kind does not depend on the knee, so any
+    reference point reads the same (issue #32)."""
+    if ctx is None or job is None:
+        return "edge"
+    mxb = job["bounds"][1]
+    return balloons_land(ctx, job, off, k,
+                         (mxb[0] + off[0], mxb[1] + off[1]))[1]
+
+
+def balloon_plan(m, views, id_by_path, ctx=None, offs=None):
     """Which view balloons each part number — one balloon per P.NO. on the
     whole sheet (issue #5).
 
     A part is ballooned in the view where it reads best: the manifest's
     `balloon_in` if it says, else the detail view that lists it (small
     parts are put in a detail precisely so they can be ballooned there),
-    else the section when the part is cut there, else the main view.
+    else the view that can actually point at it.
+
+    That last test is the part the sheet used to get wrong (issue #32):
+    the front view was taken whenever it HELD the part, whether or not it
+    draws any of it, so a logger buried in the hull was ballooned on the
+    outside view, where its arrow had nothing of its own to land on and
+    fell back to the instance's centre — a point inside the part in front
+    of it. The views are ranked by what the arrow can land on there, best
+    first, and the manifest's own choice is still kept whatever it costs.
     """
     asm = m.get("assembly_sheet") or {}
     forced = {str(k): v for k, v in (asm.get("balloon_in") or {}).items()}
@@ -5112,11 +5464,20 @@ def balloon_plan(m, views, id_by_path):
         pid = str(part["part_id"])
         want = forced.get(pid) or in_detail.get(pid)
         order = ([want] if want else []) + ["front", "section"]
-        for view in order:
+        cands = []
+        for rank, view in enumerate(order):
             k = instance_index(views.get(view), part["part_id"], id_by_path)
-            if k is not None:
-                plan.setdefault(pid, (view, k))
+            if k is None:
+                continue
+            if want and view == want:
+                cands = [(0, rank, view, k)]   # the manifest said so
                 break
+            cands.append((LANDING_RANK.get(
+                landing_kind(ctx, views.get(view), (offs or {}).get(
+                    view, (0.0, 0.0)), k), 0), rank, view, k))
+        if cands:
+            _kind, _rank, view, k = min(cands)
+            plan[pid] = (view, k)
     return plan
 
 
@@ -5608,9 +5969,10 @@ def shift_segs(segs, dx):
     return [((a[0] + dx, a[1]), (b[0] + dx, b[1])) for a, b in segs]
 
 
-def crossed_ext_lines(layout):
-    """The extension lines a CALLOUT's leader is left crossing on the
-    finished sheet (issue #29).
+def crossed_dim_ink(layout):
+    """The dimension ink a CALLOUT's leader is left crossing on the
+    finished sheet — a dimension LINE or an extension line (issues #29,
+    #33).
 
     Standard practice puts the dimension columns nearest the view and the
     leader notes outboard of them, so the callouts are placed first and
@@ -5618,14 +5980,78 @@ def crossed_ext_lines(layout):
     its knee, the extension lines of the length dimensions were not on
     the sheet yet. The engine cannot avoid what is not there, so the
     first pass is what tells it: these segments go back in as ink to
-    avoid, and the sheet is composed once more."""
-    out = []
+    avoid, and the sheet is composed once more.
+
+    The WHOLE of each dimension goes back, line and extension lines
+    alike, not only the segment that was crossed (issue #33): seeded with
+    one extension line, a callout stepped one rung and crossed the next
+    one along, which is the same dimension saying the same thing."""
+    ink = [(a, b, _ink_dim(w))
+           for a, b, w in list(layout.ext_lines) + list(layout.dim_lines)]
+    names = set()
     for tip, knee, lab in layout.leaders:
         if not str(lab).startswith(("callout-", "dim-")):
             continue
-        out += [(a, b) for a, b, _w in layout.ext_lines
-                if _segs_cross(tip, knee, a, b, 0.0)]
-    return out
+        names |= {w for a, b, w in ink if _segs_cross(tip, knee, a, b, 0.0)}
+    return [(a, b) for a, b, w in ink if w in names]
+
+
+def _ink_dim(what) -> str:
+    """Which DIMENSION a piece of claimed ink belongs to: its line and its
+    extension lines are recorded under names of their own, and they are
+    one dimension to a leader that has to keep off it."""
+    s = str(what)
+    for pre in ("an extension line of ", "the dimension "):
+        if s.startswith(pre):
+            return s[len(pre):]
+    return s
+
+
+def sheet_quality(ctx, layout):
+    """How this composition READS, smallest best (issue #33).
+
+    The layout check is the project's own answer to that question, and it
+    reads the finished sheet rather than the engine's opinion of it — so
+    when two compositions are weighed against each other, it is what they
+    are weighed by: how many faults each one would be reported for, and
+    then how much of the drawing their leaders cross. Keeping a callout
+    off its own view's ink moves its arrow and every annotation placed
+    after it settles around the moved one, which on a crowded sheet can
+    cost more than it saves."""
+    found = layout_check.check_sheet(
+        ctx.render(), ctx.sheet_area, ctx.num / ctx.den,
+        table_band=getattr(ctx, "_table_band", None),
+        boxes=[b for b in (getattr(ctx, "_pictorial_box", None),) if b],
+        blocks=getattr(ctx, "blocks", ()))
+    return (len(layout_check.faults(found)), leader_quality(layout))
+
+
+def leader_quality(layout):
+    """How well a finished composition's LEADERS read, smallest best
+    (issue #33).
+
+    Two leaders that cross say the wrong thing about the part, so they
+    come first; then a leader riding an outline, then one across ink that
+    belongs to something else — a dimension line, the cutting plane's
+    sight arrows, the pictorial box — and last the drawing it crosses on
+    its way out. Keeping a callout off its own view's ink moves its
+    arrow, every later callout places itself around the moved one, and on
+    a crowded sheet that can trade one long leader for a crossing. So the
+    two compositions are drawn and the better one is kept, by this."""
+    mine = [(t, k) for t, k, lab in layout.leaders
+            if str(lab).startswith(("callout-", "dim-"))]
+    crossings = sum(1 for i, (t1, k1) in enumerate(mine)
+                    for t2, k2 in mine[i + 1:]
+                    if _segs_cross(t1, k1, t2, k2, 0.0))
+    other = list(layout.dim_lines) + list(layout.keep_off)
+    over = sum(1 for t, k in mine for a, b, _w in other
+               if _segs_cross(t, k, a, b, 0.0))
+    ink = sum(view_ink_crossings(layout.ctx, layout.geom, t, k)
+              for t, k in mine)
+    along = sum(1 for t, k in mine
+                if leader_runs_along(layout.ctx, layout.geom, t, k)
+                > COLLINEAR_OK)
+    return (crossings, along, over, ink)
 
 
 def balance_regresses(trial, best, trial_gap, best_gap) -> bool:
@@ -5637,10 +6063,14 @@ def balance_regresses(trial, best, trial_gap, best_gap) -> bool:
     look balanced is not better (issues #18, #29). The extension lines
     matter here because the trial SHIFTS the view group: the ink the
     earlier pass found moves with it, and a trial may meet a line the
-    seed never named."""
+    seed never named. The view's OWN ink is the same story (issue #33):
+    the shift moves the callout's anchor with the view and its knee can
+    land somewhere that reads worse, which a sheet does not become
+    better by being centred."""
     return (bool(trial.unresolved) or trial_gap >= best_gap
             or len(trial.faults) > len(best.faults)
-            or len(crossed_ext_lines(trial)) > len(crossed_ext_lines(best)))
+            or len(crossed_dim_ink(trial)) > len(crossed_dim_ink(best))
+            or leader_quality(trial) > leader_quality(best))
 
 
 def build_part_sheet(m, part, proj):
@@ -5650,7 +6080,7 @@ def build_part_sheet(m, part, proj):
     centring the view boxes alone leaves the sheet visibly lopsided
     (round-5 QA D3). Iterates on the measured imbalance and keeps the best
     fully-resolved pass."""
-    reserve, co_order, ext_ahead = None, None, ()
+    reserve, co_order, ext_ahead, off_ink = None, None, (), False
 
     def score(p):
         u = p[2].unresolved
@@ -5691,17 +6121,27 @@ def build_part_sheet(m, part, proj):
             # fewer failures wins; on a tie the pass that placed more of the
             # GD&T does, so the message names what is really in the way
             best, reserve = retry, trial_reserve
-    seeds = crossed_ext_lines(best[2])
-    if seeds:
-        # now that the sheet exists, the engine knows where the overall
-        # dimensions' extension lines are: compose once more with those
-        # as ink to keep off, and keep the pass that crosses fewer of
-        # them without losing anything else (issue #29)
-        retry = _compose_part_sheet(m, part, proj, reserve=reserve,
-                                    co_order=co_order, ext_ahead=seeds)
-        if (score(retry), len(crossed_ext_lines(retry[2]))) \
-                < (score(best), len(seeds)):
-            best, ext_ahead = retry, seeds
+    # Two things the first pass could not know: where the overall
+    # dimensions' extension lines would be, since the callouts are
+    # placed before them (issue #29), and how much of its OWN view each
+    # leader crosses on the way out (issue #33). Both are told to the
+    # engine by composing again, and they INTERACT — a callout steered
+    # off an extension line may dive across the view instead, and the
+    # pass that keeps it off the view may then clear the extension line
+    # too — so all the combinations are drawn and the one that READS
+    # best is kept (sheet_quality: the layout check's own count of
+    # faults, then the leaders' own quality). A tie keeps the earlier
+    # pass, so a sheet nothing improves is the sheet it always was.
+    seeds = crossed_dim_ink(best[2])
+    for sd, av in (((), True), (seeds, False), (seeds, True)):
+        if (sd and not seeds) or (not sd and not av):
+            continue
+        trial = _compose_part_sheet(m, part, proj, reserve=reserve,
+                                    co_order=co_order, ext_ahead=sd,
+                                    avoid_view_ink=av)
+        if (score(trial), sheet_quality(*trial[::2])) \
+                < (score(best), sheet_quality(*best[::2])):
+            best, ext_ahead, off_ink = trial, sd, av
     if best[2].unresolved:
         return best[0], best[1], best[2].report()
     ctx = best[0]
@@ -5720,7 +6160,8 @@ def build_part_sheet(m, part, proj):
             break
         trial = _compose_part_sheet(
             m, part, proj, dx=dx + shift, reserve=reserve,
-            co_order=co_order, ext_ahead=shift_segs(ext_ahead, dx + shift))
+            co_order=co_order, ext_ahead=shift_segs(ext_ahead, dx + shift),
+            avoid_view_ink=off_ink)
         tlo, thi = content_balance(trial[2])
         if balance_regresses(trial[2], best[2], abs(thi - tlo),
                              abs(hi - lo)):
@@ -5731,7 +6172,7 @@ def build_part_sheet(m, part, proj):
 
 
 def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None,
-                        co_order=None, ext_ahead=()):
+                        co_order=None, ext_ahead=(), avoid_view_ink=False):
     """One placement pass; `dx` shifts the whole view group (and therefore
     everything anchored to it) horizontally, and `reserve` keeps a slot
     under named size callouts for the GD&T hung on them (gdt_reserve).
@@ -5926,6 +6367,9 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None,
     # every black line the views draw, as segments: dimension ink is tested
     # against THIS, not just against other annotations' bounding boxes
     geom = view_geometry(ctx, view_jobs, offs, cut_segs)
+    # kept on the layout so a finished composition can be WEIGHED against
+    # another one: how much of the drawing its leaders cross (issue #33)
+    layout.geom = geom
     # annotations through the collision layout: dims and callouts first
     # (they anchor FCF stacks), then datums, frames, notes.
     # Feature-location dims go FIRST of all: standard practice puts the
@@ -5957,7 +6401,8 @@ def _compose_part_sheet(m, part, proj, dx=0.0, reserve=None,
         ctx, callouts, view_jobs, offs, by_view=co_order == "fan")
     co_recs, co_rects, suppress, co_lands, co_anchors = place_callouts(
         ctx, layout, cos, view_jobs, offs, reserve=reserve,
-        limits=co_limits, geom=geom, ext_ahead=ext_ahead)
+        limits=co_limits, geom=geom, ext_ahead=ext_ahead,
+        avoid_view_ink=avoid_view_ink)
     ctx.entities += co_recs
     dim_rects: dict = {}
 
@@ -6139,7 +6584,7 @@ def bounds_of_prims(prims):
 
 
 def continuation_sheet(m, asm, rows, analysis, sheet_of, details=(),
-                       balloons=None):
+                       balloons=None, hatch_styles=None):
     """The second sheet of an assembly drawing.
 
     Same DRG NO., "SHEET 2 OF 2" (CLAUDE.md: i OF n only within one DRG
@@ -6204,7 +6649,8 @@ def continuation_sheet(m, asm, rows, analysis, sheet_of, details=(),
         ctx.entities += recs
         emit_prims(ctx, djob["visible"], off)
         emit_prims(ctx, djob["hidden"], off, P_HIDDEN)
-        ctx.entities += section_hatches(ctx, djob, off)
+        ctx.entities += detail_hatches(ctx, djob, off,
+                                       styles=hatch_styles)[0]
         ctx.entities += detail_caption_records(ctx, layout, djob, off)
         placed_details.append((label, djob, off))
 
@@ -6418,11 +6864,16 @@ def build_assembly_sheet(m, proj):
         emit_prims(ctx, section["visible"], offs["section"])
         hrecs, hatch_report = assembly_hatches(ctx, section, offs["section"])
         ctx.entities += hrecs
+    sec_styles = hatch_report.get("hatch_styles")
     for recs, job, off, spec, of in detail_recs:
         ctx.entities += recs
         emit_prims(ctx, job["visible"], off)
         emit_prims(ctx, job["hidden"], off, P_HIDDEN)
-        ctx.entities += section_hatches(ctx, job, off)
+        hrecs, drep = detail_hatches(ctx, job, off, styles=sec_styles)
+        ctx.entities += hrecs
+        if drep:
+            hatch_report.setdefault("details", {})[
+                str(spec.get("label", "B"))] = drep
         ctx.entities += detail_marker(ctx, layout, spec, views[of], offs[of])
     for spec, of, _parent, _job in later:
         # the region is marked where it IS, on this sheet's view; the
@@ -6465,7 +6916,7 @@ def build_assembly_sheet(m, proj):
                           analysis["assembly"]["instances"])}
         all_views = dict(views, **detail_jobs)
         all_offs = dict(offs, **detail_offs)
-        plan = balloon_plan(m, all_views, id_by_path)
+        plan = balloon_plan(m, all_views, id_by_path, ctx, all_offs)
         # a balloon on a detail that is drawn on sheet 2 is drawn THERE
         elsewhere = {f"detail:{str(sp.get('label', 'B'))}"
                      for sp, _of, _p, _j in later}
@@ -6607,7 +7058,8 @@ def build_assembly_sheet(m, proj):
         n_sheets = max(2, table_report["sheets"])
         sheets.append(continuation_sheet(
             m, asm, rest_rows, analysis, [2, n_sheets],
-            details=later, balloons=later_balloons)
+            details=later, balloons=later_balloons,
+            hatch_styles=hatch_report.get("hatch_styles"))
             + ({"parts_table": {"continuation_of": asm["drg_no"]},
                 "details": [str(sp.get("label", "B"))
                             for sp, _o, _p, _j in later]},))
@@ -6665,6 +7117,10 @@ def main() -> None:
     value_findings = []
     layout_findings: list = []
     layout_warnings: list = []
+    # what the ENGINE knows it placed badly and the finished sheet cannot
+    # say for itself: a balloon whose part this view draws no ink of, a
+    # leader with no clean knee left (issues #30, #32)
+    engine_faults: list = []
     for idx, part in enumerate(drawn, start=1):
         ctx, replaced, lay = build_part_sheet(m, part, proj)
         stamp_rects[part["drg_no"]] = ctx._stamp_rect
@@ -6709,6 +7165,8 @@ def main() -> None:
                        "logo": ctx.logo_stamp()})
         if lay["unresolved"]:
             problems.append(f"{part['drg_no']}: {lay['unresolved']}")
+        engine_faults += [f"{part['drg_no']}: {f}"
+                          for f in lay.get("faults") or []]
         print(f"sheet {idx}/{total}: {out.name}  scale {part['scale']}  "
               + (f"{ctx.paper} {ctx.orientation}  "
                  if (ctx.paper, ctx.orientation) != mw.DEFAULT_PAPER else "")
@@ -6752,6 +7210,8 @@ def main() -> None:
             sheets.append(entry)
             if lay["unresolved"]:
                 problems.append(f"{drg}{suffix}: {lay['unresolved']}")
+            engine_faults += [f"{drg}{suffix}: {f}"
+                              for f in lay.get("faults") or []]
             print(f"sheet {total}/{total}: {asm_out.name}  scale "
                   f"{asm['scale']}"
                   + (f"  (nudges={lay['nudges']})" if k == 1 else ""))
@@ -6810,6 +7270,15 @@ def main() -> None:
               "the sheet")
     for line in layout_warnings:
         print(f"  warning: {line}")
+    if engine_faults:
+        # not findings ON the sheet: things the engine could not place as
+        # it wanted to, which the finished sheet cannot report for itself
+        # — the arrow of a balloon on a part no view draws alone, say,
+        # since the sheet does not say which ink is which part (#32)
+        print(f"placement: {len(engine_faults)} annotation(s) the engine "
+              "could not place as it wanted:")
+        for line in engine_faults:
+            print(f"  {line}")
     write_json(OUTPUT_MUSA_DIR / "sheets.json",
                {"manifest": str(man_path), "sheets": sheets,
                 "values_ok": not value_findings,

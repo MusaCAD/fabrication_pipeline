@@ -27,6 +27,7 @@ check the pipeline had:
 The numbers in these fixtures are measured off those sheets.
 """
 
+import math
 import sys
 import unittest
 from pathlib import Path
@@ -88,13 +89,28 @@ class ArrowheadGeometryTest(unittest.TestCase):
     def test_the_arrow_size_is_read_off_the_sheet(self):
         text = sheet(mw.dimstyle(3.0, 2.5), mw.dimstyle(6.0, 5.0),
                      mw.dimunits(1, 0.5))
-        arrows, lfacs = lc.dim_styles(text)
+        arrows, lfacs, kinds = lc.dim_styles(text)
         self.assertEqual(arrows, [2.5, 5.0])
         self.assertEqual(lfacs, {1: 0.5})
+        self.assertEqual(kinds, [0, 0])
 
     def test_a_sheet_with_no_dimstyle_falls_back(self):
         self.assertEqual(lc.dim_styles(sheet(mw.line((0, 0), (1, 1)))),
-                         ([], {}))
+                         ([], {}, []))
+
+    def test_a_dot_style_is_read_as_one(self):
+        """A balloon that ends inside its part's own cut area ends in a
+        dot, and the check models the dot rather than a triangle
+        (issue #32)."""
+        text = sheet(mw.dimstyle(3.0, 2.5),
+                     mw.dimstyle(3.0, 2.5, name="Dot", arrow_type=3))
+        self.assertEqual(lc.dim_styles(text)[2], [0, 3])
+        dot = lc.arrowhead((10.0, 10.0), (20.0, 10.0), 2.5, 3)
+        self.assertEqual(len(dot), 4)
+        self.assertTrue(all(abs(math.dist(p, (10.0, 10.0)) - 0.875) < 1e-9
+                            for p in dot), dot)
+        tri = lc.arrowhead((10.0, 10.0), (20.0, 10.0), 2.5)
+        self.assertEqual(len(tri), 3)
 
 
 class ArrowsLandTogetherTest(unittest.TestCase):
@@ -277,27 +293,31 @@ class LateInkTest(unittest.TestCase):
         self.layout = draw.Layout(self.ctx)
 
     def test_a_callout_leader_across_an_extension_line_is_collected(self):
+        """And the WHOLE dimension comes back with it (issue #33): its
+        line and both extension lines, or a callout steered off the one
+        it crossed steps onto the next one along."""
         draw._claim_dim_ink(self.ctx, self.layout, (10.0, 10.0),
                             (90.0, 10.0), (50.0, 30.0), "h", "80")
         draw._claim_leader_ink(self.ctx, self.layout, (5.0, 20.0),
                                (20.0, 20.0), "callout-%%c20")
-        got = draw.crossed_ext_lines(self.layout)
-        self.assertEqual(len(got), 1)
-        self.assertAlmostEqual(got[0][0][0], 10.0)
+        got = draw.crossed_dim_ink(self.layout)
+        self.assertEqual(len(got), 3)
+        self.assertIn(10.0, [round(a[0], 3) for a, _b in got])
+        self.assertIn(90.0, [round(a[0], 3) for a, _b in got])
 
     def test_a_balloon_s_leader_is_not_a_callout_s(self):
         draw._claim_dim_ink(self.ctx, self.layout, (10.0, 10.0),
                             (90.0, 10.0), (50.0, 30.0), "h", "80")
         draw._claim_leader_ink(self.ctx, self.layout, (5.0, 20.0),
                                (20.0, 20.0), "balloon-7-0")
-        self.assertEqual(draw.crossed_ext_lines(self.layout), [])
+        self.assertEqual(draw.crossed_dim_ink(self.layout), [])
 
     def test_a_clean_sheet_seeds_nothing(self):
         draw._claim_dim_ink(self.ctx, self.layout, (10.0, 10.0),
                             (90.0, 10.0), (50.0, 30.0), "h", "80")
         draw._claim_leader_ink(self.ctx, self.layout, (20.0, 60.0),
                                (80.0, 70.0), "callout-%%c20")
-        self.assertEqual(draw.crossed_ext_lines(self.layout), [])
+        self.assertEqual(draw.crossed_dim_ink(self.layout), [])
 
     def test_a_better_balance_may_not_buy_itself_a_crossing(self):
         """The balance pass shifts the whole view group, so the ink the
@@ -315,7 +335,7 @@ class LateInkTest(unittest.TestCase):
             return lay
 
         clean, crossing = layout_with(0), layout_with(1)
-        self.assertEqual(len(draw.crossed_ext_lines(crossing)), 1)
+        self.assertEqual(len(draw.crossed_dim_ink(crossing)), 3)
         # better balanced (a smaller gap) but one crossing worse
         self.assertTrue(draw.balance_regresses(crossing, clean, 1.0, 9.0))
         # and the same trial with nothing new against it is taken
@@ -329,6 +349,25 @@ class LateInkTest(unittest.TestCase):
         lost = layout_with(0)
         lost.unresolved.append("callout-%%c20")
         self.assertTrue(draw.balance_regresses(lost, clean, 1.0, 9.0))
+
+    def test_a_better_balance_may_not_buy_a_leader_across_the_view(self):
+        """The shift moves the callout's anchor with the view, so its
+        knee can land somewhere that reads worse — and a sheet does not
+        become better by being centred (issue #33)."""
+        def layout_with(tip):
+            lay = draw.Layout(self.ctx)
+            lay.geom = [((40.0, 0.0), (40.0, 100.0)),
+                        ((45.0, 0.0), (45.0, 100.0))]
+            draw._claim_leader_ink(self.ctx, lay, tip, (80.0, 50.0),
+                                   "callout-%%c20")
+            return lay
+
+        clear = layout_with((50.0, 50.0))       # outboard of both lines
+        across = layout_with((10.0, 50.0))      # the far side of them
+        self.assertEqual(draw.leader_quality(clear)[3], 0)
+        self.assertGreater(draw.leader_quality(across)[3], 0)
+        self.assertTrue(draw.balance_regresses(across, clear, 1.0, 9.0))
+        self.assertFalse(draw.balance_regresses(clear, across, 1.0, 9.0))
 
     def test_the_seed_travels_with_the_view_group(self):
         segs = [((10.0, 10.0), (10.0, 30.0))]
@@ -482,10 +521,12 @@ class CrowdedColumnTest(unittest.TestCase):
         self.assertIn("%%c75.50", hit[0]["what"])
         self.assertIn("%%c58 (LIP)", hit[0]["what"])
 
-    def test_the_same_two_a_millimetre_apart_are_not(self):
+    def test_the_same_two_two_millimetres_apart_are_not(self):
+        """Clear of the 1.28 mm (0.4 of a 3.2 mm height) two annotations
+        need to read apart (issue #33)."""
         text = sheet(mw.leader((60.0, 200.0), (100.0, 200.0), "%%c75.50",
                                3.2, props=A),
-                     mw.mtext((102.0, 198.8), "%%c58 (LIP)", 3.2, props=A))
+                     mw.mtext((102.0, 197.6), "%%c58 (LIP)", 3.2, props=A))
         self.assertEqual(of_kind(lc.check_sheet(text, AREA),
                                  "annotation-crowded"), [])
 
@@ -533,10 +574,11 @@ class CrowdedColumnTest(unittest.TestCase):
                                 "annotation-crowded"))
 
     def test_it_is_printed_millimetres_at_any_scale(self):
-        """The same geometry at 1:5 is five times as close in print."""
+        """The floor is PRINTED millimetres: the same two labels a sheet
+        unit apart are 1 mm apart at 1:1 and 0.2 mm apart at 1:5."""
         text = sheet(mw.leader((60.0, 200.0), (100.0, 200.0), "%%c75.50",
-                               16.0, props=A),
-                     mw.mtext((102.0, 197.0), "%%c58 (LIP)", 16.0,
+                               2.0, props=A),
+                     mw.mtext((102.0, 199.0), "%%c58 (LIP)", 2.0,
                               props=A))
         self.assertEqual(of_kind(lc.check_sheet(text, BIG, 1.0),
                                  "annotation-crowded"), [])
